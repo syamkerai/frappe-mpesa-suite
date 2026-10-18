@@ -1,0 +1,205 @@
+"""External Payments API v1 (see docs/PAYMENTS_API.md in the repo).
+
+Base path: /api/method/frappe_mpsa_payments.gateway.v1.<endpoint>
+Auth: X-Mpesa-Client-Key / X-Mpesa-Client-Secret headers (pay-page endpoints use the page token).
+"""
+
+import frappe
+from frappe.utils import cint, cstr, flt, get_datetime
+
+from ..money_in.common import EXPRESS, REGISTER, parse_transtime, tolerance
+from . import intents
+from .auth import ApiError, endpoint, rate_limit, require
+
+INTENT = intents.INTENT
+
+
+def _intent_for(client, intent_id=None, order_ref=None):
+    filters = {"client": client.name}
+    if intent_id:
+        filters["name"] = intent_id
+    elif order_ref:
+        filters["order_ref"] = order_ref
+    else:
+        raise ApiError(422, "invalid_request", "Give intent_id or order_ref.")
+    name = frappe.db.get_value(INTENT, filters, "name", order_by="creation desc")
+    if not name:
+        raise ApiError(404, "not_found", "No such payment for this client.")
+    return frappe.get_doc(INTENT, name)
+
+
+# ---------------------------------------------------------------- client endpoints
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",))
+def create_prompt(client, amount=None, phone=None, order_ref=None, idempotency_key=None, description=None,
+                  reference_doctype=None, reference_name=None, callback_url=None, metadata=None):
+    """Create a payment and send the STK prompt to ``phone`` right away."""
+    require(client, "can_prompt", "send STK prompts")
+    if not phone:
+        raise ApiError(422, "invalid_phone", "phone is required.")
+    intent, created = intents.create(
+        client, amount=amount, phone=phone, order_ref=order_ref, idempotency_key=idempotency_key,
+        description=description, reference_doctype=reference_doctype, reference_name=reference_name,
+        callback_url=callback_url, metadata=metadata,
+    )
+    if created or intent.status in ("Created", "Failed"):
+        intents.send_prompt(intent)
+    return {"payment": intents.serialize(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",))
+def create_payment_link(client, amount=None, order_ref=None, phone=None, idempotency_key=None, description=None,
+                        reference_doctype=None, reference_name=None, callback_url=None, return_url=None,
+                        metadata=None, expires_in_hours=None):
+    """Create a payment the customer completes on the hosted pay page (or by paybill)."""
+    require(client, "can_create_links", "create payment links")
+    hours = min(cint(expires_in_hours) or cint(client.link_expiry_hours) or 24, 24 * 7)
+    intent, _ = intents.create(
+        client, amount=amount, phone=phone, order_ref=order_ref, idempotency_key=idempotency_key,
+        description=description, reference_doctype=reference_doctype, reference_name=reference_name,
+        callback_url=callback_url, return_url=return_url, metadata=metadata, expires_in_minutes=hours * 60,
+    )
+    return {"payment": intents.serialize(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
+@endpoint(methods=("GET", "POST"))
+def get_status(client, intent_id=None, order_ref=None):
+    """Current state of a payment (checks Safaricom-side results first)."""
+    intent = _intent_for(client, intent_id, order_ref)
+    intent = intents.refresh(intent.name)
+    return {"payment": intents.serialize(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",))
+def resend_prompt(client, intent_id=None, order_ref=None, phone=None):
+    require(client, "can_prompt", "send STK prompts")
+    intent = _intent_for(client, intent_id, order_ref)
+    intents.send_prompt(intent, phone=phone)
+    return {"payment": intents.serialize(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",))
+def cancel(client, intent_id=None, order_ref=None):
+    intent = _intent_for(client, intent_id, order_ref)
+    intents.cancel(intent)
+    return {"payment": intents.serialize(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",))
+def verify_receipt(client, receipt=None, intent_id=None, order_ref=None, amount=None):
+    """Check an M-Pesa code a customer sent (e.g. in WhatsApp) and optionally apply it to a payment.
+
+    Returns whether the receipt exists on this company's paybills/tills, its amount and
+    time, and whether something else already claimed it.
+    """
+    require(client, "can_verify_receipts", "verify receipts")
+    code = cstr(receipt).strip().upper()
+    if not code or len(code) < 8:
+        raise ApiError(422, "invalid_receipt", "receipt must be an M-Pesa transaction code like UJIB2AMYHE.")
+
+    found = _find_receipt(client, code)
+    result = {"receipt": code, "found": bool(found)}
+    if not found:
+        return result
+    result.update(amount=found["amount"], paid_at=found["paid_at"], payer_name=found.get("payer_name"))
+
+    claimed_by = frappe.db.get_value(INTENT, {"receipt": code}, ["name", "client"], as_dict=True)
+    booked = found.get("register") and frappe.db.get_value(REGISTER, found["register"], "payment_entry")
+    result["claimed"] = bool(claimed_by or booked)
+
+    if amount is not None and abs(flt(amount) - flt(found["amount"])) > tolerance():
+        result["amount_matches"] = False
+    if not (intent_id or order_ref):
+        return result
+
+    intent = _intent_for(client, intent_id, order_ref)
+    if claimed_by and claimed_by.name != intent.name:
+        raise ApiError(409, "receipt_already_used", "This receipt already paid a different order.")
+    if intent.status != "Paid":
+        if flt(found["amount"]) + tolerance() < flt(intent.amount):
+            raise ApiError(422, "amount_too_low",
+                           f"Receipt is KES {flt(found['amount']):,.0f}; this payment needs KES {flt(intent.amount):,.0f}.")
+        intents.mark_paid(intent, code, found["amount"], get_datetime(found["paid_at"]), found.get("payer_name"),
+                          register=found.get("register"), via="Manual Attach")
+    result["payment"] = intents.serialize(intent)
+    return result
+
+
+def _find_receipt(client, code):
+    company = frappe.db.get_value("Mpesa Settings", client.mpesa_settings, "company") if frappe.get_meta(
+        "Mpesa Settings").has_field("company") else None
+    reg = frappe.db.get_value(
+        REGISTER, {"transid": code, "docstatus": ["<", 2]},
+        ["name", "transamount", "transtime", "full_name", "company"], as_dict=True,
+    )
+    if reg and (not company or not reg.company or reg.company == company):
+        when = parse_transtime(reg.transtime)
+        return {"register": reg.name, "amount": flt(reg.transamount), "paid_at": when and when.isoformat(),
+                "payer_name": reg.full_name}
+    exp = frappe.db.get_value(
+        EXPRESS, {"transaction_id": code, "status": "Completed"}, ["name", "amount", "transaction_date", "settings"], as_dict=True
+    )
+    if exp:
+        exp_company = frappe.db.get_value("Mpesa Settings", exp.settings, "company") if company else None
+        if not company or exp_company == company:
+            return {"express": exp.name, "amount": flt(exp.amount),
+                    "paid_at": exp.transaction_date and get_datetime(exp.transaction_date).isoformat()}
+    return None
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
+@endpoint(methods=("GET", "POST"))
+def list_payments(client, since=None, status=None, limit=50):
+    filters = {"client": client.name}
+    if since:
+        filters["modified"] = [">=", get_datetime(since)]
+    if status:
+        filters["status"] = cstr(status).capitalize()
+    names = frappe.get_all(INTENT, filters=filters, pluck="name", order_by="modified desc",
+                           limit=min(cint(limit) or 50, 200))
+    return {"payments": [intents.serialize(frappe.get_doc(INTENT, n)) for n in names]}
+
+
+# ---------------------------------------------------------------- pay page (token, no client auth)
+def _intent_by_token(token):
+    token = cstr(token).strip()
+    if len(token) != 32:
+        raise ApiError(404, "not_found", "Payment not found.")
+    name = frappe.db.get_value(INTENT, {"pay_token": token}, "name")
+    if not name:
+        raise ApiError(404, "not_found", "Payment not found.")
+    return frappe.get_doc(INTENT, name)
+
+
+def page_view(intent) -> dict:
+    """What the public page may show: no customer data beyond the masked phone."""
+    data = intents.serialize(intent)
+    return {k: data[k] for k in ("status", "amount", "currency", "phone", "receipt", "failure_reason", "expires_at", "paybill")} | {
+        "description": intent.description,
+        "order_ref": intent.order_ref,
+        "return_url": intent.return_url if intent.status == "Paid" else None,
+    }
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",), authenticated=False)
+def page_prompt(token=None, phone=None):
+    rate_limit(f"page:{getattr(frappe.local, 'request_ip', '')}", 20)
+    intent = _intent_by_token(token)
+    rate_limit(f"page-intent:{intent.name}", 3)
+    intents.send_prompt(intent, phone=phone)
+    return {"payment": page_view(intent)}
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+@endpoint(methods=("GET",), authenticated=False)
+def page_status(token=None):
+    rate_limit(f"page-status:{getattr(frappe.local, 'request_ip', '')}", 120)
+    intent = intents.refresh(_intent_by_token(token).name)
+    return {"payment": page_view(intent)}
+

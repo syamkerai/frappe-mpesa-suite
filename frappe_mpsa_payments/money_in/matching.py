@@ -139,6 +139,10 @@ def match_register(name: str) -> Match | None:
         log_match("Unmatched", register=register, once=True, details=f"Account reference: {register.billrefnumber or '-'}")
         return None
 
+    if match.get("hold"):
+        log_match("Matched", match.method, register=register, once=True, details=match.details)
+        return None
+
     if match.get("ambiguous"):
         log_match(
             "Ambiguous",
@@ -173,6 +177,20 @@ def resolve_reference(register) -> Match | None:
     ref = cstr(register.billrefnumber).strip()
     if compact(ref) in NOT_A_REFERENCE:
         return None
+
+    if frappe.db.exists("Mpesa Payment Intent", ref):
+        # paid against an external-API payment (chatbot / web shop)
+        it = frappe.db.get_value(
+            "Mpesa Payment Intent", ref, ["reference_doctype", "reference_name", "customer", "order_ref"], as_dict=True
+        )
+        details = f"Payment intent {ref} ({it.order_ref})"
+        if it.reference_doctype in ("Sales Order", "Sales Invoice") and it.reference_name:
+            customer = it.customer or frappe.db.get_value(it.reference_doctype, it.reference_name, "customer")
+            return Match(method="Reference", doctype=it.reference_doctype, name=it.reference_name,
+                         customer=customer, details=details)
+        if it.customer:
+            return Match(method="Reference", doctype="Customer", name=it.customer, customer=it.customer, details=details)
+        return Match(method="Reference", hold=True, details=details + ": no customer or document, left for staff")
 
     if frappe.db.exists("Payment Request", ref):
         pr = frappe.db.get_value(

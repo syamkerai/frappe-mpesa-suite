@@ -71,6 +71,9 @@ doctype_js = {
 # include app icons in desk
 # app_include_icons = "frappe_mpsa_payments/public/icons.svg"
 
+# Public pay page for Payment Intents: /pay/<token>
+website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
+
 # Home Pages
 # ----------
 
@@ -188,7 +191,8 @@ scheduler_events = {
             "frappe_mpsa_payments.services.b2c_scheduler_service.update_b2c_disbursement_statuses"
         ],
         "*/2 * * * *": ["frappe_mpsa_payments.money_in.events.every_two_minutes"],
-        "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"]
+        "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"],
+        "* * * * *": ["frappe_mpsa_payments.gateway.jobs.every_minute"],
     },
     "hourly": [
         "frappe_mpsa_payments.services.b2c_pull_transaction_scheduler_service.run_hourly_pull_transactions"

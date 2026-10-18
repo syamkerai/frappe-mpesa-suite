@@ -88,6 +88,30 @@ written once per receipt and result.
 Tests: `money_in/test_money_in.py` (bootstraps its own KES company via the setup wizard, so it
 runs on v15 and v16).
 
+## Phase 3 — External Payments API, pay page, signed webhooks
+
+Package `frappe_mpsa_payments/gateway/`, full reference in [docs/PAYMENTS_API.md](docs/PAYMENTS_API.md).
+
+- **Mpesa API Client**: one record per chatbot or shop. It holds the API key and an encrypted secret
+  (shown once), the paybill to prompt from, per-action permissions, max amount, rate limit, IP
+  allow-list, webhook URL with its signing secret, and the hosts allowed for callback and return URLs.
+- **Mpesa Payment Intent**: one payment the client asked for. Its name is the M-Pesa account
+  number, so it settles through whichever message arrives: the STK callback, the C2B
+  confirmation, a Pull sweep, or a receipt code the customer typed (`verify_receipt`).
+  Paid intents linked to a Sales Order or Invoice are booked through the money-in pipeline.
+- Endpoints: `create_prompt`, `create_payment_link`, `get_status`, `resend_prompt`, `cancel`,
+  `verify_receipt`, `list_payments`.
+  - Requests carry `X-Mpesa-Client-Key` / `X-Mpesa-Client-Secret` headers.
+  - Responses use a JSON envelope with real HTTP status codes.
+  - Idempotency keys prevent a repeated call from prompting twice.
+  - A receipt can pay only one intent.
+- **Public pay page** `/pay/<token>`: amount, description, phone box, live status, paybill fallback.
+  It is rate-limited and capped at 5 prompts per payment, and shows nothing beyond the masked phone.
+- **Webhooks**: `payment.succeeded|failed|expired|cancelled`, signed
+  `X-Mpesa-Signature: t=…,v1=HMAC-SHA256`, retried with backoff for about a day, and logged in
+  **Mpesa Webhook Delivery** with a *Send Now* button.
+- Every-minute job settles prompts whose callback never came and expires stale intents.
+
 ## Rollout at Astral (staging copy first)
 1. `bench get-app` this branch, `bench --site <site> migrate`. Existing records keep their data
    (fields upstream removed from the JSON are recreated as custom fields with the same names).
