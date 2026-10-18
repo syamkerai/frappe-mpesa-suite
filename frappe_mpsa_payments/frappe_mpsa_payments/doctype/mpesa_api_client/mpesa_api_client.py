@@ -18,8 +18,6 @@ class MpesaAPIClient(Document):
             self.api_key = "mpk_" + frappe.generate_hash(length=24)
         if self.webhook_url:
             validate_https(self.webhook_url, _("Webhook URL"))
-            if not self.get_password("webhook_secret", raise_exception=False):
-                self.webhook_secret = "whsec_" + frappe.generate_hash(length=40)
         if self.allowed_ips and not parse_allowlist(self.allowed_ips):
             frappe.throw(_("Allowed Source IPs has no valid IP or CIDR."))
         api_type = frappe.db.get_value("Mpesa Settings", self.mpesa_settings, "api_type")
@@ -27,11 +25,14 @@ class MpesaAPIClient(Document):
             frappe.throw(_("Prompts must be sent from an MPesa Express record, not {0}.").format(api_type))
 
     def before_insert(self):
+        # Both secrets always exist, so per-payment callback_url webhooks are signed too.
         self._new_secret = "mps_" + frappe.generate_hash(length=40)
+        self._new_webhook_secret = "whsec_" + frappe.generate_hash(length=40)
         self.api_secret = self._new_secret
+        self.webhook_secret = self._new_webhook_secret
 
     def after_insert(self):
-        show_secret_once(self.api_key, self._new_secret, self.get_password("webhook_secret", raise_exception=False))
+        show_secret_once(self.api_key, self._new_secret, self._new_webhook_secret)
 
     @frappe.whitelist()
     def generate_new_secret(self):
@@ -60,10 +61,15 @@ class MpesaAPIClient(Document):
 
 
 def validate_https(url: str, label: str) -> None:
+    from ....gateway.netguard import is_public_url
+
     parsed = urlparse(url or "")
-    local = (parsed.hostname or "") in ("localhost", "127.0.0.1")
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and (local or frappe.conf.developer_mode)):
-        frappe.throw(_("{0} must start with https://").format(label))
+    if frappe.conf.developer_mode:
+        return  # local receivers allowed while developing
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        frappe.throw(_("{0} must start with https:// and contain no credentials").format(label))
+    if not is_public_url(url):
+        frappe.throw(_("{0} must point to a public internet address, not this server's network").format(label))
 
 
 def show_secret_once(api_key: str, secret: str, webhook_secret: str | None = None) -> None:

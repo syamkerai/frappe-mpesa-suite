@@ -442,6 +442,10 @@ def create_custom_erpnext_fields():
             },
         ],
     }
+    # Frappe adds the DB columns only after a whole create_custom_fields batch. B2C Payment
+    # Disbursement's Links table points at these two link fields, so on a fresh install its
+    # validation ran before the columns existed ("Unknown column ... b2c_payment_disbursement").
+    create_fields({dt: custom_fields.pop(dt) for dt in ("Payment Entry Reference", "Journal Entry Account")})
     create_fields(custom_fields)
 
 

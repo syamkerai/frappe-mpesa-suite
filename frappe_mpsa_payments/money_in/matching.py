@@ -184,6 +184,10 @@ def resolve_reference(register) -> Match | None:
             "Mpesa Payment Intent", ref, ["reference_doctype", "reference_name", "customer", "order_ref"], as_dict=True
         )
         details = f"Payment intent {ref} ({it.order_ref})"
+        if frappe.db.exists("Mpesa Express Request", {"reference_doctype": "Mpesa Payment Intent", "reference_name": ref}):
+            # prompted intents are booked by the gateway straight from the receipt; submitting this
+            # register would be undone when the STK callback lands (upstream cancels duplicates)
+            return Match(method="Reference", hold=True, details=details + ": booked by the payment intent")
         if it.reference_doctype in ("Sales Order", "Sales Invoice") and it.reference_name:
             customer = it.customer or frappe.db.get_value(it.reference_doctype, it.reference_name, "customer")
             return Match(method="Reference", doctype=it.reference_doctype, name=it.reference_name,

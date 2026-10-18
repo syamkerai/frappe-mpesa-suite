@@ -60,11 +60,25 @@ def queue(intent) -> str | None:
 
 
 def deliver(delivery_name: str, force: bool = False) -> str:
+    if not frappe.db.exists(DELIVERY, delivery_name):
+        return "Missing"  # its transaction was rolled back after the job was queued
     delivery = frappe.get_doc(DELIVERY, delivery_name)
     if delivery.status == "Delivered" or (delivery.status == "Failed" and not force):
         return delivery.status
     client = frappe.get_doc("Mpesa API Client", delivery.client)
-    secret = client.get_password("webhook_secret", raise_exception=False) or ""
+    secret = client.get_password("webhook_secret", raise_exception=False)
+    if not secret or not client.enabled:
+        reason = "Client is disabled" if not client.enabled else "Client has no webhook signing secret; rotate it on the client"
+        frappe.db.set_value(DELIVERY, delivery.name, {"status": "Failed", "last_error": reason, "next_attempt_at": None},
+                            update_modified=False)
+        return "Failed"
+    if not frappe.conf.developer_mode:
+        from .netguard import is_public_url
+
+        if not is_public_url(delivery.url):  # re-checked at send time (DNS can change)
+            frappe.db.set_value(DELIVERY, delivery.name, {"status": "Failed", "next_attempt_at": None,
+                                "last_error": "URL resolves to a private or invalid address"}, update_modified=False)
+            return "Failed"
     body = delivery.payload or "{}"
     headers = {
         "Content-Type": "application/json",

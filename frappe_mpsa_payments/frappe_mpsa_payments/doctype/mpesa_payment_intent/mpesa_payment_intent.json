@@ -72,7 +72,8 @@
    "default": "Created",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "amount",
@@ -127,7 +128,8 @@
    "fieldtype": "Data",
    "label": "M-Pesa Receipt",
    "read_only": 1,
-   "search_index": 1
+   "search_index": 1,
+   "unique": 1
   },
   {
    "fieldname": "paid_amount",
@@ -166,8 +168,7 @@
   },
   {
    "fieldname": "register",
-   "fieldtype": "Link",
-   "options": "Mpesa C2B Payment Register",
+   "fieldtype": "Data",
    "label": "C2B Register",
    "read_only": 1
   },
@@ -195,7 +196,8 @@
    "fieldname": "expires_at",
    "fieldtype": "Datetime",
    "label": "Expires At",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "column_break_d",
@@ -203,13 +205,13 @@
   },
   {
    "fieldname": "callback_url",
-   "fieldtype": "Data",
+   "fieldtype": "Small Text",
    "label": "Callback URL",
    "read_only": 1
   },
   {
    "fieldname": "return_url",
-   "fieldtype": "Data",
+   "fieldtype": "Small Text",
    "label": "Return URL",
    "read_only": 1
   },

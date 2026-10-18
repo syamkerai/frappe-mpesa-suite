@@ -5,7 +5,7 @@ Auth: X-Mpesa-Client-Key / X-Mpesa-Client-Secret headers (pay-page endpoints use
 """
 
 import frappe
-from frappe.utils import cint, cstr, flt, get_datetime
+from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, now_datetime
 
 from ..money_in.common import EXPRESS, REGISTER, parse_transtime, tolerance
 from . import intents
@@ -54,7 +54,7 @@ def create_payment_link(client, amount=None, order_ref=None, phone=None, idempot
                         metadata=None, expires_in_hours=None):
     """Create a payment the customer completes on the hosted pay page (or by paybill)."""
     require(client, "can_create_links", "create payment links")
-    hours = min(cint(expires_in_hours) or cint(client.link_expiry_hours) or 24, 24 * 7)
+    hours = min(max(1, cint(expires_in_hours) or cint(client.link_expiry_hours) or 24), 24 * 7)
     intent, _ = intents.create(
         client, amount=amount, phone=phone, order_ref=order_ref, idempotency_key=idempotency_key,
         description=description, reference_doctype=reference_doctype, reference_name=reference_name,
@@ -94,61 +94,96 @@ def cancel(client, intent_id=None, order_ref=None):
 def verify_receipt(client, receipt=None, intent_id=None, order_ref=None, amount=None):
     """Check an M-Pesa code a customer sent (e.g. in WhatsApp) and optionally apply it to a payment.
 
-    Returns whether the receipt exists on this company's paybills/tills, its amount and
-    time, and whether something else already claimed it.
+    Only receipts on this client's company paybills/tills are visible. A receipt that is
+    already booked or claimed cannot be applied again, and only receipts from the last
+    72 hours (and not older than the payment itself) can be applied.
     """
     require(client, "can_verify_receipts", "verify receipts")
-    code = cstr(receipt).strip().upper()
-    if not code or len(code) < 8:
+    code = cstr(receipt).strip().upper() if isinstance(receipt, str) else ""
+    if not code or len(code) < 8 or not code.isalnum():
         raise ApiError(422, "invalid_receipt", "receipt must be an M-Pesa transaction code like UJIB2AMYHE.")
 
     found = _find_receipt(client, code)
     result = {"receipt": code, "found": bool(found)}
     if not found:
         return result
-    result.update(amount=found["amount"], paid_at=found["paid_at"], payer_name=found.get("payer_name"))
-
-    claimed_by = frappe.db.get_value(INTENT, {"receipt": code}, ["name", "client"], as_dict=True)
-    booked = found.get("register") and frappe.db.get_value(REGISTER, found["register"], "payment_entry")
-    result["claimed"] = bool(claimed_by or booked)
-
-    if amount is not None and abs(flt(amount) - flt(found["amount"])) > tolerance():
-        result["amount_matches"] = False
+    claimed_by = _claimed_by(code, found)
+    result.update(amount=found["amount"], paid_at=found["paid_at"] and found["paid_at"].isoformat(),
+                  payer_name=found.get("payer_name"), claimed=bool(claimed_by))
+    if amount is not None:
+        result["amount_matches"] = abs(flt(amount) - flt(found["amount"])) <= tolerance()
     if not (intent_id or order_ref):
         return result
 
     intent = _intent_for(client, intent_id, order_ref)
-    if claimed_by and claimed_by.name != intent.name:
-        raise ApiError(409, "receipt_already_used", "This receipt already paid a different order.")
     if intent.status != "Paid":
+        if claimed_by and claimed_by != intent.name:
+            raise ApiError(409, "receipt_already_used", "This receipt has already been used.")
+        paid_at = found["paid_at"]
+        if not paid_at or paid_at < add_to_date(now_datetime(), hours=-RECEIPT_MAX_AGE_HOURS):
+            raise ApiError(422, "receipt_too_old", f"Only receipts from the last {RECEIPT_MAX_AGE_HOURS} hours can be applied.")
+        if paid_at < add_to_date(get_datetime(intent.creation), minutes=-10):
+            raise ApiError(422, "receipt_before_order", "This receipt was paid before the order was created.")
         if flt(found["amount"]) + tolerance() < flt(intent.amount):
             raise ApiError(422, "amount_too_low",
                            f"Receipt is KES {flt(found['amount']):,.0f}; this payment needs KES {flt(intent.amount):,.0f}.")
-        intents.mark_paid(intent, code, found["amount"], get_datetime(found["paid_at"]), found.get("payer_name"),
-                          register=found.get("register"), via="Manual Attach")
+        intents.mark_paid(intent, code, found["amount"], paid_at, found.get("payer_name"),
+                          register=found.get("register"), via="Manual Attach", settings=found.get("settings"))
+        intent.reload()
     result["payment"] = intents.serialize(intent)
     return result
 
 
+RECEIPT_MAX_AGE_HOURS = 72
+
+
+def _client_shortcodes(client) -> dict:
+    """{shortcode or till: Mpesa Settings name} for the client's company (or its own settings)."""
+    company = intents.client_company(client)
+    filters = {"company": company} if company else {"name": client.mpesa_settings}
+    out = {}
+    for row in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "business_shortcode", "till_number"],
+                              order_by="creation asc"):
+        for code in (row.business_shortcode, row.till_number):
+            if cstr(code).strip():
+                out[cstr(code).strip()] = row.name
+    return out
+
+
 def _find_receipt(client, code):
-    company = frappe.db.get_value("Mpesa Settings", client.mpesa_settings, "company") if frappe.get_meta(
-        "Mpesa Settings").has_field("company") else None
+    shortcodes = _client_shortcodes(client)
     reg = frappe.db.get_value(
         REGISTER, {"transid": code, "docstatus": ["<", 2]},
-        ["name", "transamount", "transtime", "full_name", "company"], as_dict=True,
+        ["name", "transamount", "transtime", "full_name", "businessshortcode"], as_dict=True,
     )
-    if reg and (not company or not reg.company or reg.company == company):
-        when = parse_transtime(reg.transtime)
-        return {"register": reg.name, "amount": flt(reg.transamount), "paid_at": when and when.isoformat(),
-                "payer_name": reg.full_name}
+    if reg and cstr(reg.businessshortcode).strip() in shortcodes:
+        return {"register": reg.name, "amount": flt(reg.transamount), "paid_at": parse_transtime(reg.transtime),
+                "payer_name": reg.full_name, "settings": shortcodes[cstr(reg.businessshortcode).strip()]}
     exp = frappe.db.get_value(
-        EXPRESS, {"transaction_id": code, "status": "Completed"}, ["name", "amount", "transaction_date", "settings"], as_dict=True
+        EXPRESS, {"transaction_id": code, "status": "Completed"},
+        ["name", "amount", "transaction_date", "settings", "reference_doctype", "reference_name", "is_reconciled"],
+        as_dict=True,
     )
-    if exp:
-        exp_company = frappe.db.get_value("Mpesa Settings", exp.settings, "company") if company else None
-        if not company or exp_company == company:
-            return {"express": exp.name, "amount": flt(exp.amount),
-                    "paid_at": exp.transaction_date and get_datetime(exp.transaction_date).isoformat()}
+    if exp and exp.settings in set(shortcodes.values()):
+        return {"express": exp, "amount": flt(exp.amount), "settings": exp.settings,
+                "paid_at": exp.transaction_date and get_datetime(exp.transaction_date)}
+    return None
+
+
+def _claimed_by(code: str, found: dict) -> str | None:
+    """Who already owns this receipt: an intent name, or a marker for booked/reconciled money."""
+    owner = frappe.db.get_value(INTENT, {"receipt": code}, "name")
+    if owner:
+        return owner
+    if frappe.db.exists("Payment Entry", {"reference_no": code, "docstatus": 1}):
+        return "booked"
+    if found.get("register"):
+        reg = frappe.db.get_value(REGISTER, found["register"], ["docstatus", "payment_entry"], as_dict=True)
+        if reg.docstatus == 1 or reg.payment_entry:
+            return "booked"
+    exp = found.get("express")
+    if exp and exp.reference_doctype != INTENT and exp.is_reconciled:
+        return "booked"
     return None
 
 
@@ -157,7 +192,10 @@ def _find_receipt(client, code):
 def list_payments(client, since=None, status=None, limit=50):
     filters = {"client": client.name}
     if since:
-        filters["modified"] = [">=", get_datetime(since)]
+        try:
+            filters["modified"] = [">=", get_datetime(since)]
+        except Exception:
+            raise ApiError(422, "invalid_request", "since must be a date or datetime, e.g. 2026-10-18T09:00:00.")
     if status:
         filters["status"] = cstr(status).capitalize()
     names = frappe.get_all(INTENT, filters=filters, pluck="name", order_by="modified desc",
@@ -192,12 +230,13 @@ def page_prompt(token=None, phone=None):
     rate_limit(f"page:{getattr(frappe.local, 'request_ip', '')}", 20)
     intent = _intent_by_token(token)
     rate_limit(f"page-intent:{intent.name}", 3)
-    intents.send_prompt(intent, phone=phone)
+    # a phone fixed by the merchant cannot be redirected from the public page
+    intents.send_prompt(intent, phone=None if intent.phone else phone)
     return {"payment": page_view(intent)}
 
 
-@frappe.whitelist(allow_guest=True, methods=["GET"])
-@endpoint(methods=("GET",), authenticated=False)
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+@endpoint(methods=("POST",), authenticated=False)
 def page_status(token=None):
     rate_limit(f"page-status:{getattr(frappe.local, 'request_ip', '')}", 120)
     intent = intents.refresh(_intent_by_token(token).name)

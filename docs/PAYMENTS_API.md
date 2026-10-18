@@ -111,9 +111,12 @@ curl "$BASE.get_status?order_ref=WA-5521" -H "X-Mpesa-Client-Key: $KEY" -H "X-Mp
 curl -X POST "$BASE.verify_receipt" -H "X-Mpesa-Client-Key: $KEY" -H "X-Mpesa-Client-Secret: $SECRET" \
   -d receipt=UJIB2AMYHE -d order_ref=WA-5521
 ```
-Returns `found`, `amount`, `paid_at`, `payer_name` and `claimed`. When `intent_id` or
-`order_ref` is given and the receipt is unclaimed and covers the amount, the payment becomes
-`paid`. Only receipts on this company's paybills and tills are found.
+Returns `found`, `amount`, `paid_at`, `payer_name` and `claimed`.
+- Only receipts on this company's paybills and tills are found.
+- When `intent_id` or `order_ref` is given, the payment becomes `paid` only if the receipt
+  - is not booked or claimed already,
+  - is from the last 72 hours and not older than the payment,
+  - covers the amount.
 
 ## 4. Webhooks
 
@@ -157,8 +160,9 @@ function verify(secret, rawBody, header, tolerance = 300) {
   const parts = Object.fromEntries(header.split(",").map((p) => p.split("=")));
   const ts = Number(parts.t);
   if (Math.abs(Date.now() / 1000 - ts) > tolerance) return false;
-  const expected = crypto.createHmac("sha256", secret).update(`${ts}.`).update(rawBody).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1 || ""));
+  const expected = Buffer.from(crypto.createHmac("sha256", secret).update(`${ts}.`).update(rawBody).digest("hex"));
+  const given = Buffer.from(parts.v1 || "");
+  return given.length === expected.length && crypto.timingSafeEqual(expected, given);
 }
 ```
 
@@ -179,15 +183,23 @@ function verify(secret, rawBody, header, tolerance = 300) {
 | 401 | `unauthenticated` | Missing or wrong key/secret, or the client is disabled |
 | 403 | `not_allowed`, `ip_not_allowed` | The action is not enabled for this client, or the source IP is blocked |
 | 404 | `not_found`, `reference_not_found` | Unknown payment or document |
-| 405 | `method_not_allowed` | Wrong HTTP method |
-| 409 | `idempotency_conflict`, `not_payable`, `already_paid`, `receipt_already_used` | State conflict |
-| 422 | `invalid_request`, `invalid_amount`, `amount_too_large`, `invalid_phone`, `invalid_receipt`, `invalid_reference`, `invalid_url`, `amount_too_low` | Bad input |
+| 403 | (Frappe error body) | Wrong HTTP method; Frappe rejects it before the API runs |
+| 409 | `idempotency_conflict`, `not_payable`, `already_paid`, `receipt_already_used`, `prompt_pending` | State conflict |
+| 422 | `invalid_request`, `invalid_amount`, `amount_too_large`, `invalid_phone`, `invalid_receipt`, `invalid_reference`, `invalid_url`, `amount_too_low`, `receipt_too_old`, `receipt_before_order` | Bad input |
 | 429 | `rate_limited`, `too_many_prompts` | Slow down; the per-minute limit is set on the client |
 | 502 | `prompt_failed` | Safaricom did not accept the prompt; the message says why |
 | 500 | `server_error` | Logged in the ERP Error Log |
 
 ## 7. Security notes
 
+- Webhook and callback URLs must use https and resolve to public addresses. This is checked when
+  a URL is saved and again before every delivery.
+- `resend_prompt` is refused for 90 seconds after a prompt, so the customer gets one prompt at a
+  time.
+- **Deployment:** the per-client IP allow-list and the pay-page rate limits use the client
+  address Frappe sees (the first `X-Forwarded-For` entry). Make sure the reverse proxy (nginx)
+  overwrites `X-Forwarded-For` instead of appending to a client-supplied one. Otherwise a caller
+  can fake its address.
 - Keep the API secret on your server. It must never be shipped in a mobile app or a web page.
 - The pay page shows only the amount, description, masked phone and paybill details. It is
   rate-limited and allows 3 prompts per minute per payment and 5 per payment in total.

@@ -123,6 +123,40 @@ class TestPaymentsAPI(IntegrationTestCase):
             intents.mark_paid(frappe.get_doc(intents.INTENT, b.name), code, 200, now_datetime(), None)
         self.assertEqual(ctx.exception.status, 409)
 
+    @patch(EXPRESS_CLASS, fake_stk_accepted)
+    def test_prompted_intent_books_directly_and_keeps_register_draft(self):
+        t.enable_money_in()
+        cust = t.customer("_Test Gateway Customer")
+        si = t.sales_invoice(cust, 1500)
+        intent = self._intent(reference_doctype="Sales Invoice", reference_name=si.name)
+        intents.send_prompt(intent)
+        reg = t.receipt(1500, billref=intent.name)  # C2B confirmation arrived before the STK callback
+        intents.refresh(intent.name)
+        receipt = frappe.db.get_value("Mpesa C2B Payment Register", reg, "transid")
+        pe = frappe.db.get_value("Payment Entry", {"reference_no": receipt, "docstatus": 1}, "name")
+        self.assertTrue(pe, "booked straight from the receipt")
+        self.assertEqual(frappe.db.get_value("Mpesa C2B Payment Register", reg, "docstatus"), 0,
+                         "register must stay draft: upstream cancels it when the STK callback lands")
+        self.assertEqual(frappe.db.get_value("Sales Invoice", si.name, "outstanding_amount"), 0)
+
+    @patch(EXPRESS_CLASS, fake_stk_accepted)
+    def test_resend_is_refused_while_prompt_pending(self):
+        intent = self._intent()
+        intents.send_prompt(intent)
+        with self.assertRaises(ApiError) as ctx:
+            intents.send_prompt(frappe.get_doc(intents.INTENT, intent.name))
+        self.assertEqual(ctx.exception.code, "prompt_pending")
+
+    def test_booked_receipt_cannot_be_applied(self):
+        si = t.sales_invoice(t.customer("_Test Gateway Customer"), 650)
+        reg = t.receipt(650, billref=si.name)
+        from frappe_mpsa_payments.money_in import matching
+
+        matching.match_register(reg)  # books it against the invoice
+        code = frappe.db.get_value("Mpesa C2B Payment Register", reg, "transid")
+        found = v1._find_receipt(self.client, code)
+        self.assertEqual(v1._claimed_by(code, found), "booked")
+
     def test_expiry_and_cancel(self):
         intent = self._intent()
         frappe.db.set_value(intents.INTENT, intent.name, "expires_at", add_to_date(now_datetime(), minutes=-1))

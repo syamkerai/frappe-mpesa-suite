@@ -26,9 +26,21 @@ CLIENT = "Mpesa API Client"
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str):
+    """``rollback=False``: keep this call's writes (e.g. a failed prompt that upstream already
+    committed, or an intent we just marked Expired) and still answer with the error."""
+
+    def __init__(self, status: int, code: str, message: str, rollback: bool = True):
         super().__init__(message)
-        self.status, self.code, self.message = status, code, message
+        self.status, self.code, self.message, self.rollback = status, code, message, rollback
+
+
+def undo(save_point: str = "mpesa_api") -> None:
+    """Roll back to our savepoint. Upstream M-Pesa code commits mid-request (which drops
+    savepoints); then only work done since that commit can be undone."""
+    try:
+        frappe.db.rollback(save_point=save_point)
+    except Exception:
+        frappe.db.rollback()
 
 
 def _header(name: str) -> str | None:
@@ -84,17 +96,26 @@ def _clean(message) -> str:
 def endpoint(methods=("POST",), authenticated: bool = True):
     """Wrap a guest-whitelisted function as an API endpoint (put under @frappe.whitelist(allow_guest=True)).
 
-    Authenticated endpoints receive the client as their first argument.
+    Authenticated endpoints receive the client as their first argument; a ``client`` sent by
+    the caller is ignored.
     """
 
     def decorator(fn):
-        params = inspect.signature(fn).parameters
-        accepts = {p.name for p in params.values()}
-        varkw = any(p.kind == p.VAR_KEYWORD for p in params.values())
+        params = list(inspect.signature(fn).parameters.values())
+        if authenticated:
+            params = params[1:]  # first parameter is the authenticated client
+        accepts = {p.name for p in params}
+        varkw = any(p.kind == p.VAR_KEYWORD for p in params)
+
+        def fail(status: int, code: str, message: str) -> dict:
+            frappe.clear_messages()
+            frappe.local.response["http_status_code"] = status
+            return {"ok": False, "error": {"code": code, "message": message}}
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            kwargs.pop("cmd", None)
+            for reserved in ("cmd", "client"):
+                kwargs.pop(reserved, None)
             request = getattr(frappe.local, "request", None)
             frappe.db.savepoint("mpesa_api")  # undo only this call's writes on error
             try:
@@ -109,21 +130,27 @@ def endpoint(methods=("POST",), authenticated: bool = True):
                         result = fn(*args, **call_kwargs)
                 # GET requests are rolled back unless flagged; status checks may settle a payment
                 frappe.local.flags.commit = True
+                frappe.clear_messages()
                 return {"ok": True, **(result or {})}
             except ApiError as e:
-                frappe.db.rollback(save_point="mpesa_api")
-                frappe.local.response["http_status_code"] = e.status
-                return {"ok": False, "error": {"code": e.code, "message": e.message}}
-            except (frappe.ValidationError, frappe.DoesNotExistError, frappe.PermissionError) as e:
-                frappe.db.rollback(save_point="mpesa_api")
-                frappe.local.response["http_status_code"] = 404 if isinstance(e, frappe.DoesNotExistError) else 422
-                frappe.clear_messages()
-                return {"ok": False, "error": {"code": "invalid_request", "message": _clean(e)}}
+                if e.rollback:
+                    undo()
+                else:
+                    frappe.local.flags.commit = True
+                return fail(e.status, e.code, e.message)
+            except frappe.PermissionError as e:
+                undo()
+                return fail(403, "not_allowed", _clean(e))
+            except frappe.DoesNotExistError as e:
+                undo()
+                return fail(404, "not_found", _clean(e))
+            except frappe.ValidationError as e:
+                undo()
+                return fail(422, "invalid_request", _clean(e))
             except Exception:
-                frappe.db.rollback(save_point="mpesa_api")
+                undo()
                 frappe.log_error(frappe.get_traceback(), f"M-Pesa Payments API: {fn.__name__}")
-                frappe.local.response["http_status_code"] = 500
-                return {"ok": False, "error": {"code": "server_error", "message": "Unexpected error; it has been logged."}}
+                return fail(500, "server_error", "Unexpected error; it has been logged.")
 
         return wrapper
 

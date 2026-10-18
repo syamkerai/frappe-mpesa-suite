@@ -14,14 +14,13 @@ def get_context(context):
     from frappe_mpsa_payments.gateway.auth import ApiError
     from frappe_mpsa_payments.gateway.v1 import _intent_by_token, page_view
 
-    frappe.local.response["headers"] = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
     token = frappe.form_dict.get("token") or ""
     context.no_cache = 1
     context.show_sidebar = False
     try:
         intent = _intent_by_token(token)
     except ApiError:
-        frappe.local.response["http_status_code"] = 404
+        context.http_status_code = 404  # read by the template page renderer
         context.payment = None
         context.title = _("Payment not found")
         return context
@@ -35,6 +34,7 @@ def get_context(context):
     ) if frappe.get_meta("Mpesa Settings").has_field("company") else None
 
     context.payment = view
+    context.phone_locked = bool(intent.phone)  # merchant fixed the number: page cannot redirect the prompt
     context.token = token
     context.merchant = company or frappe.db.get_single_value("Website Settings", "app_name") or "M-Pesa"
     context.title = _("Pay {0}").format(context.merchant)
