@@ -1,7 +1,7 @@
 app_name = "frappe_mpsa_payments"
-app_title = "Frappe Mpesa Payments"
-app_publisher = "Navari Limited"
-app_description = "Frappe Mpesa Payments"
+app_title = "M-Pesa Suite"
+app_publisher = "Navari Limited, Astral Industries Limited"
+app_description = "M-Pesa C2B, STK, B2C, B2B, bank feeds and reconciliation (Frappe/ERPNext v15 + v16)"
 app_email = "support@navari.co.ke"
 app_license = "agpl-3.0"
 # required_apps = ["erpnext", "hrms", "lending"]
@@ -24,15 +24,14 @@ fixtures = [
 
 
 # Each item in the list will be shown as an app in the apps page
-# add_to_apps_screen = [
-# 	{
-# 		"name": "frappe_mpsa_payments",
-# 		"logo": "/assets/frappe_mpsa_payments/logo.png",
-# 		"title": "Frappe Mpesa Payments",
-# 		"route": "/frappe_mpsa_payments",
-# 		"has_permission": "frappe_mpsa_payments.api.permission.has_app_permission"
-# 	}
-# ]
+add_to_apps_screen = [
+    {
+        "name": "frappe_mpsa_payments",
+        "logo": "/assets/frappe_mpsa_payments/m-pesa.png",
+        "title": "M-Pesa",
+        "route": "/app/m-pesa",
+    }
+]
 
 # Includes in <head>
 # ------------------
@@ -102,7 +101,7 @@ doctype_js = {
 # ------------
 
 # before_install = "frappe_mpsa_payments.install.before_install"
-# after_install = "frappe_mpsa_payments.frappe_mpsa_payments.migrate.after_migrate"
+after_install = "frappe_mpsa_payments.install.after_install"
 
 # Uninstallation
 # ------------

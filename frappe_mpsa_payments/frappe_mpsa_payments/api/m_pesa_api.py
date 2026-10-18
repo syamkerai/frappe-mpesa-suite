@@ -11,7 +11,9 @@ import requests
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt
-from requests.auth import HTTPBasicAuth
+
+from ...daraja.callbacks import KIND_C2B, KIND_RESULT, safaricom_callback
+from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
 
 from ...utils.doctype_names import MPESA_EXPRESS_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
 from ...utils.encoding_initiator_password import (
@@ -38,6 +40,7 @@ from .process_request import process_request
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def balance_query_callback(**kwargs) -> None:
     import json
 
@@ -133,6 +136,7 @@ def balance_query_callback(**kwargs) -> None:
 @frappe.whitelist()
 def get_account_balance(name: str) -> Any:
     """Call account balance API to send the request to the Mpesa Servers."""
+    require_for_direct_call("get_account_balance", FINANCE_ROLES)
     try:
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, name)
         certs = frappe.get_single("Mpesa Public Key Certificate")
@@ -196,6 +200,7 @@ def get_account_balance(name: str) -> Any:
 @frappe.whitelist()
 def check_transaction_status(name: str) -> Any:
     """Check the status of a transaction by its name."""
+    require_for_direct_call("check_transaction_status", COLLECT_ROLES)
     try:
         express_request = frappe.get_doc(MPESA_EXPRESS_REQUEST_DOCTYPE, name)
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, express_request.settings)
@@ -264,6 +269,7 @@ def transaction_status_error_callback(
 @frappe.whitelist()
 def initiate_stk_push(**args) -> any:
     """Generate STK push by making an API call to the STK push API."""
+    require_for_direct_call("initiate_stk_push", COLLECT_ROLES)
 
     # If args is a single key "args" containing a JSON string, parse it
     if len(args) == 1 and "args" in args:
@@ -341,9 +347,8 @@ def initiate_stk_push(**args) -> any:
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def stk_push_callback(**kwargs) -> None:
-    frappe.set_user("Administrator")
-
     try:
         transaction_response = frappe._dict(kwargs["Body"]["stkCallback"])
         checkout_request_id = transaction_response.get("CheckoutRequestID")
@@ -467,53 +472,19 @@ def sanitize_mobile_number(number: str) -> str:
 
 
 def get_token(app_key, app_secret, base_url):
-    authenticate_uri = "/oauth/v1/generate?grant_type=client_credentials"
-    authenticate_url = f"{base_url.rstrip('/')}{authenticate_uri}"
+    """Cached OAuth token (see daraja.client); kept for existing callers."""
+    from ...daraja.client import fetch_token
 
-    credentials = f"{app_key}:{app_secret}"
-    encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-
-    r = requests.get(
-        authenticate_url,
-        headers={
-            "Authorization": f"Basic {encoded_credentials}",
-        },
-        timeout=30,
-    )
-
-    try:
-        data = r.json()
-    except requests.exceptions.JSONDecodeError:
-        frappe.throw(
-            f"M-PESA returned an invalid response. "
-            f"Status: {r.status_code}, "
-            f"Response: {r.text[:500]}"
-        )
-
-    if not r.ok:
-        frappe.throw(
-            f"M-PESA authentication failed. "
-            f"Status: {r.status_code}, "
-            f"Response: {data}"
-        )
-
-    access_token = data.get("access_token")
-
-    if not access_token:
-        frappe.throw(
-            f"M-PESA authentication response did not include an access token: {data}"
-        )
-
-    return access_token
+    return fetch_token(app_key, app_secret, base_url)
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_C2B)
 def confirmation(**kwargs):
     try:
         args = frappe._dict(kwargs)
 
-        frappe.set_user("Administrator")
-
+        # Runs as the integration user (see safaricom_callback), so the job does too.
         frappe.enqueue(
             "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.delayed_insert_c2b",
             queue="short",
@@ -543,11 +514,10 @@ def confirmation(**kwargs):
         frappe.log_error(frappe.get_traceback(), str(e)[:140])
         context = {"ResultCode": 1, "ResultDesc": "Rejected"}
         return dict(context)
-    finally:
-        frappe.set_user("Guest")
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_C2B)
 def validation(**kwargs):
     context = {"ResultCode": 0, "ResultDesc": "Accepted"}
     return dict(context)
@@ -598,7 +568,7 @@ def get_mpesa_mode_of_payment(company):
     return modes_of_payment
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_mpesa_draft_c2b_payments(
     company,
     full_name=None,
@@ -617,6 +587,7 @@ def get_mpesa_draft_c2b_payments(
         "transamount",
     ]
 
+    frappe.has_permission("Mpesa C2B Payment Register", "read", throw=True)
     filters = {"company": company, "docstatus": 0}
     order_by = "posting_date desc, posting_time desc"
 
@@ -633,18 +604,19 @@ def get_mpesa_draft_c2b_payments(
     elif to_date:
         filters["posting_date"] = ["<=", to_date]
 
-    payments = frappe.get_all(
+    payments = frappe.get_list(
         "Mpesa C2B Payment Register", filters=filters, fields=fields, order_by=order_by
     )
 
     return payments
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_draft_pos_invoice(search_term=None):
     from frappe import qb
     from frappe.query_builder import DocType
 
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     SalesInvoice = DocType("Sales Invoice")
     fields = ["*"]
     status_filters = [
@@ -744,6 +716,7 @@ def get_mode_of_payment(mpesa_doc):
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def handle_transaction_status_result():
     """Handle the transaction status response from Mpesa"""
     try:
@@ -902,6 +875,7 @@ def process_mpesa_integration_request(integration_request_name):
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def handle_queue_timeout():
     """Handle the timeout response from Mpesa."""
     try:
@@ -929,6 +903,7 @@ def handle_queue_timeout():
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def verify_transaction(**kwargs) -> None:
     """Verify the transaction result received via callback from stk."""
     from ..doctype.mpesa_settings.mpesa_settings import (
@@ -1037,6 +1012,7 @@ def pull_transactions(
     end_date: str,
     offset: int = 0,
 ) -> dict:
+    require_for_direct_call("pull_transactions", FINANCE_ROLES)
     try:
         payload = build_pull_payload(mpesa_settings, start_date, end_date, offset)
 

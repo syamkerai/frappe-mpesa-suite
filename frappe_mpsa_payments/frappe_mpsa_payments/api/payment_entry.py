@@ -225,7 +225,7 @@ def set_paid_amount_and_received_amount(
     return paid_amount, received_amount
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_outstanding_invoices(
     company,
     customer,
@@ -241,6 +241,8 @@ def get_outstanding_invoices(
     limit=None,
     voucher_no=None,
 ):
+    # Was open to guests; returned any customer's outstanding invoices.
+    frappe.has_permission("Sales Invoice", "read", throw=True)
     import erpnext
     from erpnext.accounts.party import get_party_account
     from erpnext.accounts.utils import QueryPaymentLedger

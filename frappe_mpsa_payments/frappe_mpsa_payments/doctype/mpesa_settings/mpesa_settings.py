@@ -2,7 +2,6 @@
 # For license information, please see license.txt
 
 
-import base64
 import re
 import time
 from json import dumps, loads
@@ -10,20 +9,18 @@ from typing import Any
 from urllib.parse import urlparse
 
 import frappe
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.x509 import load_pem_x509_certificate
-from frappe import _, get_single
+from frappe import _
 from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
+
+from ....permissions import ADMIN_ROLES, FINANCE_ROLES, require_for_direct_call
+from ....daraja.callbacks import KIND_PULL, KIND_RESULT, safaricom_callback, with_token
 from frappe.utils import (
     fmt_money,
     get_request_site_address,
     get_url,
     now_datetime,
 )
-from frappe.utils.file_manager import get_file_path
 
 from frappe_mpsa_payments.utils.encoding_initiator_password import (
     generate_security_credential,
@@ -72,33 +69,6 @@ class MpesaSettings(Document):
             ).format(currency)
         )
 
-    def before_insert(self) -> None:
-        """Before Insertion hook"""
-        if self.api_type == "MPesa B2C (Business to Customer)":
-            certificate_file = get_single(PUBLIC_CERTIFICATES_DOCTYPE)
-
-            file_path = get_file_path(
-                certificate_file.sandbox_certificate
-                if self.sandbox
-                else certificate_file.production_certificate
-            )
-
-            with open(file_path, "rb") as cert_file:
-                public_key = load_pem_x509_certificate(
-                    cert_file.read(), backend=default_backend()
-                ).public_key()
-
-            ciphertext = public_key.encrypt(
-                self.online_passkey.encode("utf-8"),
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None,
-                ),
-            )
-
-            self.security_credential = base64.b64encode(ciphertext).decode("utf-8")
-
     def get_payment_url(self, **kwargs):
         phone = kwargs.get("phone") or kwargs.get("phone_number") or ""
         base_amount = kwargs.get("amount", 0.0)
@@ -141,7 +111,11 @@ class MpesaSettings(Document):
 
     def on_update(self) -> None:
         """On Update Hook"""
+        from ....daraja.client import invalidate_token
         from ....utils.utils import create_payment_gateway
+
+        # Credentials or environment may have changed: drop the cached OAuth token.
+        invalidate_token(self)
 
         create_payment_gateway(
             "Mpesa-" + self.payment_gateway_name,
@@ -155,7 +129,6 @@ class MpesaSettings(Document):
                 company=self.company,
             )
 
-            frappe.db.commit()  # nosemgrep
             create_mode_of_payment(
                 "Mpesa-" + self.payment_gateway_name,
                 payment_type="Phone",
@@ -163,28 +136,44 @@ class MpesaSettings(Document):
             )
 
     def validate(self) -> None:
-        if self.initiator_password and not self.security_credential:
-            certs = frappe.get_single("Mpesa Public Key Certificate")
-            cert_url = ""
-            if self.sandbox:
-                cert_url = certs.sandbox_certificate
-            else:
-                cert_url = certs.production_certificate
-
-            self.security_credential = generate_security_credential(
-                (
-                    self.get_password("initiator_password", "")
-                    if self.initiator_password
-                    else ""
-                ),
-                cert_url,
-                self.sandbox,
-            )
+        self.refresh_security_credential()
 
         if self.exchange_rates:
             for rate in self.exchange_rates:
                 if rate.currency == "KES":
                     frappe.throw(_("Conversion rate for KES cannot be set."))
+
+    def refresh_security_credential(self, force: bool = False) -> None:
+        """SecurityCredential = RSA-PKCS1v15(initiator password) with the cert for this environment.
+
+        Regenerated whenever the initiator password is (re)typed, the environment flips between
+        sandbox and production, or it is missing. Upstream only generated it once (and for B2C
+        encrypted the STK passkey with OAEP), so a changed password or environment kept sending a
+        stale credential and Safaricom answered 2001 "invalid initiator information".
+        """
+        typed = self.initiator_password and set(str(self.initiator_password)) != {"*"}
+        changed_env = not self.is_new() and self.has_value_changed("sandbox")
+        if not (force or typed or changed_env or not self.security_credential):
+            return
+
+        password = (
+            self.initiator_password
+            if typed
+            else self.get_password("initiator_password", raise_exception=False)
+        )
+        if not password:
+            return
+
+        certs = frappe.get_single("Mpesa Public Key Certificate")
+        cert_url = certs.sandbox_certificate if self.sandbox else certs.production_certificate
+        self.security_credential = generate_security_credential(password, cert_url, self.sandbox)
+
+    @frappe.whitelist()
+    def regenerate_security_credential(self):
+        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        self.refresh_security_credential(force=True)
+        self.save()
+        return _("Security credential regenerated.")
 
     def request_for_payment(self, **kwargs) -> None:
         args = frappe._dict(kwargs)
@@ -284,7 +273,7 @@ def generate_stk_push(**kwargs) -> str | Any:
     args = frappe._dict(kwargs)
 
     try:
-        callback_url = (
+        callback_url = with_token(
             get_request_site_address(True)
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.verify_transaction"
         )
@@ -364,6 +353,7 @@ def get_completed_integration_requests_info(
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
 def process_balance_info(**kwargs) -> None:
     """Process and store account balance information received via callback from the account balance API call."""
     account_balance_response = frappe._dict(kwargs["Result"])
@@ -475,16 +465,17 @@ def create_mode_of_payment(
 
 @frappe.whitelist()
 def trigger_transaction_status(mpesa_settings, transaction_id, remarks="OK"):
+    require_for_direct_call("trigger_transaction_status", FINANCE_ROLES)
     try:
         site_address = get_request_site_address(True)
         parsed_url = urlparse(site_address)
         site_url = f"{parsed_url.scheme}://{parsed_url.hostname}"
 
-        queue_timeout_url = (
+        queue_timeout_url = with_token(
             site_url
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_queue_timeout"
         )
-        result_url = (
+        result_url = with_token(
             site_url
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_transaction_status_result"
         )
@@ -685,6 +676,7 @@ def register_pull_transaction(
     re-registration with "Shortcode already Registered!", a wrong URL baked in
     from a background job cannot be corrected afterwards.
     """
+    require_for_direct_call("register_pull_transaction", ADMIN_ROLES)
     import requests as _requests
 
     from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import get_token
@@ -717,7 +709,7 @@ def register_pull_transaction(
         shortcode = (
             settings.till_number if settings.sandbox else settings.business_shortcode
         )
-        callback_url = callback_url or build_callback_url(PULL_REGISTRATION_CALLBACK)
+        callback_url = callback_url or build_callback_url(PULL_REGISTRATION_CALLBACK, add_token=False)
 
         payload = {
             "ShortCode": shortcode,
@@ -796,7 +788,7 @@ def bulk_register_pull_transactions(
         return {"status": "error", "message": _("No Mpesa Settings to register.")}
 
     try:
-        callback_url = build_callback_url(PULL_REGISTRATION_CALLBACK)
+        callback_url = build_callback_url(PULL_REGISTRATION_CALLBACK, add_token=False)
     except RuntimeError:
         # build_callback_url reads the request Host header and raises
         # "object is not bound" with no request. Better to stop here than to
@@ -886,6 +878,7 @@ def execute_bulk_pull_registration(settings_names: list, callback_url: str) -> N
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_PULL)
 def pull_transaction_callback(**kwargs) -> dict:
     frappe.log_error(
         title="Mpesa Pull Transaction Callback",

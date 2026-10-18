@@ -1,0 +1,174 @@
+{
+ "actions": [],
+ "creation": "2026-10-18 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "callback_security_section",
+  "callback_token",
+  "enforce_token_results",
+  "enforce_token_c2b",
+  "column_break_sec",
+  "enforce_ip_allowlist",
+  "allowed_callback_ips",
+  "integration_user",
+  "limits_section",
+  "amount_tolerance",
+  "stk_max_amount",
+  "column_break_lim",
+  "min_payout_amount",
+  "notifications_section",
+  "notify_role",
+  "column_break_not",
+  "rejected_callbacks",
+  "last_rejected_callback_on",
+  "last_rejected_callback_reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "callback_security_section",
+   "fieldtype": "Section Break",
+   "label": "Callback Security",
+   "description": "Protects the public URLs Safaricom posts results to. Turn enforcement on in this order: IP allow-list first, then the token for STK/B2C/status/balance results (sent with every request), and only after re-registering the C2B URLs, the token for C2B."
+  },
+  {
+   "fieldname": "callback_token",
+   "fieldtype": "Password",
+   "label": "Callback Token",
+   "read_only": 1,
+   "description": "Random secret appended to every callback URL as ?t=\u2026 Generated automatically; use Regenerate Callback Token to rotate (then re-register C2B URLs)."
+  },
+  {
+   "fieldname": "enforce_token_results",
+   "fieldtype": "Check",
+   "label": "Require Token on STK / B2C / Status / Balance / Pull Callbacks",
+   "default": "0"
+  },
+  {
+   "fieldname": "enforce_token_c2b",
+   "fieldtype": "Check",
+   "label": "Require Token on C2B Validation / Confirmation",
+   "default": "0",
+   "description": "Only enable after re-registering C2B URLs from each Mpesa C2B Payment Register URL record, otherwise every customer payment will be rejected."
+  },
+  {
+   "fieldname": "column_break_sec",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "enforce_ip_allowlist",
+   "fieldtype": "Check",
+   "label": "Only Accept Callbacks From Allowed IPs",
+   "default": "0"
+  },
+  {
+   "fieldname": "allowed_callback_ips",
+   "fieldtype": "Small Text",
+   "label": "Allowed Callback IPs / CIDRs",
+   "default": "196.201.212.0/24\n196.201.213.0/24\n196.201.214.0/24",
+   "description": "One IP or CIDR per line. Defaults cover Safaricom's published Daraja callback addresses; confirm against your go-live pack."
+  },
+  {
+   "fieldname": "integration_user",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Integration User",
+   "description": "User that callbacks and background jobs run as. Leave empty to use Administrator. A dedicated System User with only Accounts and M-Pesa roles is recommended."
+  },
+  {
+   "fieldname": "limits_section",
+   "fieldtype": "Section Break",
+   "label": "Limits & Tolerances"
+  },
+  {
+   "fieldname": "amount_tolerance",
+   "fieldtype": "Currency",
+   "label": "Amount Match Tolerance (KES)",
+   "default": "1",
+   "description": "Difference allowed when matching a receipt to an order or invoice amount."
+  },
+  {
+   "fieldname": "stk_max_amount",
+   "fieldtype": "Currency",
+   "label": "Maximum STK Prompt Amount (KES)",
+   "default": "250000"
+  },
+  {
+   "fieldname": "column_break_lim",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "min_payout_amount",
+   "fieldtype": "Currency",
+   "label": "Minimum B2C Payout (KES)",
+   "default": "10"
+  },
+  {
+   "fieldname": "notifications_section",
+   "fieldtype": "Section Break",
+   "label": "Notifications"
+  },
+  {
+   "fieldname": "notify_role",
+   "fieldtype": "Link",
+   "options": "Role",
+   "label": "Notify Role",
+   "default": "Accounts Manager",
+   "description": "Role that receives M-Pesa alerts (unmatched money, failed payouts, balance drift)."
+  },
+  {
+   "fieldname": "column_break_not",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "rejected_callbacks",
+   "fieldtype": "Int",
+   "label": "Rejected Callbacks (since reset)",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "last_rejected_callback_on",
+   "fieldtype": "Datetime",
+   "label": "Last Rejected Callback On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_rejected_callback_reason",
+   "fieldtype": "Small Text",
+   "label": "Last Rejection Reason",
+   "read_only": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-18 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Mpsa Payments",
+ "name": "M-Pesa Suite Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "M-Pesa Manager",
+   "write": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

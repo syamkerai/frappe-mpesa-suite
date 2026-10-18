@@ -417,3 +417,18 @@ function validate_kes_currency(frm, cdt, cdn) {
 		frm.refresh_field("exchange_rates");
 	}
 }
+
+// M-Pesa Suite: rebuild the B2C/B2B/status SecurityCredential on demand.
+frappe.ui.form.on("Mpesa Settings", {
+	refresh(frm) {
+		if (frm.is_new() || !frm.doc.initiator_name) return;
+		frm.add_custom_button(
+			__("Regenerate Security Credential"),
+			() => frm.call("regenerate_security_credential").then((r) => {
+				frappe.show_alert({ message: r.message, indicator: "green" });
+				frm.reload_doc();
+			}),
+			__("Security")
+		);
+	},
+});

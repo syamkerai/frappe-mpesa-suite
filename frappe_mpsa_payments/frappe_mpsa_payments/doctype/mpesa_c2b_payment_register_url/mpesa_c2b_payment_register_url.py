@@ -4,6 +4,8 @@
 from __future__ import unicode_literals
 
 import frappe
+
+from frappe_mpsa_payments.daraja.callbacks import with_token
 import requests
 from frappe.model.document import Document
 from frappe.utils import get_request_site_address
@@ -34,12 +36,13 @@ class MpesaC2BPaymentRegisterURL(Document):
         )
 
         site_url = get_request_site_address(True)
-        validation_url = (
+        # Token is appended so C2B token enforcement can be switched on after re-registering.
+        validation_url = with_token(
             # site_url + "/api/method/payments.payment_gateways.doctype.mpesa_c2b_payment_register_url.mpesa_api.validation"
             site_url
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.validation"
         )
-        confirmation_url = (
+        confirmation_url = with_token(
             # site_url + "/api/method/payments.payment_gateways.doctype.mpesa_c2b_payment_register_url.mpesa_api.confirmation"
             site_url
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.confirmation"

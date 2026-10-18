@@ -5,7 +5,6 @@
 import frappe
 from frappe.model.document import Document
 from frappe_mpsa_payments.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
-from frappe.utils import time
 from frappe.exceptions import DoesNotExistError
 from ....utils.utils import (
     handle_successful_transaction,
@@ -166,7 +165,7 @@ class MpesaExpressRequest(Document):
             handle_successful_transaction(self, settings)
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def create_new_request(
     phone_number,
     payment_gateway,
@@ -178,6 +177,9 @@ def create_new_request(
     title="",
     description="",
 ):
+    # Was allow_guest: anyone could push STK prompts to any phone. Logged-in users only;
+    # anonymous checkout goes through the token-protected pay page / API (Phase 3).
+    frappe.has_permission("Mpesa Express Request", "create", throw=True)
     phone_number = clean_digits(phone_number)
     if (
         not phone_number
@@ -203,9 +205,8 @@ def create_new_request(
             "redirect": redirect,
         }
     )
-    doc.insert(ignore_permissions=True)
+    doc.insert()
     doc.submit()
-    frappe.db.commit()
 
     return doc.name
 
@@ -216,26 +217,15 @@ def clean_digits(v):
     return "".join(filter(str.isdigit, str(v)))
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_request_status(name):
-    frappe.flags.ignore_permissions = True
-
+    # Was allow_guest with a 30 s server-side polling loop (a free DoS and a phone-number
+    # leak by sequential name). Now a permission-checked, non-blocking read; clients poll.
     try:
         doc = frappe.get_doc("Mpesa Express Request", name)
     except DoesNotExistError:
         frappe.throw(f"Mpesa Express Request {name} not found.")
-
-    max_retries = 10
-    wait_time_seconds = 3
-    retries = 0
-
-    while doc.status == "Pending" and retries < max_retries:
-        check_transaction_status(doc.name)
-        time.sleep(wait_time_seconds)
-
-        doc.reload()
-
-        retries += 1
+    doc.check_permission("read")
 
     return {
         "status": doc.status,
@@ -244,7 +234,7 @@ def get_request_status(name):
     }
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def get_stkpush_defaults():
     gateways = frappe.get_all(
         "Payment Gateway",
@@ -269,12 +259,13 @@ def get_stkpush_defaults():
     return {"gateways": gateways, "reference_map": reference_map}
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def retry_stkpush(name):
     doc = frappe.get_doc("Mpesa Express Request", name)
+    doc.check_permission("write")
     if doc.status == "Completed":
         frappe.throw("Cannot retry a completed STK Push request.")
 
     doc.status = "In Progress"
-    doc.save(ignore_permissions=True)
+    doc.save()
     doc.initiate_request()

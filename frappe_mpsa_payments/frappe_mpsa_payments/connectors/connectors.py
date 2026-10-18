@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from typing import Callable, Literal, Optional, Union
-from urllib import parse
 from frappe.model.document import Document
 
-from datetime import datetime, timedelta
 
 import requests
-from requests.auth import HTTPBasicAuth
 import frappe
+
+from ...daraja.guard import redact_headers
 from frappe.integrations.utils import create_request_log
-import base64
 
 # Remote error handler for Mpesa
 def on_mpesa_error(data, url, doctype, document_name):
@@ -95,77 +93,23 @@ class MpesaConnector(BaseMpesaConnector):
         settings = self._get_mpesa_settings()
         self._base_url = "https://sandbox.safaricom.co.ke" if settings["sandbox"] else "https://api.safaricom.co.ke"
 
-    def _is_token_valid(self) -> bool:
-        settings = self._get_mpesa_settings()
-        if not settings["access_token"] or not settings["token_expiry"]:
-            return False
-        return datetime.now() < settings["token_expiry"]
-
-    def _update_token(self, token: str, expires_in: int):
-        token_expiry = datetime.now() + timedelta(seconds=int(expires_in))
-        frappe.db.set_value(
-            "Mpesa Settings", 
-            self.settings_name, 
-            {
-                "access_token": token,
-                "expires_in": int(expires_in),
-                "token_expiry": token_expiry
-            }
-        )
-        frappe.db.commit()
-
-
     def _set_timeout(self, seconds: int):
         self._timeout = seconds
         return self
 
-    def authenticate(self) -> str:
+    def authenticate(self, force: bool = False) -> str:
+        from ...daraja.client import get_access_token
+
         try:
-            self._initialize_settings()
-            s = self._get_mpesa_settings()
-            url = f"{self._base_url}/oauth/v1/generate?grant_type=client_credentials"
-            auth_string = f"{s['consumer_key']}:{s['consumer_secret']}"
-            encoded_auth = base64.b64encode(auth_string.encode()).decode()
-            
-            self.integration_request = create_request_log(
-                data={"grant_type": "client_credentials"},
-                request_description="Mpesa OAuth Token Authentication",
-                is_remote_request=True,
-                service_name="Mpesa",
-                request_headers={"Authorization": f"Basic {encoded_auth}"},
-                url=url,
-                reference_docname=self.settings_name,
-                reference_doctype="Mpesa Settings",
-            )
-            r = requests.get(url, auth=HTTPBasicAuth(s["consumer_key"], s["consumer_secret"]))
-            r.raise_for_status()
-            data = r.json()
-            self._update_token(data["access_token"], data["expires_in"])
-            
-            update_integration_request(
-                self.integration_request.name, 
-                status="Completed", 
-                output=str(data)
-            )
-            
-            return data["access_token"]
+            return get_access_token(self.settings_name, force=force)
         except Exception as e:
-            if hasattr(self, 'integration_request') and self.integration_request:
-                update_integration_request(
-                    self.integration_request.name, 
-                    status="Failed", 
-                    error=str(e)
-                )
             self.error = e
             self.notify()
             raise
 
     def _get_authenticated_headers(self) -> dict:
-        if not self._is_token_valid():
-            self.authenticate()
-        token = self._get_mpesa_settings()["access_token"]
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self.authenticate()}",
             "Content-Type": "application/json",
         }
         headers.update(self._custom_headers)
@@ -201,7 +145,7 @@ class MpesaConnector(BaseMpesaConnector):
                         request_description=self._request_description,
                         is_remote_request=True,
                         service_name="Mpesa",
-                        request_headers=self._get_authenticated_headers(),
+                        request_headers=redact_headers(self._get_authenticated_headers()),
                         url=self._url,
                         reference_docname=document_name,
                         reference_doctype=doctype,
@@ -212,7 +156,7 @@ class MpesaConnector(BaseMpesaConnector):
                     request_description=self._request_description,
                     is_remote_request=True,
                     service_name="Mpesa",
-                    request_headers=self._get_authenticated_headers(),
+                    request_headers=redact_headers(self._get_authenticated_headers()),
                     url=self._url,
                     reference_docname=document_name,
                     reference_doctype=doctype,

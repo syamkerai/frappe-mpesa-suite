@@ -5,6 +5,8 @@ from json.decoder import JSONDecodeError
 from typing import Callable, Literal
 
 import frappe
+
+from ..daraja.guard import redact_headers
 import requests
 from frappe.integrations.utils import create_request_log
 
@@ -214,7 +216,7 @@ class BaseAPIConnector:
             request_description=self._description,
             is_remote_request=True,
             service_name=self.provider,
-            request_headers=self._headers,
+            request_headers=redact_headers(self._headers),
             url=url,
             reference_doctype=self.doctype,
             reference_docname=self.document_name,

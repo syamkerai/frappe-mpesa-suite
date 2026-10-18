@@ -1,4 +1,6 @@
 import frappe
+
+from frappe_mpsa_payments.daraja.callbacks import with_token
 from frappe.utils import get_url
 
 from frappe_mpsa_payments.connectors.factory import get_b2c_connector
@@ -24,7 +26,7 @@ def create_b2c_request(doc_name: str) -> dict:
     else:
         frappe.throw(f"You must select either Mpesa or Stanbic settings on {doc_name}")
 
-    callback_url = (
+    callback_url = with_token(
         f"{get_url()}/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.b2c.b2c_results_callback"
         f"?provider={provider}"
     )

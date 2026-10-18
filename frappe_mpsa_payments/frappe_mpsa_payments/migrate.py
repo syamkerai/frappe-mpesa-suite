@@ -11,6 +11,11 @@ def is_app_installed(app_name: str) -> bool:
 
 
 def after_migrate():
+    from frappe_mpsa_payments.install import ensure_roles, ensure_suite_settings
+
+    ensure_roles()
+    ensure_suite_settings()
+
     if is_app_installed("payments"):
         update_settings_module()
 
@@ -67,6 +72,58 @@ def create_custom_hrms_fields():
 
 def create_custom_erpnext_fields():
     custom_fields = {
+        # One Mpesa Settings record per shortcode/till: map it to its books once, instead of
+        # hard-coding "Mpesa-208911 - AIL" or matching bank accounts with LIKE '%code%'.
+        "Mpesa Settings": [
+            {
+                "fieldname": "company",
+                "label": "Company",
+                "fieldtype": "Link",
+                "options": "Company",
+                "insert_after": "api_type",
+            },
+            {
+                "fieldname": "accounting_mapping_section",
+                "label": "Accounting Mapping",
+                "fieldtype": "Section Break",
+                "insert_after": "transaction_limit",
+                "collapsible": 1,
+                "module": MODULE,
+            },
+            {
+                "fieldname": "bank_account",
+                "label": "Bank Account",
+                "fieldtype": "Link",
+                "options": "Bank Account",
+                "insert_after": "accounting_mapping_section",
+                "description": "Company Bank Account that represents this shortcode/till. "
+                "Bank Transactions for every receipt and payout are posted here.",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "accounting_mapping_column",
+                "fieldtype": "Column Break",
+                "insert_after": "bank_account",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "cost_center",
+                "label": "Cost Center",
+                "fieldtype": "Link",
+                "options": "Cost Center",
+                "insert_after": "accounting_mapping_column",
+                "description": "Used on Payment Entries created from this shortcode when none is given.",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "charges_account",
+                "label": "M-Pesa Charges Account",
+                "fieldtype": "Link",
+                "options": "Account",
+                "insert_after": "cost_center",
+                "module": MODULE,
+            },
+        ],
         "Sales Invoice Payment": [
             {
                 "fieldname": "phone_number",
@@ -121,15 +178,6 @@ def create_custom_erpnext_fields():
                 "fieldtype": "Long Text",
                 "insert_after": "column_break_iiuv",
                 "hidden": 1,
-            }
-        ],
-        "Mpesa Settings": [
-            {
-                "fieldname": "company",
-                "label": "Company",
-                "fieldtype": "Link",
-                "options": "Company",
-                "insert_after": "api_type",
             }
         ],
         "B2C Payment Disbursement": [

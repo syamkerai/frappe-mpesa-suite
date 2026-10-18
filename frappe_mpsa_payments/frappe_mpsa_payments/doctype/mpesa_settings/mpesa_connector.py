@@ -4,7 +4,6 @@ import urllib.parse
 
 import requests
 from frappe.utils import get_url
-from requests.auth import HTTPBasicAuth
 
 
 class MpesaConnector:
@@ -37,13 +36,10 @@ class MpesaConnector:
         Returns:
                                         access_token (str): This token is to be used with the Bearer header for further API calls to Mpesa.
         """
-        authenticate_uri = "/oauth/v1/generate?grant_type=client_credentials"
-        authenticate_url = f"{self.base_url}{authenticate_uri}"
-        r = requests.get(
-            authenticate_url, auth=HTTPBasicAuth(self.app_key, self.app_secret)
-        )
-        self.authentication_token = r.json()["access_token"]
-        return r.json()["access_token"]
+        from ....daraja.client import fetch_token
+
+        self.authentication_token = fetch_token(self.app_key, self.app_secret, self.base_url)
+        return self.authentication_token
 
     def get_balance(
         self,

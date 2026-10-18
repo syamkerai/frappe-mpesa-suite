@@ -1,6 +1,4 @@
-import base64
 import json
-from datetime import datetime, timedelta
 from enum import Enum
 
 import frappe
@@ -51,42 +49,10 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             BaseUrl.SANDBOX_URL.value if s.sandbox else BaseUrl.LIVE_URL.value
         )
 
-    def _is_token_valid(self) -> bool:
-        return self._token and self._expiry and datetime.now() < self._expiry
-
-    def _refresh_token(self):
-        """Fetch a new OAuth token and persist it in settings."""
-        endpoint = "/oauth/v1/generate?grant_type=client_credentials"
-        auth_str = f"{self.consumer_key}:{self.consumer_secret}"
-        basic_token = base64.b64encode(auth_str.encode()).decode()
-
-        oauth_connector = MpesaB2CConnector(self.settings_name)
-        oauth_connector.describe("Mpesa OAuth").set_endpoint(endpoint).set_method(
-            "GET"
-        ).set_headers({"Authorization": f"Basic {basic_token}"}).reuse_existing_request(
-            False
-        )
-
-        data = oauth_connector.make_remote_call(self._base_url)
-
-        token = data.get("access_token")
-        expires_in = int(data.get("expires_in", 0))
-        expiry = datetime.now() + timedelta(seconds=expires_in)
-
-        frappe.db.set_value(
-            self.settings_doctype,
-            self.settings_name,
-            {"access_token": token, "expires_in": expires_in, "token_expiry": expiry},
-        )
-        frappe.db.commit()
-
-        self._token = token
-        self._expiry = expiry
-
     def _get_valid_token(self) -> str:
-        if not self._is_token_valid():
-            self._refresh_token()
-        return self._token
+        from ...daraja.client import fetch_token
+
+        return fetch_token(self.consumer_key, self.consumer_secret, self._base_url)
 
     def send_b2c_request(self, b2c_request_doc: Document, callback_url: str) -> dict:
         """

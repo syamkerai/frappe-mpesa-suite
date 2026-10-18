@@ -148,7 +148,7 @@ def create_payment_gateway_account(gateway, payment_channel="Email", company=Non
         pass
 
 
-def build_callback_url(endpoint: str) -> str:
+def build_callback_url(endpoint: str, add_token: bool = True) -> str:
     base_url = get_request_site_address(True)
     parsed_url = urlparse(base_url)
 
@@ -158,7 +158,10 @@ def build_callback_url(endpoint: str) -> str:
     ):
         base_url = f"{parsed_url.scheme}://{parsed_url.hostname}"
 
-    return f"{base_url}/api/method/{endpoint}"
+    from ..daraja.callbacks import with_token
+
+    url = f"{base_url}/api/method/{endpoint}"
+    return with_token(url) if add_token else url
 
 
 def log_and_throw_error(err_msg, context=None):
