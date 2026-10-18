@@ -5,10 +5,10 @@ import unittest
 from json import dumps
 
 import frappe
-from frappe_mpsa_payment.doctype.mpesa_settings.mpesa_settings import (
+from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import verify_transaction
+from frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings import (
     create_mode_of_payment,
     process_balance_info,
-    verify_transaction,
 )
 
 

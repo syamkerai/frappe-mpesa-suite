@@ -4,7 +4,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from .m_pesa_api import (
     confirmation,
-    get_mpesa_draft_payments,
+    get_mpesa_draft_c2b_payments,
     get_mpesa_mode_of_payment,
     get_token,
     submit_mpesa_payment,
@@ -70,14 +70,14 @@ class TestMPesaAPI(FrappeTestCase):
 
         self.assertEqual(modes_of_payment, ["Cash"])
 
-    @patch("frappe.get_all")
+    @patch("frappe.get_list")
     def test_get_mpesa_draft_payments(self, mock_get_all):
         mock_get_all.return_value = [{"name": "MP001", "amount": 100.0}]
 
         company = "Test Company"
         mode_of_payment = "Cash"
 
-        payments = get_mpesa_draft_payments(company, mode_of_payment)
+        payments = get_mpesa_draft_c2b_payments(company, mode_of_payment=mode_of_payment)
 
         self.assertEqual(len(payments), 1)
         self.assertEqual(payments[0]["name"], "MP001")
