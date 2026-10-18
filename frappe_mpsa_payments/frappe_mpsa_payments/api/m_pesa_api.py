@@ -543,12 +543,25 @@ def delayed_insert_c2b(c2b_data: dict) -> None:
                 )
                 return
 
-        doc = frappe.new_doc("Mpesa C2B Payment Register")
-        for k, v in c2b_data.items():
-            setattr(doc, k, v)
+        from frappe_mpsa_payments.money_in.common import named_lock
 
-        doc.insert(ignore_permissions=True)
-        frappe.db.commit()
+        # Safaricom re-sends confirmations; keep exactly one live register per receipt.
+        with named_lock(f"c2b:{c2b_data.get('transid') or frappe.generate_hash(length=10)}"):
+            # locking read: sees rows committed by another worker after our snapshot began
+            if c2b_data.get("transid") and frappe.db.get_value(
+                "Mpesa C2B Payment Register",
+                {"transid": c2b_data["transid"], "docstatus": ["<", 2]},
+                "name",
+                for_update=True,
+            ):
+                return
+
+            doc = frappe.new_doc("Mpesa C2B Payment Register")
+            for k, v in c2b_data.items():
+                setattr(doc, k, v)
+
+            doc.insert(ignore_permissions=True)
+            frappe.db.commit()
 
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Delayed C2B Insert Error")

@@ -270,6 +270,18 @@ def create_custom_erpnext_fields():
                 "insert_after": "paid_to_account_type",
             },
         ],
+        "Mpesa Express Request": [
+            {
+                "fieldname": "bank_transaction",
+                "label": "Bank Transaction",
+                "fieldtype": "Link",
+                "options": "Bank Transaction",
+                "insert_after": "transaction_id",
+                "read_only": 1,
+                "allow_on_submit": 1,
+                "module": MODULE,
+            }
+        ],
         "Mpesa C2B Payment Register": [
             {
                 "fieldname": "company",
@@ -337,6 +349,16 @@ def create_custom_erpnext_fields():
                 "read_only": 1,
                 "insert_after": "mode_of_payment",
             },
+            {
+                "fieldname": "bank_transaction",
+                "label": "Bank Transaction",
+                "fieldtype": "Link",
+                "options": "Bank Transaction",
+                "insert_after": "currency",
+                "read_only": 1,
+                "allow_on_submit": 1,
+                "module": MODULE,
+            }
         ],
         "Mpesa C2B Payment Register URL": [
             {

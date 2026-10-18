@@ -22,7 +22,43 @@
   "column_break_not",
   "rejected_callbacks",
   "last_rejected_callback_on",
-  "last_rejected_callback_reason"
+  "last_rejected_callback_reason",
+  "money_in_tab",
+  "money_in_intro",
+  "ingest_section",
+  "create_bank_transactions",
+  "block_duplicate_bank_transactions",
+  "column_break_ingest",
+  "sync_voucher_clearance",
+  "auto_reconcile_bank_transactions",
+  "pe_section",
+  "receipt_as_reference",
+  "block_duplicate_payment_entries",
+  "column_break_pe",
+  "default_cost_center",
+  "clear_clearance_on_amend",
+  "matching_section",
+  "enable_matching",
+  "match_invoice_typos",
+  "match_customer_name",
+  "column_break_match",
+  "match_payer_phone",
+  "match_orphan_stk",
+  "link_manual_payment_entries",
+  "matching_lookback_days",
+  "orphan_stk_window_seconds",
+  "sales_order_section",
+  "enable_sales_order_payments",
+  "sales_order_approver",
+  "column_break_so",
+  "sales_order_workflow_actions",
+  "sales_order_details_field",
+  "stk_section",
+  "normalize_payment_request_phone",
+  "supersede_unpaid_prompts",
+  "column_break_stk",
+  "poll_stk_status",
+  "sync_payment_request_status"
  ],
  "fields": [
   {
@@ -138,11 +174,233 @@
    "fieldtype": "Small Text",
    "label": "Last Rejection Reason",
    "read_only": 1
+  },
+  {
+   "fieldname": "money_in_tab",
+   "fieldtype": "Tab Break",
+   "label": "Money In"
+  },
+  {
+   "fieldname": "money_in_intro",
+   "fieldtype": "HTML",
+   "options": "<p class='text-muted small'>Each switch replaces one of Astral's Server Scripts. Turn a switch on only after disabling the script it replaces, so the work is not done twice.</p>"
+  },
+  {
+   "fieldname": "ingest_section",
+   "fieldtype": "Section Break",
+   "label": "Statement Lines"
+  },
+  {
+   "fieldname": "create_bank_transactions",
+   "fieldtype": "Check",
+   "label": "Create Bank Transaction for Every Receipt",
+   "description": "C2B and STK receipts become submitted Bank Transactions on the shortcode's Bank Account (replaces 'Register To Bank Transaction', 'Auto Reconcile' pass 0, 'BT Duplicate Guard', 'Duplicate BT Sweeper')."
+  },
+  {
+   "fieldname": "block_duplicate_bank_transactions",
+   "fieldtype": "Check",
+   "label": "Block Duplicate Receipts on M-Pesa Bank Accounts",
+   "default": "1"
+  },
+  {
+   "fieldname": "column_break_ingest",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sync_voucher_clearance",
+   "fieldtype": "Check",
+   "label": "Set Clearance Date When Every Bank Leg Is Matched",
+   "description": "Replaces 'AIL BT Sync Voucher Clearance'."
+  },
+  {
+   "fieldname": "auto_reconcile_bank_transactions",
+   "fieldtype": "Check",
+   "label": "Auto-Reconcile M-Pesa Bank Transactions",
+   "description": "Links each receipt line to its Payment Entry when amounts agree (replaces 'Auto Reconcile' passes 1\u20132)."
+  },
+  {
+   "fieldname": "pe_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Entry Controls"
+  },
+  {
+   "fieldname": "receipt_as_reference",
+   "fieldtype": "Check",
+   "label": "Use M-Pesa Receipt as Payment Entry Reference No",
+   "default": "1",
+   "description": "Replaces 'PE Reference To Receipt'."
+  },
+  {
+   "fieldname": "block_duplicate_payment_entries",
+   "fieldtype": "Check",
+   "label": "Block a Second Payment Entry for the Same Receipt",
+   "default": "1",
+   "description": "Replaces 'PE Duplicate Receipt Guard' (without its script-ordering race)."
+  },
+  {
+   "fieldname": "column_break_pe",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_cost_center",
+   "fieldtype": "Check",
+   "label": "Fill Missing Cost Center on M-Pesa Payment Entries",
+   "default": "1",
+   "description": "Replaces 'PE Cost Center Autofill'."
+  },
+  {
+   "fieldname": "clear_clearance_on_amend",
+   "fieldtype": "Check",
+   "label": "Clear Clearance Date on Amended PE / JE",
+   "default": "1",
+   "description": "Replaces 'PE/JE Amendment Clear Clearance'."
+  },
+  {
+   "fieldname": "matching_section",
+   "fieldtype": "Section Break",
+   "label": "Matching Unidentified Receipts"
+  },
+  {
+   "fieldname": "enable_matching",
+   "fieldtype": "Check",
+   "label": "Match and Book Receipts Automatically",
+   "description": "Runs every 2 minutes on draft receipts with no customer or no booking."
+  },
+  {
+   "fieldname": "match_invoice_typos",
+   "fieldtype": "Check",
+   "label": "Repair Mistyped Invoice Numbers",
+   "default": "1",
+   "depends_on": "enable_matching",
+   "description": "SINV2600123 \u2192 SINV26-00123 (replaces 'Self Heal Unmatched')."
+  },
+  {
+   "fieldname": "match_customer_name",
+   "fieldtype": "Check",
+   "label": "Match Account Reference to a Customer Name",
+   "default": "1",
+   "depends_on": "enable_matching",
+   "description": "Spaces and case ignored, exactly one customer (replaces 'C2B No-Space Name Matcher')."
+  },
+  {
+   "fieldname": "column_break_match",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "match_payer_phone",
+   "fieldtype": "Check",
+   "label": "Match Payer Phone to One Open Sales Order",
+   "default": "1",
+   "depends_on": "enable_matching",
+   "description": "Uses Safaricom's hashed MSISDN and the order amount (replaces 'Payer Phone Matcher')."
+  },
+  {
+   "fieldname": "match_orphan_stk",
+   "fieldtype": "Check",
+   "label": "Adopt Receipts From Unanswered STK Prompts",
+   "default": "1",
+   "depends_on": "enable_matching",
+   "description": "Same amount, paid within the window after the prompt (replaces 'SO Checker' pass 0)."
+  },
+  {
+   "fieldname": "link_manual_payment_entries",
+   "fieldtype": "Check",
+   "label": "Link Receipts Already Booked by Hand",
+   "default": "1",
+   "depends_on": "enable_matching",
+   "description": "Replaces 'Register Link Backfill'."
+  },
+  {
+   "fieldname": "matching_lookback_days",
+   "fieldtype": "Int",
+   "label": "Look Back (Days)",
+   "default": "45",
+   "depends_on": "enable_matching"
+  },
+  {
+   "fieldname": "orphan_stk_window_seconds",
+   "fieldtype": "Int",
+   "label": "STK Adoption Window (Seconds)",
+   "default": "600",
+   "depends_on": "enable_matching"
+  },
+  {
+   "fieldname": "sales_order_section",
+   "fieldtype": "Section Break",
+   "label": "Prepaid Sales Orders"
+  },
+  {
+   "fieldname": "enable_sales_order_payments",
+   "fieldtype": "Check",
+   "label": "Book Receipts Against Sales Orders and Release Paid Orders",
+   "description": "Adds up every receipt for an order (STK prompts and direct paybill payments). When fully paid the order is moved through the workflow and the receipts are booked as advances (replaces 'SO M-Pesa Payment Checker')."
+  },
+  {
+   "fieldname": "sales_order_approver",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Approve Paid Orders As",
+   "depends_on": "enable_sales_order_payments",
+   "description": "Workflow actions run as this user, so Workflow role rules still apply. Required when the order has a workflow."
+  },
+  {
+   "fieldname": "column_break_so",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sales_order_workflow_actions",
+   "fieldtype": "Small Text",
+   "label": "Workflow Actions for Paid Orders",
+   "depends_on": "enable_sales_order_payments",
+   "default": "Send For Approval Primary\nSend for Approval Secondary\nApprove",
+   "description": "One per line, applied in order while available. Leave empty to submit orders without a workflow."
+  },
+  {
+   "fieldname": "sales_order_details_field",
+   "fieldtype": "Data",
+   "label": "Write Receipt Details To Field",
+   "default": "custom_payment_details",
+   "depends_on": "enable_sales_order_payments",
+   "description": "Optional Small Text field on Sales Order that collects receipt lines."
+  },
+  {
+   "fieldname": "stk_section",
+   "fieldtype": "Section Break",
+   "label": "STK Prompts & Payment Requests"
+  },
+  {
+   "fieldname": "normalize_payment_request_phone",
+   "fieldtype": "Check",
+   "label": "Normalise Phone on M-Pesa Payment Requests",
+   "default": "1",
+   "description": "Replaces 'Normalize Mpesa Phone on Payment Request'."
+  },
+  {
+   "fieldname": "supersede_unpaid_prompts",
+   "fieldtype": "Check",
+   "label": "Cancel Earlier Unpaid Prompt When Re-prompting",
+   "description": "Properly cancels the older Payment Request instead of flipping docstatus (replaces 'MPesa PR Cleanup Before Reprompt')."
+  },
+  {
+   "fieldname": "column_break_stk",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "poll_stk_status",
+   "fieldtype": "Check",
+   "label": "Poll Safaricom for Unanswered STK Prompts",
+   "description": "Asks Safaricom for the result of prompts with no callback after 2 minutes; marks cancelled/failed prompts."
+  },
+  {
+   "fieldname": "sync_payment_request_status",
+   "fieldtype": "Check",
+   "label": "Mark Payment Requests Paid When Settled",
+   "description": "Replaces 'Status Sync'."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-18 12:00:00.000000",
+ "modified": "2026-10-18 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa Suite Settings",

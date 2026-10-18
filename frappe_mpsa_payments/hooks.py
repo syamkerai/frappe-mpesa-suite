@@ -155,13 +155,29 @@ after_install = "frappe_mpsa_payments.install.after_install"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# Money-in pipeline. Every handler checks its own switch in M-Pesa Suite Settings,
+# so nothing changes until a switch is turned on.
+doc_events = {
+    "Mpesa C2B Payment Register": {
+        "after_insert": "frappe_mpsa_payments.money_in.events.register_after_insert",
+    },
+    "Bank Transaction": {
+        "before_insert": "frappe_mpsa_payments.money_in.bank_transaction.guard_duplicate",
+        "on_submit": "frappe_mpsa_payments.money_in.bank_transaction.sync_voucher_clearance",
+        "on_update_after_submit": "frappe_mpsa_payments.money_in.bank_transaction.sync_voucher_clearance",
+    },
+    "Payment Entry": {
+        "before_insert": "frappe_mpsa_payments.money_in.payment_entry.before_insert",
+        "before_validate": "frappe_mpsa_payments.money_in.payment_entry.before_validate",
+    },
+    "Journal Entry": {
+        "before_insert": "frappe_mpsa_payments.money_in.payment_entry.journal_before_insert",
+    },
+    "Payment Request": {
+        "before_validate": "frappe_mpsa_payments.money_in.payment_request.before_validate",
+        "before_insert": "frappe_mpsa_payments.money_in.payment_request.before_insert",
+    },
+}
 
 # Scheduled Tasks
 # ---------------
@@ -170,7 +186,9 @@ scheduler_events = {
     "cron": {
         "*/15 * * * *": [
             "frappe_mpsa_payments.services.b2c_scheduler_service.update_b2c_disbursement_statuses"
-        ]
+        ],
+        "*/2 * * * *": ["frappe_mpsa_payments.money_in.events.every_two_minutes"],
+        "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"]
     },
     "hourly": [
         "frappe_mpsa_payments.services.b2c_pull_transaction_scheduler_service.run_hourly_pull_transactions"

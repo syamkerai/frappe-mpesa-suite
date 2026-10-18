@@ -4,6 +4,7 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import flt
 
 from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
     create_and_reconcile_payment_reconciliation,
@@ -90,6 +91,19 @@ class MpesaC2BPaymentRegister(Document):
                 self.company = register_url_list[0].company
                 self.mode_of_payment = register_url_list[0].mode_of_payment
 
+            # Tills (Buy Goods) and shortcodes without a Register URL row: use Mpesa Settings.
+            if not self.company or not self.mode_of_payment:
+                from frappe_mpsa_payments.money_in.common import (
+                    mode_of_payment_for,
+                    settings_for_shortcode,
+                )
+
+                settings_name = settings_for_shortcode(self.businessshortcode)
+                if settings_name:
+                    if not self.company and frappe.get_meta("Mpesa Settings").has_field("company"):
+                        self.company = frappe.db.get_value("Mpesa Settings", settings_name, "company")
+                    self.mode_of_payment = self.mode_of_payment or mode_of_payment_for(settings_name)
+
             if self.billrefnumber and not self.customer:
                 self._find_customer_from_billref(self.billrefnumber)
 
@@ -106,26 +120,45 @@ class MpesaC2BPaymentRegister(Document):
             frappe.throw(_("Mode of Payment is required"))
 
         if self.submit_payment:
+            from frappe_mpsa_payments.money_in.common import receipt_date, settings_for_shortcode
+
             refs = []
             invoice, order = self._get_matching_refs()
 
+            # Never allocate more than is owed; the rest stays as an unallocated advance.
             if invoice:
-                refs.append(
-                    {
-                        "reference_doctype": "Sales Invoice",
-                        "reference_name": invoice,
-                        "allocated_amount": self.transamount,
-                    }
-                )
+                outstanding = frappe.db.get_value("Sales Invoice", invoice, "outstanding_amount")
+                allocated = min(flt(self.transamount), flt(outstanding))
+                if allocated > 0:
+                    refs.append(
+                        {
+                            "reference_doctype": "Sales Invoice",
+                            "reference_name": invoice,
+                            "allocated_amount": allocated,
+                        }
+                    )
 
             elif order:
-                refs.append(
-                    {
-                        "reference_doctype": "Sales Order",
-                        "reference_name": order,
-                        "allocated_amount": self.transamount,
-                    }
+                so = frappe.db.get_value(
+                    "Sales Order", order, ["rounded_total", "grand_total", "advance_paid"], as_dict=True
                 )
+                balance = flt(so.rounded_total or so.grand_total) - flt(so.advance_paid)
+                allocated = min(flt(self.transamount), balance)
+                if allocated > 0:
+                    refs.append(
+                        {
+                            "reference_doctype": "Sales Order",
+                            "reference_name": order,
+                            "allocated_amount": allocated,
+                        }
+                    )
+
+            # The customer's SMS shows the receipt, so that is what reconciliation matches on.
+            paid_on = receipt_date(self)
+            cost_center = None
+            settings_name = settings_for_shortcode(self.businessshortcode)
+            if settings_name and frappe.get_meta("Mpesa Settings").has_field("cost_center"):
+                cost_center = frappe.db.get_value("Mpesa Settings", settings_name, "cost_center")
 
             payment_entry = create_payment_entry(
                 self.company,
@@ -134,10 +167,10 @@ class MpesaC2BPaymentRegister(Document):
                 self.currency,
                 self.mode_of_payment,
                 "Customer",
-                self.posting_date,
-                self.name,
-                self.posting_date,
-                None,
+                paid_on,
+                self.transid or self.name,
+                paid_on,
+                cost_center,
                 self.submit_payment,
                 references=refs or None,
             )
@@ -240,6 +273,23 @@ class MpesaC2BPaymentRegister(Document):
         Returns a tuple (invoice, sales_order), where exactly one is non-None if billrefnumber matched either.
         Otherwise both are None.
         """
+        matched_type = self.get("matched_reference_doctype")
+        matched_name = self.get("matched_reference_name")
+        if matched_type == "Sales Invoice" and matched_name:
+            if frappe.db.get_value(
+                "Sales Invoice",
+                {"name": matched_name, "docstatus": 1, "outstanding_amount": (">", 0)},
+                "name",
+            ):
+                return matched_name, None
+        elif matched_type == "Sales Order" and matched_name:
+            if frappe.db.get_value(
+                "Sales Order",
+                {"name": matched_name, "docstatus": 1, "status": ("not in", ["Closed", "Completed"])},
+                "name",
+            ):
+                return None, matched_name
+
         invoice = self._find_matching_invoice()
         if invoice:
             return invoice, None
