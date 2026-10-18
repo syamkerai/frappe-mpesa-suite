@@ -6,7 +6,7 @@ from typing import Callable, Literal
 
 import frappe
 
-from ..daraja.guard import redact_headers
+from ..daraja.guard import redact_headers, scrub_payload
 import requests
 from frappe.integrations.utils import create_request_log
 
@@ -191,7 +191,7 @@ class BaseAPIConnector:
         self.doctype = doctype or self.settings_doctype
         self.document_name = document_name or self.settings_name
 
-        scrubbed = deepcopy(self._payload or {})
+        scrubbed = scrub_payload(deepcopy(self._payload or {}))
 
         # 1.) Find all fields in that DocType declared as type “Password”
         try:
@@ -234,7 +234,8 @@ class BaseAPIConnector:
             status="Completed",
             output=str(data),
         )
-        frappe.db.commit()
+        # No commit: B2C sends run inside B2C Disbursement Request.on_submit; the
+        # request/job commits (and a caller's rollback must not leave half a write).
 
     def _finalize_error(self, data) -> None:
         """
@@ -248,7 +249,6 @@ class BaseAPIConnector:
             status="Failed",
             error=str(data),
         )
-        frappe.db.commit()
 
     def use_form_data(self, flag: bool = True) -> BaseAPIConnector:
         """
@@ -304,7 +304,7 @@ class BaseAPIConnector:
 
         try:
             data = resp.json()
-        except JSONDecodeError:
+        except (JSONDecodeError, ValueError):
             data = {"_raw": resp.text or ""}
 
         if resp.status_code < 300:

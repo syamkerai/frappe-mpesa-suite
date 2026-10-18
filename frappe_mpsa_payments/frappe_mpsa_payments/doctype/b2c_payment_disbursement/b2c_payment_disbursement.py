@@ -51,6 +51,16 @@ class B2CPaymentDisbursement(Document):
             frappe.throw(f"Unsupported payment type: {self.payment_type}")
 
         for ref in self.references:
+            if ref.b2c_disbursement_request:
+                # Row copied on amend: its payout was already sent from the original
+                # document. Re-sending would pay the same person twice.
+                sent_status = frappe.db.get_value(
+                    B2C_REQUEST_DOCTYPE, ref.b2c_disbursement_request, "status"
+                )
+                if sent_status and sent_status != "Failed":
+                    ref.payment_status = "Paid" if sent_status == "Paid" else "Initiated"
+                    continue
+                ref.b2c_disbursement_request = None
             ref.payment_status = "Initiated"
             frappe.enqueue(
                 "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement.create_b2c_request",

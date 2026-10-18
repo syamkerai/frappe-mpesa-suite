@@ -16,21 +16,33 @@ def balance_query_on_success(response: dict, document_name: str, **kwargs) -> No
     pass
 
 
+# STK Query ResultCodes that mean "not finished yet" (see money_in.stk_poll).
+STK_QUERY_PENDING_RESULT_CODES = {"4999"}
+
+
 def transaction_status_on_success(response: dict, document_name: str, **kwargs) -> None:
+    """Record what an STK Query says; never book money from it.
+
+    The query carries no receipt number, so reconciling here booked a Payment Entry
+    and the later C2B confirmation booked a second one. Like money_in.stk_poll, only
+    the status is updated; the STK callback / C2B confirmation books the money.
+    """
     try:
-        # frappe.set_user("Administrator")
-
-        frappe.flags.ignore_permissions = True
-
         result_code = response.get("ResultCode")
-        status = "Completed" if result_code == "0" else "Failed"
+        if result_code is None or str(result_code) in STK_QUERY_PENDING_RESULT_CODES:
+            return  # still being processed: ask again later
 
-        request_doc = frappe.get_doc(MPESA_EXPRESS_REQUEST_DOCTYPE, document_name)
+        status = "Completed" if str(result_code) == "0" else "Failed"
+        if status == "Failed" and (
+            frappe.db.get_value(MPESA_EXPRESS_REQUEST_DOCTYPE, document_name, "status")
+            == "Completed"
+        ):
+            return  # a paid prompt is never downgraded by a later query
 
         update_mpesa_request_status(
             document_name,
             {
-                "result_code": result_code,
+                "result_code": str(result_code),
                 "result_desc": response.get("ResultDesc"),
                 "merchant_request_id": response.get("MerchantRequestID"),
                 "checkout_request_id": response.get("CheckoutRequestID"),
@@ -39,7 +51,6 @@ def transaction_status_on_success(response: dict, document_name: str, **kwargs) 
                 "status": status,
             },
         )
-        request_doc.reconcile_payment()
 
     except Exception:
         log_and_throw_error("MPESA Transaction Status Update Error", document_name)
@@ -78,8 +89,8 @@ def stk_push_on_success(
                 f"Mpesa Express Request created for {document_name} with ID {doc.name}"
             )
 
-        frappe.db.commit()
-
+        # No commit: this runs inside Mpesa Express Request.on_submit; the request
+        # (or the caller's savepoint) decides when it is committed.
         frappe.publish_realtime(
             event="refresh_form",
             doctype=MPESA_EXPRESS_REQUEST_DOCTYPE,
@@ -113,7 +124,6 @@ def stk_push_on_error(
                 "status": "Failed",
             },
         )
-        frappe.db.commit()
 
     except Exception:
         frappe.log_error(
@@ -194,6 +204,24 @@ def record_pull_outcome(
             frappe.get_traceback(),
             f"Mpesa Pull Transaction: could not record outcome for {settings_name}",
         )
+
+
+def _pull_trx_date_to_transtime(value) -> str:
+    """Pull API trxDate (ISO 8601) -> YYYYMMDDHHmmss in Nairobi time, like C2B TransTime."""
+    import datetime
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return text[:14]
+    try:
+        dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=3)))
+    return dt.strftime("%Y%m%d%H%M%S")
 
 
 def _flatten_pull_transactions(raw) -> list:
@@ -297,7 +325,7 @@ def pull_transaction_on_success(response: dict, document_name: str, **kwargs) ->
 
             doc = frappe.new_doc(MPESA_C2B_PAYMENT_REGISTER_DOCTYPE)
             doc.transid = transid
-            doc.transtime = txn.get("trxDate", "")
+            doc.transtime = _pull_trx_date_to_transtime(txn.get("trxDate"))
             doc.transamount = float(txn.get("amount") or 0.0)
             doc.msisdn = txn.get("msisdn", "")
             doc.businessshortcode = shortcode

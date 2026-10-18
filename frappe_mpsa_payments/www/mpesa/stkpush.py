@@ -69,9 +69,17 @@ def clean(value):
     return value
 
 
+def _check_can_push(doc):
+    """Only users who may edit the request can (re)send its prompt; never re-push a paid one."""
+    doc.check_permission("write")
+    if doc.status == "Completed":
+        frappe.throw(_("This M-Pesa request is already paid."))
+
+
 @frappe.whitelist()
 def initiate_stk_push(name, phone_number):
     doc = frappe.get_doc("Mpesa Express Request", name)
+    _check_can_push(doc)
     doc.flags.ignore_permissions = True
     doc.phone_number = phone_number
     doc.save(ignore_permissions=True)
@@ -82,6 +90,7 @@ def initiate_stk_push(name, phone_number):
 @frappe.whitelist()
 def retry_stkpush(name, phone_number):
     doc = frappe.get_doc("Mpesa Express Request", name)
+    _check_can_push(doc)
     doc.flags.ignore_permissions = True
     doc.phone_number = phone_number
     doc.status = "In Progress"

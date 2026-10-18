@@ -21,7 +21,13 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> No
     - Others → Payment Entry
     - Loan → Loan Disbursement
     """
+    # Lock the row so a re-sent Result callback cannot book the same payout twice.
+    frappe.db.get_value(
+        "B2C Payment Disbursement Reference", reference_name, "name", for_update=True
+    )
     ref = frappe.get_doc("B2C Payment Disbursement Reference", reference_name)
+    if already_booked(disbursement_name, ref):
+        return
 
     b2c_req = frappe.get_doc(B2C_REQUEST_DOCTYPE, ref.b2c_disbursement_request)
     b2c_disb = frappe.get_doc(ref.parenttype, disbursement_name)
@@ -58,3 +64,33 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> No
         frappe.log_error(
             f"No post-process for reference {doctype}", "B2C Postprocess Error"
         )
+
+
+def already_booked(disbursement_name: str, ref) -> bool:
+    """True when a live (draft or submitted) entry already books this reference row."""
+    if ref.reference_doctype == "Salary Slip":
+        return bool(
+            frappe.db.sql(
+                """SELECT 1 FROM `tabJournal Entry Account` jea
+                JOIN `tabJournal Entry` je ON je.name = jea.parent
+                WHERE jea.b2c_payment_disbursement = %s AND jea.party = %s
+                AND je.docstatus < 2 LIMIT 1""",
+                (disbursement_name, ref.party),
+            )
+        )
+    if ref.reference_doctype == "Loan":
+        return bool(
+            frappe.db.exists(
+                "Loan Disbursement",
+                {"b2c_payment_disbursement": disbursement_name, "against_loan": ref.reference_name, "docstatus": ["<", 2]},
+            )
+        )
+    return bool(
+        frappe.db.sql(
+            """SELECT 1 FROM `tabPayment Entry Reference` per
+            JOIN `tabPayment Entry` pe ON pe.name = per.parent
+            WHERE per.b2c_payment_disbursement = %s AND per.reference_doctype = %s
+            AND per.reference_name = %s AND pe.docstatus < 2 LIMIT 1""",
+            (disbursement_name, ref.reference_doctype, ref.reference_name),
+        )
+    )

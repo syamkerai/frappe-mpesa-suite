@@ -266,7 +266,7 @@ function mpesa_render_list(dialog) {
 				<div class="mpesa-payment-item ${item_class}">
 					<div class="mpesa-item-checkbox">
 						<input type="checkbox" class="mpesa-item-check"
-							   data-name="${p.name}"
+							   data-name="${frappe.utils.escape_html(p.name || "")}"
 							   data-full-name="${frappe.utils.escape_html(p.full_name || "")}"
 							   data-amount="${amount}"
 							   ${is_selected ? "checked" : ""}>
@@ -287,14 +287,14 @@ function mpesa_render_list(dialog) {
 							</span>
 						</div>
 						<div class="mpesa-item-secondary">
-							<span><i class="fa fa-phone"></i> ${p.msisdn || ""}</span>
-							${p.billrefnumber ? `<span><i class="fa fa-hashtag"></i> ${p.billrefnumber}</span>` : ""}
-							<span><i class="fa fa-exchange"></i> ${p.transid || p.name}</span>
+							<span><i class="fa fa-phone"></i> ${frappe.utils.escape_html(p.msisdn || "")}</span>
+							${p.billrefnumber ? `<span><i class="fa fa-hashtag"></i> ${frappe.utils.escape_html(p.billrefnumber)}</span>` : ""}
+							<span><i class="fa fa-exchange"></i> ${frappe.utils.escape_html(p.transid || p.name || "")}</span>
 						</div>
 					</div>
 					<div class="mpesa-age-indicator"
 						 style="${mpesa_age_style(age_days)}"
-						 title="${p.posting_date || p.creation || ""}">
+						 title="${frappe.utils.escape_html(p.posting_date || p.creation || "")}">
 						${mpesa_age_label(age_days)}
 					</div>
 				</div>`;

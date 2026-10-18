@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ...permissions import COLLECT_ROLES, require
+
 
 @frappe.whitelist()
 def get_mpesa_phone_mops_for_pos_profile(pos_profile, company):
@@ -55,6 +57,7 @@ def get_mpesa_payments():
     POS page – filter by the single MOP selected by the user
     Invoice Desk – filter by all MOPs linked to the profile
     """
+    frappe.has_permission("Mpesa C2B Payment Register", "read", throw=True)
     company = frappe.form_dict.get("company")
     search = (frappe.form_dict.get("search") or "").strip()
     mode_of_payment = frappe.form_dict.get("mode_of_payment")
@@ -139,7 +142,9 @@ def process_mpesa():
     if not mpesa_names:
         frappe.throw(_("No Mpesa payments selected"))
 
+    require(COLLECT_ROLES)
     invoice = frappe.get_doc(resolve_doctype(doctype), invoice_name)
+    invoice.check_permission("write")
     if invoice.docstatus != 0:
         frappe.throw(_("Cannot add payments to a submitted or cancelled invoice"))
 
@@ -292,7 +297,9 @@ def update_mpesa_after_invoice_submission():
     if not mpesa_names:
         frappe.throw(_("No Mpesa payments provided"))
 
+    require(COLLECT_ROLES)
     invoice = frappe.get_doc(doctype, invoice_name)
+    invoice.check_permission("write")
     if invoice.docstatus != 1:
         frappe.throw(_("Invoice must be submitted first"))
 

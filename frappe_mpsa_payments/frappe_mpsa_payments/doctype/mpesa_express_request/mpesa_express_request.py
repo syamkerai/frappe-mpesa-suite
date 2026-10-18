@@ -6,6 +6,7 @@ import frappe
 from frappe.model.document import Document
 from frappe_mpsa_payments.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 from frappe.exceptions import DoesNotExistError
+from ....permissions import ADMIN_ROLES, require
 from ....utils.utils import (
     handle_successful_transaction,
     validate_phone_number,
@@ -50,11 +51,13 @@ class MpesaExpressRequest(Document):
                 self.amount = self.base_amount
 
     def validate(self):
-        self.set_missing_values()
-
+        # Take the Payment Request's amount/currency first, so set_missing_values
+        # converts it to KES (it used to overwrite the converted amount afterwards).
         if "erpnext" in frappe.get_installed_apps():
             if self.reference_doctype == "Payment Request":
                 self.validate_payment_request_amount()
+
+        self.set_missing_values()
 
         if self.phone_number and not validate_phone_number(self.phone_number):
             frappe.throw(
@@ -63,9 +66,8 @@ class MpesaExpressRequest(Document):
 
     def validate_payment_request_amount(self):
         payment_request = frappe.get_doc("Payment Request", self.reference_name)
-        currency = payment_request.currency
-        self.amount = payment_request.grand_total
-        self.currency = currency
+        self.currency = payment_request.currency
+        self.base_amount = payment_request.grand_total  # amount (KES) derived from it
         # company = payment_request.company
         # company_currency = frappe.db.get_value("Company", company, "default_currency")
 
@@ -158,7 +160,18 @@ class MpesaExpressRequest(Document):
 
     @frappe.whitelist()
     def reconcile_payment(self):
+        # Manual "Reconcile Payment" (any HTTP route: run_doc_method or /api/v2) books
+        # money: managers only. Callbacks call book_completed_payment() directly.
+        require(ADMIN_ROLES)
+        self.check_permission("write")
+        self.book_completed_payment()
+
+    def book_completed_payment(self):
         self.reload()
+        if self.status != "Completed" or not self.transaction_id:
+            frappe.throw(
+                "Only a Completed request with an M-Pesa receipt (Transaction ID) can be reconciled."
+            )
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, self.settings)
 
         if not self.is_reconciled:

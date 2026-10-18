@@ -1,4 +1,4 @@
-{% extends "templates/web.html" %} {% block title %}{{ mpesa_request.title or "M-Pesa Express" }}{%
+{% extends "templates/web.html" %} {% block title %}{{ (mpesa_request.title or "M-Pesa Express")|e }}{%
 endblock %} {% block page_content %}
 
 <div class="mp-container">
@@ -19,20 +19,20 @@ endblock %} {% block page_content %}
 					/>
 				</svg>
 			</div>
-			<h1 class="mp-title">{{ mpesa_request.title }}</h1>
+			<h1 class="mp-title">{{ mpesa_request.title|e }}</h1>
 			{% if mpesa_request.description %}
-			<p class="mp-description">{{ mpesa_request.description }}</p>
+			<p class="mp-description">{{ mpesa_request.description|e }}</p>
 			{% endif %}
 		</div>
 
 		<div class="mp-badge-wrapper">
 			<div
-				class="mp-status-badge mp-status-{{ mpesa_request.status|lower }} {% if docstatus == 1 and is_pending %}mp-status-progress{% endif %}"
+				class="mp-status-badge mp-status-{{ mpesa_request.status|lower|e }} {% if docstatus == 1 and is_pending %}mp-status-progress{% endif %}"
 			>
 				<div class="mp-badge-header">
 					<span class="mp-status-dot"></span>
 					<span class="mp-status-label">Status</span>
-					<span class="mp-status-name">{{ mpesa_request.status }}</span>
+					<span class="mp-status-name">{{ mpesa_request.status|e }}</span>
 				</div>
 				{% if error %}
 				<div class="mp-badge-message mp-badge-message-error">
@@ -44,7 +44,7 @@ endblock %} {% block page_content %}
 							stroke-linecap="round"
 						/>
 					</svg>
-					<span>{{ error }}</span>
+					<span>{{ error|e }}</span>
 				</div>
 				{% endif %} {% if success %}
 				<div class="mp-badge-message mp-badge-message-success">
@@ -56,16 +56,16 @@ endblock %} {% block page_content %}
 							stroke-linecap="round"
 						/>
 					</svg>
-					<span>{{ success }}</span>
+					<span>{{ success|e }}</span>
 				</div>
 				{% endif %}
 			</div>
 		</div>
 
 		<div class="mp-form">
-			<input type="hidden" id="request_id" value="{{ mpesa_request.name }}" />
-			<input type="hidden" id="docstatus" value="{{ docstatus }}" />
-			<input type="hidden" id="status" value="{{ mpesa_request.status }}" />
+			<input type="hidden" id="request_id" value="{{ mpesa_request.name|e }}" />
+			<input type="hidden" id="docstatus" value="{{ docstatus|e }}" />
+			<input type="hidden" id="status" value="{{ mpesa_request.status|e }}" />
 
 			<div class="mp-field">
 				<label class="mp-label">Phone Number</label>
@@ -81,7 +81,7 @@ endblock %} {% block page_content %}
 					<input
 						id="phone_number"
 						class="mp-input"
-						value="{{ mpesa_request.phone_number }}"
+						value="{{ mpesa_request.phone_number|e }}"
 						{%
 						if
 						not
@@ -107,7 +107,7 @@ endblock %} {% block page_content %}
 						</svg>
 						<input
 							class="mp-input"
-							value="{{ mpesa_request.payment_gateway }}"
+							value="{{ mpesa_request.payment_gateway|e }}"
 							disabled
 						/>
 					</div>
@@ -126,7 +126,7 @@ endblock %} {% block page_content %}
 						</svg>
 						<input
 							class="mp-input"
-							value="{{ mpesa_request.reference_type }}"
+							value="{{ mpesa_request.reference_type|e }}"
 							disabled
 						/>
 					</div>
@@ -150,7 +150,7 @@ endblock %} {% block page_content %}
 						</svg>
 						<input
 							class="mp-input"
-							value="{{ mpesa_request.reference_id }}"
+							value="{{ mpesa_request.reference_id|e }}"
 							disabled
 						/>
 					</div>
@@ -161,14 +161,14 @@ endblock %} {% block page_content %}
 				<div class="mp-amount-row">
 					<span class="mp-amount-label">Amount</span>
 					<span class="mp-amount-value"
-						>{{ mpesa_request.base_amount }} {{ mpesa_request.currency }}</span
+						>{{ mpesa_request.base_amount|e }} {{ mpesa_request.currency|e }}</span
 					>
 				</div>
 				<div class="mp-divider"></div>
 				<div class="mp-amount-row mp-amount-total">
 					<span class="mp-amount-label">Total to Pay</span>
 					<span class="mp-amount-value mp-amount-highlight"
-						>{{ mpesa_request.amount }} KES</span
+						>{{ mpesa_request.amount|e }} KES</span
 					>
 				</div>
 			</div>

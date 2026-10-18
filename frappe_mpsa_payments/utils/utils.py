@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import frappe
 from frappe import _
-from frappe.utils import get_request_site_address
+from frappe.utils import flt, get_request_site_address
 
 from .doctype_names import ACCESS_TOKENS_DOCTYPE, MPESA_EXPRESS_REQUEST_DOCTYPE
 
@@ -170,10 +170,42 @@ def log_and_throw_error(err_msg, context=None):
         frappe.throw(_(f"{err_msg}: {context}"))
 
 
+def _stk_paid_covers_payment_request(request_doc) -> bool:
+    """False when the STK amount paid is short of the Payment Request (KES requests only).
+
+    Marking the Payment Request paid books its full outstanding, so a short payment must
+    not get there. STK sends whole shillings, hence the half-shilling tolerance.
+    """
+    pr = frappe.db.get_value(
+        "Payment Request", request_doc.reference_name, ["grand_total", "currency"], as_dict=True
+    )
+    if not pr or (pr.currency or "KES") != "KES":
+        return True
+    paid = flt(request_doc.amount)
+    if paid + 0.5 >= flt(pr.grand_total):
+        return True
+    frappe.log_error(
+        title="M-Pesa STK short payment",
+        message=(
+            f"Mpesa Express Request {request_doc.name} ({request_doc.transaction_id}) paid "
+            f"KES {paid}, Payment Request {request_doc.reference_name} is KES {pr.grand_total}. "
+            "Not marked paid; reconcile manually."
+        ),
+    )
+    return False
+
+
 def handle_successful_transaction(request_doc, settings):
     """Handle actions for a successful transaction"""
 
     if request_doc.reference_doctype == "Payment Entry" and not request_doc.transaction_id:
+        return
+
+    if (
+        request_doc.reference_doctype == "Payment Request"
+        and "erpnext" in frappe.get_installed_apps()
+        and not _stk_paid_covers_payment_request(request_doc)
+    ):
         return
 
     if request_doc.get("reference_doctype") and request_doc.get("reference_name"):
@@ -272,7 +304,10 @@ def handle_successful_transaction(request_doc, settings):
                         )
                 try:
                     payment_row = sales_invoice.append("payments", {})
-                    payment_row.amount = float(request_doc.amount)
+                    paid = flt(request_doc.amount)
+                    outstanding = flt(sales_invoice.outstanding_amount)
+                    # never book more than the invoice still owes
+                    payment_row.amount = min(paid, outstanding) if outstanding > 0 else paid
                     payment_row.mode_of_payment = request_doc.payment_gateway
                     payment_row.reference_no = request_doc.transaction_id
                     payment_row.clearance_date = frappe.utils.nowdate()

@@ -2,6 +2,7 @@
 
 import hmac
 import ipaddress
+import re
 
 # Safaricom Daraja callback sources. The published callback IPs (196.201.214.200/206/207/208,
 # 196.201.213.44/114, 196.201.212.69/74/127/129/136/138) all sit in these /24s. Editable in
@@ -71,3 +72,45 @@ def stk_amount(value) -> int:
     if amount < 1:
         raise ValueError("STK amount must be at least 1")
     return amount
+
+
+def daraja_timestamp(now=None) -> str:
+    """Daraja ``Timestamp`` (YYYYMMDDHHmmss) in Africa/Nairobi, whatever the server's TZ.
+
+    Safaricom validates the STK password against this value in EAT; a UTC server clock
+    shifts it by three hours. Falls back to a fixed UTC+3 offset when tzdata is missing.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Africa/Nairobi")
+    except Exception:
+        tz = timezone(timedelta(hours=3))
+    return (now or datetime.now(tz)).astimezone(tz).strftime("%Y%m%d%H%M%S")
+
+
+_SECRET_KEYS = ("password", "securitycredential", "secret", "authorization", "passkey")
+_URL_TOKEN = re.compile(r"([?&]t=)[^&#]*")
+
+
+def scrub_payload(payload):
+    """Copy of a Daraja request body safe to store in an Integration Request.
+
+    Masks Password / SecurityCredential / secrets / Authorization and the ``t=`` callback
+    token in any URL (CallBackURL, ResultURL, QueueTimeOutURL, ConfirmationURL, ...).
+    """
+    if isinstance(payload, dict):
+        out = {}
+        for key, value in payload.items():
+            if any(s in str(key).lower().replace("_", "") for s in _SECRET_KEYS):
+                out[key] = "****" if value not in (None, "") else value
+            else:
+                out[key] = scrub_payload(value)
+        return out
+    if isinstance(payload, (list, tuple)):
+        return [scrub_payload(v) for v in payload]
+    if isinstance(payload, str) and "t=" in payload:
+        return _URL_TOKEN.sub(r"\1***", payload)
+    return payload

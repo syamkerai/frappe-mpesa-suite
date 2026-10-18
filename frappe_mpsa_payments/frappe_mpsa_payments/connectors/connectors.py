@@ -7,8 +7,18 @@ from frappe.model.document import Document
 import requests
 import frappe
 
-from ...daraja.guard import redact_headers
+from ...daraja.guard import redact_headers, scrub_payload
 from frappe.integrations.utils import create_request_log
+
+# Daraja errorCodes meaning the cached OAuth token is no longer accepted.
+TOKEN_ERROR_CODES = {"404.001.03", "400.003.01", "401.002.01"}
+
+
+def _json_or_raw(response: requests.Response):
+    try:
+        return response.json()
+    except ValueError:
+        return {"_raw": (response.text or "")[:2000], "_status": response.status_code}
 
 # Remote error handler for Mpesa
 def on_mpesa_error(data, url, doctype, document_name):
@@ -72,7 +82,7 @@ class MpesaConnector(BaseMpesaConnector):
         self._custom_headers: dict = {}
         self._base_url: str | None = None
         self._url: str | None = None
-        self._timeout: int = 30
+        self._timeout = (10, 30)  # (connect, read) seconds
         self.integration_request = None
         self.doctype = self.document_name = self.error = None
 
@@ -141,7 +151,7 @@ class MpesaConnector(BaseMpesaConnector):
                     self.integration_request = frappe.get_doc("Integration Request", existing_request[0].name)
                 else:
                     self.integration_request = create_request_log(
-                        data=self._payload,
+                        data=scrub_payload(self._payload),
                         request_description=self._request_description,
                         is_remote_request=True,
                         service_name="Mpesa",
@@ -152,7 +162,7 @@ class MpesaConnector(BaseMpesaConnector):
                     )
             else:
                 self.integration_request = create_request_log(
-                    data=self._payload,
+                    data=scrub_payload(self._payload),
                     request_description=self._request_description,
                     is_remote_request=True,
                     service_name="Mpesa",
@@ -164,7 +174,18 @@ class MpesaConnector(BaseMpesaConnector):
 
         try:
             response = self._send_request()
-            data = response.json()
+            data = _json_or_raw(response)
+
+            if (
+                isinstance(data, dict)
+                and str(data.get("errorCode") or "") in TOKEN_ERROR_CODES
+            ):
+                # Token revoked/expired early on Safaricom's side: drop it and retry once.
+                from ...daraja.client import invalidate_token
+
+                invalidate_token(self.settings_name)
+                response = self._send_request()
+                data = _json_or_raw(response)
 
             if response.status_code in {200, 201}:
                 self._handle_success(data)

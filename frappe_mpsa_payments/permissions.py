@@ -26,6 +26,14 @@ FINANCE_ROLES = (
     "Accounts User",
 )
 
+# Send or retry B2C payouts directly (outside the disbursement document's submit flow).
+PAYOUT_ROLES = (
+    "System Manager",
+    "M-Pesa Manager",
+    "M-Pesa Payer",
+    "Accounts Manager",
+)
+
 # Change registrations at Safaricom (C2B URLs, Pull), rotate secrets, release payouts.
 ADMIN_ROLES = (
     "System Manager",

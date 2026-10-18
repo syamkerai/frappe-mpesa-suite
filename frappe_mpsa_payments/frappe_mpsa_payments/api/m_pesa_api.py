@@ -13,6 +13,7 @@ from frappe.model.document import Document
 from frappe.utils import flt
 
 from ...daraja.callbacks import KIND_C2B, KIND_RESULT, safaricom_callback
+from ...daraja.guard import daraja_timestamp, stk_amount, truncate_reference
 from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
 
 from ...utils.doctype_names import MPESA_EXPRESS_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
@@ -37,6 +38,17 @@ from .mpesa_response_handler import (
     transaction_status_on_success,
 )
 from .process_request import process_request
+
+
+def _result_parameters(result_data: dict) -> list:
+    """Result.ResultParameters.ResultParameter as a list of {Key, Value} pairs.
+
+    Daraja sends a bare dict instead of a one-item list when there is a single parameter.
+    """
+    params = (result_data.get("ResultParameters") or {}).get("ResultParameter") or []
+    if isinstance(params, dict):
+        params = [params]
+    return [p for p in params if isinstance(p, dict)]
 
 
 @frappe.whitelist(allow_guest=True)
@@ -100,7 +112,7 @@ def balance_query_callback(**kwargs) -> None:
     request_doc.save(ignore_permissions=True)
 
     account_balance = None
-    result_params = result_data.get("ResultParameters", {}).get("ResultParameter", [])
+    result_params = _result_parameters(result_data)
     for param in result_params:
         if param.get("Key") == "AccountBalance":
             account_balance = param.get("Value")
@@ -206,7 +218,7 @@ def check_transaction_status(name: str) -> Any:
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, express_request.settings)
 
         endpoint = "/mpesa/stkpushquery/v1/query"
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        timestamp = daraja_timestamp()
         payload = {
             "BusinessShortCode": settings.business_shortcode,
             "Password": generate_request_password(settings, timestamp),
@@ -243,14 +255,27 @@ def generate_request_password(settings: Document, timestamp: str) -> str:
     return base64.b64encode(data_to_encode.encode("utf-8")).decode("utf-8")
 
 
+# STK Query errorCodes meaning "still being processed - ask again", not "failed".
+STK_QUERY_PENDING_ERROR_CODES = {"500.001.1001", "500.003.02"}
+
+
 def transaction_status_error_callback(
     response: dict, payload: dict, document_name: str, **kwargs
 ) -> None:
-    """Mark transaction as failed immediately if query fails."""
+    """Mark the prompt Failed only when Safaricom says it is finished (mirrors money_in.stk_poll)."""
     frappe.log_error(
         message=f"Transaction {document_name} query failed.\nResponse: {frappe.as_json(response)}",
         title="Mpesa Transaction Status Query Error",
     )
+
+    error_code = str(response.get("errorCode") or "") if isinstance(response, dict) else ""
+    if error_code in STK_QUERY_PENDING_ERROR_CODES:
+        return  # the callback or the STK poller settles it later
+    if (
+        frappe.db.get_value(MPESA_EXPRESS_REQUEST_DOCTYPE, document_name, "status")
+        == "Completed"
+    ):
+        return  # never downgrade a paid prompt on a late query error
 
     frappe.db.set_value(
         MPESA_EXPRESS_REQUEST_DOCTYPE,
@@ -299,9 +324,9 @@ def initiate_stk_push(**args) -> any:
             MPESA_SETTINGS_DOCTYPE, args.payment_gateway[6:]
         )
         mobile_number = sanitize_mobile_number(args.phone_number or args.sender)
-        amount = args.request_amount
+        amount = stk_amount(args.request_amount)
         business_shortcode = mpesa_settings.business_shortcode
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        timestamp = daraja_timestamp()
         reference_name = args.get("reference_name", "Online Payment")
 
         payload = {
@@ -317,8 +342,10 @@ def initiate_stk_push(**args) -> any:
             ),
             "PhoneNumber": int(mobile_number),
             "CallBackURL": callback_url,
+            # Documented max is 12 chars, but C2B matching needs the full document
+            # name back as BillRefNumber, so AccountReference is not truncated.
             "AccountReference": reference_name,
-            "TransactionDesc": reference_name,
+            "TransactionDesc": truncate_reference(reference_name, 13),
             "TransactionType": (
                 "CustomerPayBillOnline"
                 if mpesa_settings.paybill_type == "Pay Bill"
@@ -349,6 +376,7 @@ def initiate_stk_push(**args) -> any:
 @frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_RESULT)
 def stk_push_callback(**kwargs) -> None:
+    checkout_request_id = None
     try:
         transaction_response = frappe._dict(kwargs["Body"]["stkCallback"])
         checkout_request_id = transaction_response.get("CheckoutRequestID")
@@ -380,16 +408,17 @@ def stk_push_callback(**kwargs) -> None:
             MPESA_EXPRESS_REQUEST_DOCTYPE, {"checkout_request_id": checkout_request_id}
         )
 
-        update_mpesa_request_status(
-            request_doc.name,
-            {
-                "result_code": result_code,
-                "result_desc": transaction_response.get("ResultDesc"),
-                "transaction_id": metadata_dict.get("MpesaReceiptNumber"),
-                "transaction_date": metadata_dict.get("TransactionDate"),
-                "status": status,
-            },
-        )
+        status_update = {
+            "result_code": result_code,
+            "result_desc": transaction_response.get("ResultDesc"),
+            "transaction_id": metadata_dict.get("MpesaReceiptNumber"),
+            "transaction_date": metadata_dict.get("TransactionDate"),
+            "status": status,
+        }
+        if status == "Completed" and metadata_dict.get("Amount") is not None:
+            # book what the customer actually paid, not what was requested
+            status_update["amount"] = flt(metadata_dict.get("Amount"))
+        update_mpesa_request_status(request_doc.name, status_update)
 
         realtime_payload = {
             "status": status,
@@ -435,7 +464,7 @@ def stk_push_callback(**kwargs) -> None:
         )
 
         if status == "Completed":
-            request_doc.reconcile_payment()
+            request_doc.book_completed_payment()
 
         if "erpnext" in frappe.get_installed_apps():
             if request_doc and request_doc.reference_doctype == "Payment Request":
@@ -466,9 +495,10 @@ def publish_stk_status(status: str, payment_request):
 
 
 def sanitize_mobile_number(number: str) -> str:
-    """Strip all non-digit characters, take the last 9 digits, and add country code."""
-    sanitized_number = "".join(filter(str.isdigit, number))[-9:]
-    return "254" + sanitized_number
+    """2547XXXXXXXX / 2541XXXXXXXX via utils.phone; falls back to "254" + last 9 digits."""
+    from ...utils.phone import normalize_msisdn
+
+    return normalize_msisdn(number) or "254" + "".join(filter(str.isdigit, str(number or "")))[-9:]
 
 
 def get_token(app_key, app_secret, base_url):
@@ -626,12 +656,7 @@ def get_mpesa_draft_c2b_payments(
 
 @frappe.whitelist()
 def get_draft_pos_invoice(search_term=None):
-    from frappe import qb
-    from frappe.query_builder import DocType
-
     frappe.has_permission("Sales Invoice", "read", throw=True)
-    SalesInvoice = DocType("Sales Invoice")
-    fields = ["*"]
     status_filters = [
         "Overdue",
         "Partially Paid",
@@ -640,22 +665,21 @@ def get_draft_pos_invoice(search_term=None):
         "Partially Paid and Discounted",
     ]
 
-    # Create the base query
-    query = (
-        qb.from_(SalesInvoice)
-        .select(*fields)
-        .where(SalesInvoice.docstatus == 1)
-        .where(SalesInvoice.status.isin(status_filters))
-        .orderby(SalesInvoice.posting_date, order=qb.desc)
-    )
-
+    or_filters = None
     if search_term:
-        search_filter = (SalesInvoice.customer.like(f"%{search_term}%")) | (
-            SalesInvoice.name.like(f"%{search_term}%")
-        )
-        query = query.where(search_filter)
+        or_filters = [
+            ["customer", "like", f"%{search_term}%"],
+            ["name", "like", f"%{search_term}%"],
+        ]
 
-    invoices = query.run(as_dict=True)
+    # get_list applies user permissions (the old query-builder select * did not)
+    invoices = frappe.get_list(
+        "Sales Invoice",
+        filters={"docstatus": 1, "status": ["in", status_filters]},
+        or_filters=or_filters,
+        fields=["*"],
+        order_by="posting_date desc",
+    )
 
     frappe.response["message"] = invoices
 
@@ -782,20 +806,17 @@ def process_mpesa_integration_request(integration_request_name):
         # Parse the stored data
         response_data = json.loads(integration_request.data)
         result_data = response_data.get("Result", {})
-        result_parameters = result_data.get("ResultParameters", {}).get(
-            "ResultParameter", []
-        )
         result_params = {
             param.get("Key", ""): param.get("Value", "")
-            for param in result_parameters
+            for param in _result_parameters(result_data)
             if "Key" in param
         }
 
         result_code = result_data.get("ResultCode", None)
         receipt_no = result_params.get("ReceiptNo", "")
-        business_shortcode = result_params.get("CreditPartyName", "").split("-")
+        business_shortcode = str(result_params.get("CreditPartyName") or "").split("-")
 
-        if result_code == 0:
+        if str(result_code) == "0":
             if frappe.db.exists("Mpesa C2B Payment Register", {"transid": receipt_no}):
                 error_msg = (
                     f"Duplicate transaction: Receipt No {receipt_no} already exists"
@@ -818,16 +839,17 @@ def process_mpesa_integration_request(integration_request_name):
             mpesa_doc.transactiontype = result_params.get("ReasonType", "")
             mpesa_doc.transid = result_params.get("ReceiptNo", "")
             mpesa_doc.transtime = result_params.get("InitiatedTime", "")
-            mpesa_doc.transamount = float(result_params.get("Amount", 0.0))
-            mpesa_doc.businessshortcode = business_shortcode[0]
-            mpesa_doc.billrefnumber = result_params.get("ReceiptNo", "")
+            mpesa_doc.transamount = flt(result_params.get("Amount", 0.0))
+            mpesa_doc.businessshortcode = business_shortcode[0].strip()
+            # Transaction Status does not return the customer's account reference;
+            # leave billrefnumber empty rather than copy the receipt (it broke matching).
             mpesa_doc.invoicenumber = result_params.get("TransactionID", "")
             mpesa_doc.orgaccountbalance = result_params.get("DebitAccountType", "")
             mpesa_doc.thirdpartytransid = result_params.get(
                 "OriginatorConversationID", ""
             )
 
-            debit_party = result_params.get("DebitPartyName", "").split(" - ")
+            debit_party = str(result_params.get("DebitPartyName") or "").split(" - ")
             mpesa_doc.msisdn = debit_party[0] if len(debit_party) > 0 else ""
             name_parts = (
                 debit_party[1].split(" ") if len(debit_party) > 1 else ["", "", ""]
@@ -935,7 +957,7 @@ def verify_transaction(**kwargs) -> None:
     total_paid = 0
     success = False  # for reporting successfull callback to point of sale ui
 
-    if transaction_response["ResultCode"] == 0:
+    if str(transaction_response["ResultCode"]) == "0":
         if (
             integration_request.reference_doctype
             and integration_request.reference_docname
@@ -990,7 +1012,7 @@ def verify_transaction(**kwargs) -> None:
             "success": success,
             "failure_message": (
                 transaction_response["ResultDesc"]
-                if transaction_response["ResultCode"] != 0
+                if str(transaction_response["ResultCode"]) != "0"
                 else ""
             ),
         },

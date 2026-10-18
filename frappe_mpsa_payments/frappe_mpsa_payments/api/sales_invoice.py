@@ -4,6 +4,8 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from ...permissions import COLLECT_ROLES, require
+
 
 @frappe.whitelist()
 def initiate_invoice_stk_push(
@@ -15,6 +17,9 @@ def initiate_invoice_stk_push(
     company: str = None,
     type: str = "Sales Invoice",
 ) -> dict:
+    require(COLLECT_ROLES)
+    if invoice and type:
+        frappe.has_permission(type, "write", invoice, throw=True)
     try:
         if not (
             invoice and phone_number and amount and mode_of_payment and company and type
@@ -62,6 +67,7 @@ def initiate_invoice_stk_push(
 @frappe.whitelist()
 def validate_stk_push_eligibility(docname, doctype):
     """Validate if STK push can be initiated for this document"""
+    frappe.has_permission(doctype, "read", docname, throw=True)
     try:
         doc = frappe.get_doc(doctype, docname)
 
@@ -127,6 +133,9 @@ def initiate_row_stk_push(
     mode_of_payment: str = None,
     company: str = None,
 ) -> dict:
+    require(COLLECT_ROLES)
+    if name:
+        _check_payment_row_parent(name, "write")
     try:
         if not (name and phone_number and amount and mode_of_payment and company):
             frappe.throw(
@@ -173,6 +182,16 @@ def initiate_row_stk_push(
                 "Failed to initiate STK Push for payment. Please check the logs for more details."
             ),
         }
+
+
+def _check_payment_row_parent(payment_name: str, ptype: str) -> None:
+    """Permission on a Sales Invoice Payment row is the permission on its invoice."""
+    parent = frappe.db.get_value(
+        "Sales Invoice Payment", payment_name, ["parent", "parenttype"], as_dict=True
+    )
+    if not parent:
+        frappe.throw(_("Sales Invoice Payment {0} not found").format(payment_name))
+    frappe.has_permission(parent.parenttype or "Sales Invoice", ptype, parent.parent, throw=True)
 
 
 @frappe.whitelist()
@@ -255,6 +274,7 @@ def get_stk_amount(payment_name: str, company: str) -> float | None:
     Determine valid amount for STK push based on currency rules.
     Returns amount or None if not allowed.
     """
+    _check_payment_row_parent(payment_name, "read")
     payment = frappe.get_doc("Sales Invoice Payment", payment_name)
     invoice = frappe.get_doc("Sales Invoice", payment.parent)
     company_currency = frappe.get_cached_value("Company", company, "default_currency")
@@ -298,6 +318,9 @@ def initiate_klik_pos_stk_push(
     prevent_duplicates: int | bool = 1,
 ) -> dict:
     """Create and submit Mpesa Express Request for Klik POS without rewriting core Mpesa logic."""
+    require(COLLECT_ROLES)
+    if reference_doctype and reference_name:
+        frappe.has_permission(reference_doctype, "write", reference_name, throw=True)
     if not (phone_number and amount and mode_of_payment and company):
         frappe.throw(
             _(
@@ -387,6 +410,7 @@ def get_klik_pos_stk_status(request_name: str) -> dict:
         frappe.throw(_("request_name is required."))
 
     doc = frappe.get_doc("Mpesa Express Request", request_name)
+    doc.check_permission("read")
     invoice = None
     if doc.reference_doctype and doc.reference_name:
         invoice = {
@@ -418,7 +442,10 @@ def link_klik_pos_request_to_invoice(
     if not request_name or not invoice_name:
         frappe.throw(_("request_name and invoice_name are required."))
 
+    require(COLLECT_ROLES)
     request_doc = frappe.get_doc("Mpesa Express Request", request_name)
+    request_doc.check_permission("write")
+    frappe.has_permission(invoice_doctype, "write", invoice_name, throw=True)
     request_doc.db_set("reference_doctype", invoice_doctype)
     request_doc.db_set("reference_name", invoice_name)
 

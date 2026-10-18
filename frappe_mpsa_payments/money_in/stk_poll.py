@@ -5,13 +5,12 @@ never booked from a status query: the receipt number and amount come from the C2
 confirmation, which the matching pipeline books.
 """
 
-import datetime
-
 import frappe
 import requests
 from frappe.utils import add_to_date, cint, now_datetime
 
 from ..daraja.client import CONNECT_TIMEOUT, READ_TIMEOUT, base_url, bearer_headers
+from ..daraja.guard import daraja_timestamp
 from .common import EXPRESS, enabled
 
 # ResultCode -> prompt is finished and failed. 0 = paid. Anything else / errorCode = still pending.
@@ -55,7 +54,7 @@ def poll(name: str) -> str | None:
 
     req = frappe.get_doc(EXPRESS, name)
     settings = frappe.get_doc("Mpesa Settings", req.settings)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp = daraja_timestamp()
     payload = {
         "BusinessShortCode": settings.business_shortcode,
         "Password": generate_request_password(settings, timestamp),

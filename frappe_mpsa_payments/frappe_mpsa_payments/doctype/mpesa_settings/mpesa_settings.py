@@ -13,6 +13,7 @@ from frappe import _
 from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
 
+from ....compat import in_test
 from ....permissions import ADMIN_ROLES, FINANCE_ROLES, require_for_direct_call
 from ....daraja.callbacks import KIND_PULL, KIND_RESULT, safaricom_callback, with_token
 from frappe.utils import (
@@ -36,7 +37,7 @@ from ....utils.utils import (
     erpnext_app_import_guard,
     validate_phone_number,
 )
-from ...api.m_pesa_api import get_account_balance
+from ...api.m_pesa_api import get_account_balance, sanitize_mobile_number
 from .mpesa_connector import MpesaConnector
 
 
@@ -195,7 +196,7 @@ class MpesaSettings(Document):
 
         for i, amount in enumerate(request_amounts):
             args.request_amount = amount
-            if frappe.flags.in_test:
+            if in_test():
                 from .test_mpesa_settings import get_payment_request_response_payload
 
                 _response = frappe._dict(get_payment_request_response_payload(amount))
@@ -221,7 +222,8 @@ class MpesaSettings(Document):
         self, args: frappe._dict
     ) -> list:
         request_amount = args.request_amount
-        if request_amount > self.transaction_limit:
+        # 0 / blank limit means "no limit"; dividing by it below would crash.
+        if self.transaction_limit and request_amount > self.transaction_limit:
             # make multiple requests
             request_amounts = []
             requests_to_be_made = frappe.utils.ceil(
@@ -241,7 +243,7 @@ class MpesaSettings(Document):
 
     @frappe.whitelist()
     def get_account_balance_info(self) -> None:
-        if frappe.flags.in_test:
+        if in_test():
             from .test_mpesa_settings import get_test_account_balance_response
 
             frappe._dict(get_test_account_balance_response())
@@ -266,61 +268,6 @@ class MpesaSettings(Document):
 
         if error:
             frappe.throw(_(response["errorMessage"]), title=_("Transaction Error"))
-
-
-def generate_stk_push(**kwargs) -> str | Any:
-    """Generate stk push by making a API call to the stk push API."""
-    args = frappe._dict(kwargs)
-
-    try:
-        callback_url = with_token(
-            get_request_site_address(True)
-            + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.verify_transaction"
-        )
-
-        mpesa_settings = frappe.get_doc("Mpesa Settings", args.payment_gateway[6:])
-        env = "production" if not mpesa_settings.sandbox else "sandbox"
-        # for sandbox, business shortcode is same as till number
-        business_shortcode = (
-            mpesa_settings.business_shortcode
-            if env == "production"
-            else mpesa_settings.till_number
-        )
-
-        connector = MpesaConnector(
-            env=env,
-            app_key=mpesa_settings.consumer_key,
-            app_secret=mpesa_settings.get_password("consumer_secret"),
-        )
-        mobile_number = sanitize_mobile_number(
-            args.phone_number if args.phone_number else args.sender
-        )
-
-        response = connector.stk_push(
-            business_shortcode=business_shortcode,
-            amount=args.request_amount,
-            passcode=mpesa_settings.get_password("online_passkey"),
-            callback_url=callback_url,
-            reference_code=mpesa_settings.till_number,
-            phone_number=mobile_number,
-            description="POS Payment",
-        )
-
-        return response
-
-    except Exception:
-        frappe.log_error("Mpesa Express Transaction Error")
-        frappe.throw(
-            _(
-                "Issue detected with Mpesa configuration, check the error logs for more details"
-            ),
-            title=_("Mpesa Express Error"),
-        )
-
-
-def sanitize_mobile_number(number: str) -> str:
-    """Add country code and strip leading zeroes from the phone number."""
-    return "254" + str(number).lstrip("0")
 
 
 def get_completed_integration_requests_info(
@@ -369,11 +316,13 @@ def process_balance_info(**kwargs) -> None:
 
     transaction_data = frappe._dict(loads(request.data))
 
-    if account_balance_response["ResultCode"] == 0:
+    if str(account_balance_response.get("ResultCode")) == "0":
         try:
             result_params = account_balance_response["ResultParameters"][
                 "ResultParameter"
             ]
+            if isinstance(result_params, dict):  # Daraja sends a bare dict for one param
+                result_params = [result_params]
 
             balance_info = fetch_param_value(result_params, "AccountBalance", "Key")
             balance_info = format_string_to_json(balance_info)
@@ -726,7 +675,7 @@ def register_pull_transaction(
             f"{base_url}/pulltransactions/v1/register",
             headers=headers,
             json=payload,
-            timeout=30,
+            timeout=(10, 30),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -737,12 +686,19 @@ def register_pull_transaction(
         _record_registration_outcome(mpesa_settings, "Failed", str(e))
         return {"status": "error", "message": str(e)}
 
-    if data.get("Response Status") == "1000":
-        description = data.get("Response Description", "Registered successfully")
+    # The spec shows "ResponseStatus"/"ResponseDescription"; live responses have used
+    # the spaced keys. Accept both.
+    response_status = str(
+        data.get("ResponseStatus") or data.get("Response Status") or data.get("ResponseCode") or ""
+    )
+    response_description = data.get("ResponseDescription") or data.get("Response Description")
+
+    if response_status == "1000":
+        description = response_description or "Registered successfully"
         _record_registration_outcome(mpesa_settings, "Registered", description)
         return {"status": "success", "message": description}
 
-    description = data.get("Response Description", "Registration failed")
+    description = response_description or "Registration failed"
 
     # Safaricom rejects a second registration for a shortcode already enrolled.
     # That is not a failure to act on - it means the shortcode is already set up.

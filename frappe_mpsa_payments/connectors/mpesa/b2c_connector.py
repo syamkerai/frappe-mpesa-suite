@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from enum import Enum
 
 import frappe
@@ -12,6 +13,25 @@ from ..base_connector import (
     create_request_log,
     update_integration_request,
 )
+
+
+def queue_timeout_url() -> str:
+    from frappe.utils import get_url
+
+    from ...daraja.callbacks import with_token
+
+    return with_token(
+        get_url()
+        + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_queue_timeout"
+    )
+
+
+def parse_completed_datetime(value):
+    """Daraja sends DD.MM.YYYY HH:MM:SS; dateutil would read 05.03.2024 as 3 May."""
+    try:
+        return datetime.strptime(str(value).strip(), "%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        return get_datetime(value)
 
 
 class BaseUrl(Enum):
@@ -67,11 +87,13 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             "InitiatorName": self.initiator_name,
             "SecurityCredential": self.security_credential,
             "CommandID": b2c_request_doc.commandid,
-            "Amount": b2c_request_doc.amount,
+            "Amount": int(b2c_request_doc.amount),  # whole shillings, checked before sending
             "PartyA": self.business_shortcode,
             "PartyB": b2c_request_doc.phone_number,
             "Remarks": b2c_request_doc.remarks,
-            "QueueTimeOutURL": callback_url,
+            # A queue timeout is not a result: the payout may still complete, so it must
+            # not reach the Result handler (which would mark it Failed and allow a retry).
+            "QueueTimeOutURL": queue_timeout_url(),
             "ResultURL": callback_url,
             "Occasion": b2c_request_doc.occassion,
             "OriginatorConversationID": b2c_request_doc.originator_conversation_id,
@@ -105,7 +127,9 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         try:
             response_code = data.get("ResponseCode")
 
-            status = "Paid" if str(response_code) == "0" else "Failed"
+            # ResponseCode 0 only means Safaricom accepted the request; money moves (or not)
+            # when the Result callback arrives, which is the only place Paid is set.
+            status = "Initiated" if str(response_code) == "0" else "Failed"
 
             fields = {
                 "conversation_id": data.get("ConversationID", ""),
@@ -123,7 +147,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             update_integration_request(
                 integration_request.name, status="Completed", output=str(data)
             )
-            frappe.db.commit()
+            # no commit: runs inside B2C Disbursement Request.on_submit; the job commits
             frappe.publish_realtime(
                 event="refresh_form", doctype=B2C_REQUEST_DOCTYPE, docname=document_name
             )
@@ -153,7 +177,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             update_integration_request(
                 integration_request.name, status="Failed", output=str(error)
             )
-            frappe.db.commit()
+            # no commit: runs inside B2C Disbursement Request.on_submit; the job commits
             return
 
         fields = {
@@ -169,7 +193,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         update_integration_request(
             integration_request.name, status="Failed", output=str(data)
         )
-        frappe.db.commit()
+        # no commit: runs inside B2C Disbursement Request.on_submit; the job commits
         frappe.enqueue(
             "frappe_mpsa_payments.services.b2c_response_service.update_b2c_reference_status",
             queue="short",
@@ -189,9 +213,16 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
 
         result = frappe._dict(payload)
         occ_id = result.get("OriginatorConversationID")
-        req = frappe.get_doc(
-            B2C_REQUEST_DOCTYPE, {"originator_conversation_id": occ_id}
+        # Row lock serialises duplicate Result callbacks (Safaricom re-sends).
+        name = frappe.db.get_value(
+            B2C_REQUEST_DOCTYPE, {"originator_conversation_id": occ_id}, "name", for_update=True
         )
+        if not name:
+            frappe.throw(f"No B2C request for OriginatorConversationID {occ_id}")
+        req = frappe.get_doc(B2C_REQUEST_DOCTYPE, name)
+        if req.status in ("Paid", "Failed") and req.result_code not in (None, ""):
+            # Final result already recorded; a re-send must not book the payout again.
+            return
 
         self.integration_request = create_request_log(
             data=payload,
@@ -204,8 +235,12 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             reference_docname=req.name,
         )
 
-        params = result.get("ResultParameters", {}).get("ResultParameter", [])
-        result_dict = {p.get("Key"): p.get("Value") for p in params}
+        # ResultParameters is absent on many failures and ResultParameter is a single dict
+        # (not a list) when Safaricom returns one item.
+        params = (result.get("ResultParameters") or {}).get("ResultParameter") or []
+        if isinstance(params, dict):
+            params = [params]
+        result_dict = {p.get("Key"): p.get("Value") for p in params if isinstance(p, dict)}
 
         update_map = {
             "status": "Paid" if str(result.get("ResultCode")) == "0" else "Failed",
@@ -230,7 +265,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
 
         tcd = result_dict.get("TransactionCompletedDateTime")
         if tcd:
-            update_map["transaction_completed_datetime"] = get_datetime(tcd)
+            update_map["transaction_completed_datetime"] = parse_completed_datetime(tcd)
 
         for k, v in update_map.items():
             if v is not None:

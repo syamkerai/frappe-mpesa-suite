@@ -6,8 +6,9 @@ from frappe_mpsa_payments.services.b2c_request_service import create_b2c_request
 from frappe_mpsa_payments.services.b2c_response_service import process_b2c_result
 
 
-@frappe.whitelist()
 def make_b2c_payment_request(doc_name: str) -> dict:
+    # Not whitelisted: it sends money. Reached only from B2C Disbursement Request
+    # on_submit / retry_failed_payment, which check state and roles first.
     """
     Queues and initiates a B2C payment request by creating the
     B2C Request document and delegating to the appropriate connector.
