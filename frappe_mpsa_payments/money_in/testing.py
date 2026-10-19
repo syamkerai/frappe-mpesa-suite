@@ -15,30 +15,33 @@ ITEM = "_Test M-Pesa Service"
 PRICE_LIST = "_Test M-Pesa KES Selling"
 
 
+def before_tests() -> None:
+    """``before_tests`` hook: let ERPNext prepare a test site its own way on each version.
+
+    v15: ``erpnext.setup.utils.before_tests`` completes the setup wizard (warehouse types,
+    price lists, fiscal year...) that Frappe's test-record builder needs.
+    v16: ERPNext dropped that hook; importing ``erpnext.tests.utils`` runs its BootStrapTestData.
+    Running our own setup wizard instead collides with v16's bootstrap ("Standard Buying").
+    """
+    frappe.set_user("Administrator")
+    try:
+        from erpnext.setup.utils import before_tests as erpnext_before_tests
+    except ImportError:
+        erpnext_before_tests = None
+    if erpnext_before_tests:
+        erpnext_before_tests()
+    else:
+        try:
+            import erpnext.tests.utils  # noqa: F401  (v16: bootstraps master data on import)
+        except ImportError:
+            pass
+    frappe.db.commit()
+
+
 def bootstrap() -> None:
     frappe.set_user("Administrator")
     if not frappe.db.a_row_exists("Company"):
-        from frappe.desk.page.setup_wizard.setup_wizard import setup_complete
-
-        year = now_datetime().year
-        setup_complete(
-            {
-                "currency": "KES",
-                "full_name": "Test User",
-                "company_name": COMPANY,
-                "timezone": "Africa/Nairobi",
-                "company_abbr": ABBR,
-                "industry": "Manufacturing",
-                "country": "Kenya",
-                "fy_start_date": f"{year}-01-01",
-                "fy_end_date": f"{year}-12-31",
-                "language": "english",
-                "company_tagline": "Testing",
-                "email": "test@example.com",
-                "password": "test",
-                "chart_of_accounts": "Standard",
-            }
-        )
+        before_tests()  # e.g. a single module run with --skip-before-tests
     if not frappe.db.exists("Company", COMPANY):
         frappe.get_doc(
             {

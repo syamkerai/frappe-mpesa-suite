@@ -30,6 +30,9 @@ class TestPaymentsAPI(IntegrationTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        # CI cannot resolve the example webhook host; the SSRF guard has its own unit tests.
+        cls._public = patch("frappe_mpsa_payments.gateway.netguard.is_public_url", return_value=True)
+        cls._public.start()
         t.bootstrap()
         name = "_Test Chatbot"
         if not frappe.db.exists("Mpesa API Client", name):
@@ -39,6 +42,11 @@ class TestPaymentsAPI(IntegrationTestCase):
                 "can_link_documents": 1,
             }).insert()
         cls.client = frappe.get_doc("Mpesa API Client", name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._public.stop()
+        super().tearDownClass()
 
     def setUp(self):
         frappe.set_user("Administrator")

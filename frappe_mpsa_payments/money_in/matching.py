@@ -68,7 +68,18 @@ def run(limit: int = 100) -> None:
         or get_datetime(r.last_match_attempt) <= add_to_date(now, minutes=-min(2 ** cint(r.match_attempts), 360))
     ][:limit]
 
-    frappe.local.mpesa_customer_index = None  # rebuild once per run
+    frappe.local.mpesa_customer_index = None
+    frappe.local.mpesa_customer_index_scope = True  # cache the index for this run only
+    try:
+        _match_due(due, now)
+    finally:
+        frappe.local.mpesa_customer_index_scope = False
+        frappe.local.mpesa_customer_index = None
+
+    book_for_submitted_orders()
+
+
+def _match_due(due: list, now) -> None:
     for name in due:
         frappe.db.savepoint("mpesa_match")
         try:
@@ -84,8 +95,6 @@ def run(limit: int = 100) -> None:
              "last_match_attempt": now},
             update_modified=False,
         )
-
-    book_for_submitted_orders()
 
 
 def book_for_submitted_orders(limit: int = 100) -> None:
@@ -250,13 +259,15 @@ def repair_invoice_number(register) -> Match | None:
 
 def _customer_index() -> dict:
     """compact(name or customer_name) -> customer names, built once per matcher run."""
-    index = getattr(frappe.local, "mpesa_customer_index", None)
+    scoped = getattr(frappe.local, "mpesa_customer_index_scope", False)
+    index = getattr(frappe.local, "mpesa_customer_index", None) if scoped else None
     if index is None:
         index = {}
         for c in frappe.get_all("Customer", filters={"disabled": 0}, fields=["name", "customer_name"], order_by="name asc"):
             for key in {compact(c.name).lower(), compact(c.customer_name).lower()} - {""}:
                 index.setdefault(key, set()).add(c.name)
-        frappe.local.mpesa_customer_index = index
+        if scoped:
+            frappe.local.mpesa_customer_index = index
     return index
 
 

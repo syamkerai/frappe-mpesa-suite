@@ -71,6 +71,9 @@ doctype_js = {
 # include app icons in desk
 # app_include_icons = "frappe_mpsa_payments/public/icons.svg"
 
+# Prepare ERPNext test data the version-appropriate way (v15 setup wizard / v16 bootstrap)
+before_tests = "frappe_mpsa_payments.money_in.testing.before_tests"
+
 # Public pay page for Payment Intents: /pay/<token>
 website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
 
