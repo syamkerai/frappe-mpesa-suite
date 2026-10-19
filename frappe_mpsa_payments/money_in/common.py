@@ -46,25 +46,44 @@ def erpnext_installed() -> bool:
 
 
 # ---------------------------------------------------------------- shortcode -> books
+B2C_ONLY = "MPesa B2C (Business to Customer)"
+
+
 def settings_for_shortcode(shortcode) -> str | None:
-    """Mpesa Settings name for a paybill/till number (business shortcode or till)."""
+    """Mpesa Settings name for a paybill/till number (business shortcode or till).
+
+    One shortcode may do everything (Safaricom "Business One Account": Paybill, STK, B2C and
+    B2B on one number), ideally as one record. When several records share the number, money
+    received is booked with a record that collects (C2B / Express) before a B2C-only one,
+    then the oldest, so the choice never depends on database order.
+    """
     code = cstr(shortcode).strip()
     if not code:
         return None
-    for field in ("business_shortcode", "till_number"):
-        name = frappe.db.get_value(
-            "Mpesa Settings", {field: code}, "name", order_by="creation asc"
-        )
-        if name:
-            return name
-    # tolerate stray spaces stored on the till (seen in production data)
     rows = frappe.get_all(
-        "Mpesa Settings", fields=["name", "business_shortcode", "till_number"], order_by="creation asc"
+        "Mpesa Settings",
+        fields=["name", "business_shortcode", "till_number", "api_type"],
+        order_by="creation asc",
     )
-    for row in rows:
-        if code in (cstr(row.business_shortcode).strip(), cstr(row.till_number).strip()):
-            return row.name
-    return None
+    # strip(): tolerate stray spaces stored on the till (seen in production data)
+    matches = [r for r in rows if code in (cstr(r.business_shortcode).strip(), cstr(r.till_number).strip())]
+    if not matches:
+        return None
+    matches.sort(key=lambda r: 1 if r.api_type == B2C_ONLY else 0)  # stable: oldest first otherwise
+    return matches[0].name
+
+
+def records_sharing_shortcode(name: str, shortcodes) -> list:
+    """Other Mpesa Settings using any of ``shortcodes`` (for the save-time warning)."""
+    codes = {cstr(c).strip() for c in shortcodes if cstr(c).strip()}
+    if not codes:
+        return []
+    rows = frappe.get_all("Mpesa Settings", fields=["name", "business_shortcode", "till_number"])
+    return [
+        r.name
+        for r in rows
+        if r.name != name and codes & {cstr(r.business_shortcode).strip(), cstr(r.till_number).strip()}
+    ]
 
 
 def mode_of_payment_for(settings_name: str) -> str | None:

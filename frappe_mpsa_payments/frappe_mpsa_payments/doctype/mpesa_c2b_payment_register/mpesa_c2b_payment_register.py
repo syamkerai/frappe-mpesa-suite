@@ -56,10 +56,12 @@ class MpesaC2BPaymentRegister(Document):
         self.set_missing_values()
 
     def after_insert(self):
-        auto_reconcile = frappe.db.get_value(
-            "Mpesa Settings",
-            {"business_shortcode": self.businessshortcode},
-            "auto_reconcile_c2b",
+        from frappe_mpsa_payments.money_in.common import settings_for_shortcode
+
+        # by paybill or till, the same record every other C2B step uses
+        settings_name = settings_for_shortcode(self.businessshortcode)
+        auto_reconcile = settings_name and frappe.db.get_value(
+            "Mpesa Settings", settings_name, "auto_reconcile_c2b"
         )
         if not auto_reconcile:
             return
@@ -90,6 +92,7 @@ class MpesaC2BPaymentRegister(Document):
                     "register_status": "Success",
                 },
                 fields=["company", "mode_of_payment"],
+                order_by="creation asc",
             )
             if len(register_url_list) > 0:
                 self.company = register_url_list[0].company
@@ -254,14 +257,17 @@ class MpesaC2BPaymentRegister(Document):
                 return
 
     def _reconcile_payment(self):
-        settings = frappe.get_cached_value(
+        from frappe_mpsa_payments.money_in.common import settings_for_shortcode
+
+        settings_name = settings_for_shortcode(self.businessshortcode)
+        settings = settings_name and frappe.db.get_value(
             "Mpesa Settings",
-            {"business_shortcode": self.businessshortcode},
+            settings_name,
             ["auto_reconcile_c2b", "auto_create_sales_invoice"],
             as_dict=True,
         )
 
-        if not settings.auto_reconcile_c2b or not self.payment_entry:
+        if not settings or not settings.auto_reconcile_c2b or not self.payment_entry:
             return
 
         invoice, order = self._get_matching_refs()

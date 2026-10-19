@@ -1,0 +1,83 @@
+# M-Pesa Sandbox Test Lab
+
+Runs every M-Pesa flow against Safaricom's Daraja **sandbox** and checks what the app did:
+receipts, verification, booking, duplicates, forgeries, payouts and reversals. Use it on a **test
+site** before going live. It refuses to run on live keys.
+
+## 1. Test site (once)
+
+1. Create a separate Frappe Cloud site (a copy of the live site, or a fresh ERPNext with a test
+   company). Tests post real Payment Entries and GL entries on it.
+2. Install `frappe_mpsa_payments` (branch `astral-suite`) and run `migrate`.
+3. Switch the lab on for that site only:
+   `bench --site <test-site> set-config mpesa_sandbox_lab 1`
+   (Frappe Cloud: Site → Site Config → add `mpesa_sandbox_lab` = `1`).
+4. Make sure `host_name` is the site's public `https://` address. Safaricom posts results to it.
+
+## 2. Daraja sandbox app (once)
+
+On [developer.safaricom.co.ke](https://developer.safaricom.co.ke):
+
+1. Go to **My Apps → Add a new app** and tick every product: M-Pesa Express, C2B, B2C, B2B,
+   Transaction Status, Account Balance and Reversal.
+2. Copy the app's **Consumer Key** and **Consumer Secret**.
+3. Open the **Test Credentials** page and note:
+   - Initiator Name and Initiator Password
+   - Shortcode 1 (Party A, 600xxx) and Shortcode 2 (Party B)
+   - Test MSISDN
+   - the M-Pesa Express shortcode **174379** and its **Passkey**
+
+Type secrets into the ERPNext forms directly. Never paste them into chats or tickets.
+
+## 3. ERPNext setup on the test site
+
+| Record | Settings |
+|---|---|
+| Mpesa Settings "Sandbox C2B" | **Sandbox** ticked; the key and secret; **Business Shortcode** and **Till Number** both = Shortcode 1 (600xxx). B2C, B2B, balance and reversal send the Business Shortcode as the paying party; Initiator Name and Password from Test Credentials; Company and Accounting Mapping. |
+| Mpesa C2B Payment Register URL | For "Sandbox C2B". Register Status must be **Success**. |
+| Mpesa Settings "Sandbox STK" | **Sandbox** ticked; the key and secret; **Business Shortcode 174379**; the sandbox **Passkey**; Company. |
+| M-Pesa Suite Settings | Integration User. Keep both **Verify** switches on. Leave the IP allow-list **off** while testing, because the lab's replay and forgery posts come from the server itself. |
+| Test Sales Invoice | Submitted, with at least 5 × the test amount outstanding. |
+| Test Supplier | One **approved Supplier M-Pesa Account** to Party B (600000). For the lab, set **Hold New Supplier M-Pesa Accounts** to 0. |
+| Test B2C Payment Disbursement | One row paying the Test MSISDN. Leave it as a draft; the lab submits it. |
+
+The B2C and B2B fields of the test run can point to the C2B record, because Shortcode 1 has the
+initiator in sandbox.
+
+## 4. Running
+
+1. Go to **M-Pesa workspace → Sandbox Test Lab → New**. Fill in Sandbox Setup and Test Documents,
+   then save. Every scenario is added as a row.
+2. Click **Health Check**. Fix every red line before anything else.
+3. Click **Run Ready Tests** to start the automatic tests.
+4. Start **Guided** tests with the row's **Run** button, one at a time. The confirmation says what
+   to do on your phone: pay, or press Cancel.
+5. Tests that depend on another test (replays, status checks, reversal) become ready once it has
+   passed. Click **Run Ready Tests** again.
+6. Results are checked every minute and the page refreshes itself. Each row shows Passed or Failed
+   with the reason and a link to the document it created.
+
+**Tools** menu:
+- **Simulate a C2B Payment** makes any sandbox paybill or till payment you like.
+- **Replay a Callback** re-sends a stored Safaricom callback, with or without the token, to see
+  what a re-send or a forger gets.
+
+## 5. What is tested
+
+| Group | Scenarios |
+|---|---|
+| Health | Setup and connectivity (token, initiator, public callback URL, C2B registration, go-live switches); Account Balance |
+| C2B | Exact invoice reference; mistyped reference; unknown reference; duplicate confirmation; forged without token; forged receipt Safaricom never issued; wrong shortcode |
+| STK | Paid; cancelled; forged "paid" callback while the prompt is open; duplicate callback; status check of a paid prompt; callback without token |
+| B2C | Payout paid and booked once; duplicate result; status query refused for a settled payout |
+| B2B | Typed paybill refused; payment to an approved supplier account; duplicate result |
+| Reversal | Reverse a received C2B payment |
+
+Pull Transactions cannot be tested in the sandbox (Safaricom does not offer it there), and real
+customer payments cannot be either. Both get a KES 1–10 live check at go-live.
+
+## 6. Go-live gate
+
+Run the whole lab twice in a row with every row **Passed**, with the go-live switches on (both
+Verify switches, both Require Token switches, Match and Book Receipts). Keep the test runs: they
+are the sign-off record.

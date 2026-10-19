@@ -150,6 +150,7 @@ def build():
     frappe.local = types.SimpleNamespace(request=None, form_dict=_dict(), session=frappe.session)
     frappe.__version__ = "15.0.0"
     frappe.flags = _dict()
+    frappe.conf = _dict()
 
     def throw(msg, exc=ValidationError, *a, **kw):
         raise exc(msg) if isinstance(exc, type) else ValidationError(msg)

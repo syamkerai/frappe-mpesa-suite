@@ -200,7 +200,10 @@ scheduler_events = {
         ],
         "*/2 * * * *": ["frappe_mpsa_payments.money_in.events.every_two_minutes"],
         "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"],
-        "* * * * *": ["frappe_mpsa_payments.gateway.jobs.every_minute"],
+        "* * * * *": [
+            "frappe_mpsa_payments.gateway.jobs.every_minute",
+            "frappe_mpsa_payments.sandbox_lab.runner.check_waiting",
+        ],
     },
     "hourly": [
         "frappe_mpsa_payments.services.b2c_pull_transaction_scheduler_service.run_hourly_pull_transactions"

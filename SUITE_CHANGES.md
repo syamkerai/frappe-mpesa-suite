@@ -386,3 +386,25 @@ Navari's test users. The Python package, module and DocType names don't change, 
 Safaricom callback URLs and existing data depend on them. Navari's copyright headers and the AGPL
 licence stay, as the licence requires. `docs/LICENSING.md` lists every file that came from upstream
 for legal review.
+
+## Sandbox Test Lab and one-shortcode accounts (2026-10-19)
+
+**M-Pesa Sandbox Test Lab** (`sandbox_lab/`, DocTypes Mpesa Sandbox Test Run / Test Case; guide in
+`docs/SANDBOX_TESTING.md`). Runs every flow against Daraja's sandbox and checks what the app did:
+22 scenarios over health, C2B (exact / mistyped / unknown reference, duplicate, forged without
+token, forged receipt, wrong shortcode), STK (paid, cancelled, forged "paid" while open, duplicate,
+status check, no token), B2C (paid and booked once, duplicate result, settled payout not
+re-queried), B2B (typed paybill refused, approved account paid, duplicate result) and reversal.
+Tools: Simulate a C2B Payment, Replay a Callback (with or without token), Health Check. Checks run
+every minute until Passed / Failed / timeout. Works only with site config `mpesa_sandbox_lab: 1`,
+Sandbox-ticked Mpesa Settings and M-Pesa admin roles, so it can never use live keys.
+
+**One shortcode for everything.** Safaricom's M-PESA Business One Account lets one number collect
+(Paybill / STK) and pay out (B2C, B2B); collections and B2C both use the Utility account.
+- `settings_for_shortcode` prefers a collecting record over a B2C-only one when several records
+  share a number (then the oldest), instead of whichever the database returned first.
+- C2B register auto-reconcile and its after-insert lookup now use that resolver: they matched
+  `business_shortcode` only, so Buy Goods tills never matched, and `_reconcile_payment` crashed
+  when no record was found.
+- Saving an Mpesa Settings whose shortcode another record uses shows which record books receipts.
+- Setup guide: one record per shortcode; the API operator needs a role per API.

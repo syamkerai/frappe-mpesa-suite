@@ -144,6 +144,28 @@ class MpesaSettings(Document):
                 if rate.currency == "KES":
                     frappe.throw(_("Conversion rate for KES cannot be set."))
 
+        self.warn_shared_shortcode()
+
+    def warn_shared_shortcode(self) -> None:
+        """One shortcode can do Paybill, STK, B2C and B2B (Safaricom Business One Account); keep it on
+        one record. A second record for the same number is allowed but money received is booked with
+        only one of them (see money_in.common.settings_for_shortcode), so say which."""
+        from frappe_mpsa_payments.money_in.common import records_sharing_shortcode, settings_for_shortcode
+
+        others = records_sharing_shortcode(self.name, [self.business_shortcode, self.till_number])
+        if not others:
+            return
+        receiving = settings_for_shortcode(self.business_shortcode or self.till_number)
+        frappe.msgprint(
+            _(
+                "Shortcode {0} is also used by {1}. One shortcode can collect (Paybill / STK) and pay out "
+                "(B2C / B2B) on one Mpesa Settings record. If you keep several, money received on it is "
+                "booked with {2}."
+            ).format(self.business_shortcode or self.till_number, ", ".join(others), receiving or self.name),
+            title=_("Shortcode used by another record"),
+            indicator="orange",
+        )
+
     def refresh_security_credential(self, force: bool = False) -> None:
         """SecurityCredential = RSA-PKCS1v15(initiator password) with the cert for this environment.
 
