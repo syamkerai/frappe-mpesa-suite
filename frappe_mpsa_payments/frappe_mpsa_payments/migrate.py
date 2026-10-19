@@ -81,6 +81,8 @@ def create_custom_erpnext_fields():
                 "fieldtype": "Link",
                 "options": "Company",
                 "insert_after": "api_type",
+                "description": "Company whose books receive this shortcode's money. Saving with a Company "
+                "creates its Payment Gateway Account and the Mode of Payment 'Mpesa-<name>'.",
             },
             {
                 "fieldname": "accounting_mapping_section",
@@ -121,6 +123,7 @@ def create_custom_erpnext_fields():
                 "fieldtype": "Link",
                 "options": "Account",
                 "insert_after": "cost_center",
+                "description": "Expense account for Safaricom transaction charges (e.g. 'M-Pesa Charges').",
                 "module": MODULE,
             },
         ],

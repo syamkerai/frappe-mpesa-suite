@@ -325,12 +325,17 @@ def mark_paid(intent, receipt, amount, paid_at, payer_name, register=None, via=N
             frappe.db.rollback(save_point="mpesa_intent_booking")
         except Exception:
             pass  # upstream committed mid-way; nothing left to undo
-        log_match("Error", via or "Reference", reference_doctype=INTENT, reference_name=intent.name, once=True,
-                  details=f"Payment recorded but booking failed: {frappe.get_traceback()[-800:]}")
+        log_match("Error", _match_method(via), reference_doctype=INTENT, reference_name=intent.name, once=True,
+                  details=f"Payment recorded ({via or 'C2B'}) but booking failed: {frappe.get_traceback()[-800:]}")
     return intent
 
 
 # ---------------------------------------------------------------- accounting
+def _match_method(via) -> str:
+    """Mpesa Match Log method for how the money arrived ("STK callback" is not one of its options)."""
+    return via if via == "Manual Attach" else "Reference"
+
+
 def _book(intent, receipt, amount, paid_at, register, via, settings) -> None:
     from ..money_in import booking
     from ..money_in.common import enabled
@@ -348,7 +353,7 @@ def _book(intent, receipt, amount, paid_at, register, via, settings) -> None:
     reg = frappe.get_doc(REGISTER, register)
     if reg.docstatus != 0 or reg.get("payment_entry"):
         return
-    match = Match(method=via or "Reference", customer=intent.customer or reg.get("customer"),
+    match = Match(method=_match_method(via), customer=intent.customer or reg.get("customer"),
                   details=f"Payment intent {intent.name} ({intent.order_ref})")
     if intent.reference_doctype in LINKABLE and intent.reference_name:
         match.update(doctype=intent.reference_doctype, name=intent.reference_name)

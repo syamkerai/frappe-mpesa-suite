@@ -6,6 +6,9 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "setup_guide_section",
+  "setup_guide",
+  "section_break_main",
   "payment_gateway_name",
   "api_type",
   "column_break_nhvr",
@@ -65,65 +68,89 @@
  ],
  "fields": [
   {
+   "collapsible": 1,
+   "fieldname": "setup_guide_section",
+   "fieldtype": "Section Break",
+   "label": "Setup Guide: where each value comes from"
+  },
+  {
+   "fieldname": "setup_guide",
+   "fieldtype": "HTML",
+   "label": "Setup Guide",
+   "options": "<div class=\"mpesa-setup-guide\" style=\"font-size: 13px; line-height: 1.55;\">\n<p class=\"text-muted\">Make <b>one Mpesa Settings record per shortcode and purpose</b> (e.g. \"Paybill 123456\" for receiving, \"B2C 600000\" for paying out). Do steps 1&ndash;3 once per site, steps 4&ndash;7 for every record. Each field below also says where its value comes from.</p>\n\n<h5 style=\"margin-top: 14px;\">1. Once per site: a public HTTPS address</h5>\n<p>Safaricom sends every result to your site, so it must be reachable from the internet over <b>https</b>. Tell Frappe that address (run on the server):<br>\n<code>bench --site &lt;your-site&gt; set-config host_name https://erp.yourcompany.co.ke</code><br>\nCallback URLs are built from this value. A wrong or internal address means payments arrive at Safaricom but never reach ERPNext.</p>\n\n<h5 style=\"margin-top: 14px;\">2. Once per site: M-Pesa Suite Settings</h5>\n<ul>\n<li><b>Integration User</b>: create a System User with only Accounts User and the M-Pesa roles it needs, and select it here. Then set <b>If No Integration User</b> to <i>Refuse</i>.</li>\n<li>Leave <b>Verify C2B Confirmations</b> and <b>Verify STK Callbacks</b> ticked. They need the Initiator Name and Initiator Password (step 5) on each record.</li>\n<li>The <b>Callback Token</b> is generated for you. Turn on the token checks only after step 6 has registered your URLs.</li>\n</ul>\n\n<h5 style=\"margin-top: 14px;\">3. Once per site: Mpesa Public Key Certificate (usually nothing to do)</h5>\n<p>Safaricom's sandbox and production certificates ship with the app and are used to encrypt the Initiator Password. Upload a file there only if Safaricom issues a new certificate (Daraja &rarr; Docs &rarr; Security Credentials).</p>\n\n<h5 style=\"margin-top: 14px;\">4. Get credentials from Safaricom</h5>\n<table class=\"table table-bordered table-condensed\" style=\"font-size: 12px;\">\n<thead><tr><th style=\"width: 22%;\">What</th><th>Testing (Sandbox ticked)</th><th>Live (Sandbox unticked)</th></tr></thead>\n<tbody>\n<tr><td>Consumer Key / Secret</td><td><a href=\"https://developer.safaricom.co.ke\" target=\"_blank\" rel=\"noopener\">developer.safaricom.co.ke</a> &rarr; My Apps &rarr; Add a new app (tick the APIs you need) &rarr; copy Consumer Key and Consumer Secret.</td><td>Daraja &rarr; <b>Go Live</b> for the shortcode (done by its M-PESA Business Administrator, confirmed by OTP). The production app then appears under My Apps with its own Consumer Key and Secret.</td></tr>\n<tr><td>Business Shortcode</td><td>174379 (the M-Pesa Express test shortcode on Daraja's Test Credentials page).</td><td>Pay Bill: your paybill number. Buy Goods: the Head Office / Store number that M-Pesa Express was approved for (not the till).</td></tr>\n<tr><td>Till Number</td><td>The test C2B shortcode (600xxx) from Daraja's Test Credentials page. Used for C2B URL registration, Pull and Transaction Status in sandbox.</td><td>Buy Goods only: the Till number customers pay to.</td></tr>\n<tr><td>Online PassKey</td><td>Daraja &rarr; APIs &rarr; M-Pesa Express &rarr; Simulator / Test Credentials (passkey for 174379).</td><td>Emailed by Safaricom after Go Live for M-Pesa Express (Lipa Na M-Pesa Online). C2B- or B2C-only records: any text (the field is required).</td></tr>\n<tr><td>Initiator Name / Password</td><td>Daraja Test Credentials: Initiator Name and Initiator Password.</td><td><a href=\"https://org.ke.m-pesa.com\" target=\"_blank\" rel=\"noopener\">M-PESA Org Portal</a>: the Business Administrator creates an <b>API operator</b> for the shortcode with the API roles you need (Transaction Status, Account Balance, B2C, Reversal) and sets its password. Its username is the Initiator Name.</td></tr>\n<tr><td>Pull Nominated Number</td><td>Not available in sandbox.</td><td>Apply to Safaricom (M-PESA Business / API support) to enable the Pull Transaction API for the shortcode. The phone number you nominate there (2547XXXXXXXX) goes in Pull Transaction Nominated Number.</td></tr>\n</tbody></table>\n\n<h5 style=\"margin-top: 14px;\">5. Fill in this form and save</h5>\n<ol>\n<li><b>Payment Gateway Name</b>: a short name such as <i>Paybill 123456</i>. It becomes the Payment Gateway and Mode of Payment <i>Mpesa-&lt;name&gt;</i> and cannot be renamed later.</li>\n<li><b>API Type</b>, <b>Sandbox</b>, <b>Paybill Type</b>, then the Safaricom values from step 4.</li>\n<li><b>Company</b>, then under <b>Accounting Mapping</b>: <b>Bank Account</b> (a Company Bank Account for this shortcode, e.g. \"M-Pesa Paybill 123456\"), <b>Cost Center</b>, and <b>M-Pesa Charges Account</b>. Saving with a Company creates the Payment Gateway Account and the Mode of Payment for it.</li>\n<li>Type the <b>Initiator Password</b>. On save, the <b>Security Credential</b> is generated from it. Never paste one in by hand. If Safaricom answers \"initiator information is invalid\", re-type the password and save, or use <b>Security &rarr; Regenerate Security Credential</b>.</li>\n</ol>\n\n<h5 style=\"margin-top: 14px;\">6. Connect it to Safaricom</h5>\n<ul>\n<li><b>Receiving C2B (Pay Bill / Till)</b>: create an <b>Mpesa C2B Payment Register URL</b> record for this Mpesa Settings, choose its Company and Mode of Payment, and save. Register Status must show <b>Success</b>. If host_name or the callback token changes later, open that record and press <b>Register URLs Again</b>.</li>\n<li><b>Pull Transactions</b> (catches payments whose confirmation never arrived): after Safaricom enables Pull, enter the Nominated Number, then use <b>Pull Transaction &rarr; Register Pull Transaction</b> and tick <b>Enable Hourly Pull Transactions</b>.</li>\n<li><b>B2C payouts</b>: use a separate record with API Type <i>MPesa B2C</i> for the B2C shortcode, and keep its utility account funded.</li>\n</ul>\n\n<h5 style=\"margin-top: 14px;\">7. Test it</h5>\n<ul>\n<li><b>Get Account Balance</b> proves the Consumer Key/Secret, Initiator and Security Credential in one go.</li>\n<li>Send an STK prompt of KES 1 to your own phone (Payment Request or POS) and check that the receipt is booked.</li>\n<li>Pay KES 1 to the paybill/till from a phone and check that a Mpesa C2B Payment Register appears.</li>\n</ul>\n\n<h5 style=\"margin-top: 14px;\">Common errors</h5>\n<table class=\"table table-bordered table-condensed\" style=\"font-size: 12px;\">\n<tbody>\n<tr><td style=\"width: 30%;\">404.001.03 Invalid Access Token</td><td>Wrong Consumer Key/Secret, or Sandbox ticked/unticked for the wrong keys.</td></tr>\n<tr><td>2001 Initiator information is invalid</td><td>Wrong Initiator Name or Password, or the credential was made for the other environment. Re-type the Initiator Password and save (or Security &rarr; Regenerate Security Credential).</td></tr>\n<tr><td>C2B \"already registered\"</td><td>Safaricom keeps the first registration. Treated as Success. If the old URLs were wrong, ask Safaricom API support to delete the registration, then press Register URLs Again.</td></tr>\n<tr><td>STK 1032 / 1037</td><td>Customer cancelled the prompt, or the phone did not answer in time. Nothing was paid.</td></tr>\n<tr><td>Payments not reaching ERPNext</td><td>Check host_name (step 1), that the site is reachable on https, and Rejected Callbacks in M-Pesa Suite Settings.</td></tr>\n</tbody></table>\n</div>\n"
+  },
+  {
+   "fieldname": "section_break_main",
+   "fieldtype": "Section Break"
+  },
+  {
    "fieldname": "payment_gateway_name",
    "fieldtype": "Data",
    "label": "Payment Gateway Name",
    "reqd": 1,
-   "unique": 1
+   "unique": 1,
+   "description": "A short name for this shortcode, e.g. 'Paybill 123456'. It becomes the Payment Gateway and Mode of Payment 'Mpesa-<name>' and cannot be renamed later."
   },
   {
    "fieldname": "consumer_key",
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Consumer Key",
-   "reqd": 1
+   "reqd": 1,
+   "description": "Daraja portal (developer.safaricom.co.ke) > My Apps > your app > Consumer Key. Use the sandbox app while testing and the production app after Go Live."
   },
   {
    "fieldname": "consumer_secret",
    "fieldtype": "Password",
    "in_list_view": 1,
    "label": "Consumer Secret",
-   "reqd": 1
+   "reqd": 1,
+   "description": "Same app on Daraja > My Apps > Consumer Secret. Stored encrypted."
   },
   {
    "fieldname": "initiator_name",
    "fieldtype": "Data",
-   "label": "Initiator Name"
+   "label": "Initiator Name",
+   "description": "Username of the API operator. Live: created by the Business Administrator on the M-PESA Org Portal (org.ke.m-pesa.com) with the API roles you need. Sandbox: Initiator Name on Daraja's Test Credentials. Needed for Transaction Status, Account Balance, B2C, Reversal and C2B verification."
   },
   {
    "default": "150000",
    "fieldname": "transaction_limit",
    "fieldtype": "Float",
    "label": "Transaction Limit",
-   "non_negative": 1
+   "non_negative": 1,
+   "description": "Largest amount per STK prompt; bigger requests are split into several prompts. Safaricom allows up to KES 250,000 per transaction."
   },
   {
    "default": "0",
    "fieldname": "sandbox",
    "fieldtype": "Check",
-   "label": "Sandbox"
+   "label": "Sandbox",
+   "description": "Tick while using Daraja sandbox credentials. Untick only with the production keys from your Go Live app. Changing it regenerates the Security Credential."
   },
   {
    "fieldname": "column_break_4",
    "fieldtype": "Column Break"
   },
   {
-   "depends_on": "eval:(doc.sandbox==0)",
    "fieldname": "business_shortcode",
    "fieldtype": "Data",
    "label": "Business Shortcode",
-   "mandatory_depends_on": "eval:(doc.sandbox==0)"
+   "mandatory_depends_on": "eval:!doc.sandbox || doc.api_type == \"MPesa Express\"",
+   "description": "Pay Bill: your paybill number. Buy Goods: the Head Office / Store number that M-Pesa Express was approved for (not the till). Sandbox: 174379."
   },
   {
    "fieldname": "online_passkey",
    "fieldtype": "Password",
-   "label": " Online PassKey",
-   "reqd": 1
+   "label": "Online PassKey",
+   "reqd": 1,
+   "description": "M-Pesa Express (Lipa Na M-Pesa Online) passkey. Sandbox: Daraja > APIs > M-Pesa Express > Test Credentials. Live: emailed by Safaricom after Go Live. C2B- or B2C-only records: any text."
   },
   {
    "fieldname": "security_credential",
    "fieldtype": "Small Text",
-   "label": "Security Credential"
+   "label": "Security Credential",
+   "description": "Filled in automatically: the Initiator Password encrypted with Safaricom's sandbox or production certificate. Do not paste anything here. Re-type the Initiator Password or use Security > Regenerate Security Credential."
   },
   {
    "fieldname": "get_account_balance",
@@ -136,7 +163,8 @@
    "fieldtype": "Select",
    "label": "API Type",
    "options": "\nMPesa Express\nMPesa C2B (Customer to Business)\nMPesa B2C (Business to Customer)",
-   "reqd": 1
+   "reqd": 1,
+   "description": "What this record is used for: MPesa Express (STK prompts), C2B (receiving paybill/till payments) or B2C (paying out to phones). One record per shortcode and purpose."
   },
   {
    "fieldname": "column_break_nhvr",
@@ -188,12 +216,14 @@
    "fieldtype": "Select",
    "label": "Paybill Type",
    "options": "\nBuy Goods\nPay Bill",
-   "reqd": 1
+   "reqd": 1,
+   "description": "Pay Bill: customers pay to a business number plus an account number. Buy Goods: customers pay to a Till number."
   },
   {
    "fieldname": "initiator_password",
    "fieldtype": "Password",
-   "label": "Initiator Password"
+   "label": "Initiator Password",
+   "description": "Password of that API operator (set on the Org Portal; sandbox: Daraja Test Credentials). Typing it regenerates the Security Credential. Stored encrypted."
   },
   {
    "collapsible": 1,
@@ -201,11 +231,12 @@
    "fieldtype": "Section Break"
   },
   {
-   "depends_on": "eval:doc.paybill_type == \"Buy Goods\"",
+   "depends_on": "eval:doc.paybill_type == \"Buy Goods\" || doc.sandbox",
    "fieldname": "till_number",
    "fieldtype": "Data",
    "label": "Till Number",
-   "mandatory_depends_on": "eval:doc.paybill_type == \"Buy Goods\""
+   "mandatory_depends_on": "eval:doc.paybill_type == \"Buy Goods\"",
+   "description": "Buy Goods: the Till number customers pay to. Sandbox (any type): the test C2B shortcode (600xxx) from Daraja's Test Credentials page; used for C2B registration, Pull and Transaction Status."
   },
   {
    "fieldname": "section_break_rrgz",
@@ -215,7 +246,8 @@
    "default": "0",
    "fieldname": "auto_create_sales_invoice",
    "fieldtype": "Check",
-   "label": "Auto Create Sales Invoice"
+   "label": "Auto Create Sales Invoice",
+   "description": "Create a Sales Invoice for C2B payments that match no open invoice."
   },
   {
    "fieldname": "column_break_uspo",
@@ -229,7 +261,8 @@
    "default": "1",
    "fieldname": "auto_reconcile_c2b",
    "fieldtype": "Check",
-   "label": "Auto Reconcile C2B Payments"
+   "label": "Auto Reconcile C2B Payments",
+   "description": "Match incoming C2B payments to open invoices using the Reconciliation Priority table."
   },
   {
    "default": "0",
@@ -263,7 +296,7 @@
   },
   {
    "depends_on": "eval: doc.auto_reconcile_c2b",
-   "description": "Defines the order and fields used to auto-reconcile M-Pesa C2B payments. The system matches payments sequentially based on this table (e.g., Customer by ID \u2192 Customer by PIN \u2192 Sales Invoice by ID) until a successful reconciliation. Works for PayBill transactions referencing an account.",
+   "description": "Defines the order and fields used to auto-reconcile M-Pesa C2B payments. The system matches payments sequentially based on this table (e.g., Customer by ID → Customer by PIN → Sales Invoice by ID) until a successful reconciliation. Works for PayBill transactions referencing an account.",
    "fieldname": "reconciliation_order",
    "fieldtype": "Table",
    "label": "Reconciliation Priority",
@@ -322,7 +355,7 @@
    "options": "Mpesa Conversion Rate"
   },
   {
-   "description": "Phone number nominated for Pull Transaction API (format: 2547XXXXXXXX)",
+   "description": "The phone number (2547XXXXXXXX) you nominated when applying to Safaricom for the Pull Transaction API. Then use Pull Transaction > Register Pull Transaction.",
    "fieldname": "pull_transaction_nominated_number",
    "fieldtype": "Data",
    "label": "Pull Transaction Nominated Number"
@@ -388,7 +421,7 @@
   }
  ],
  "links": [],
- "modified": "2026-07-04 19:45:14.880419",
+ "modified": "2026-10-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "Mpesa Settings",

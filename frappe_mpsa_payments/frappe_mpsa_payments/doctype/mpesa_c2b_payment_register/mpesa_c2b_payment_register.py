@@ -100,8 +100,15 @@ class MpesaC2BPaymentRegister(Document):
 
                 settings_name = settings_for_shortcode(self.businessshortcode)
                 if settings_name:
-                    if not self.company and frappe.get_meta("Mpesa Settings").has_field("company"):
-                        self.company = frappe.db.get_value("Mpesa Settings", settings_name, "company")
+                    settings_company = (
+                        frappe.db.get_value("Mpesa Settings", settings_name, "company")
+                        if frappe.get_meta("Mpesa Settings").has_field("company")
+                        else None
+                    )
+                    # insert() pre-fills Company from the user's default company; on a site with
+                    # several companies the shortcode's own company must win over that.
+                    if settings_company and (not self.company or (self.is_new() and not register_url_list)):
+                        self.company = settings_company
                     self.mode_of_payment = self.mode_of_payment or mode_of_payment_for(settings_name)
 
             if self.billrefnumber and not self.customer:

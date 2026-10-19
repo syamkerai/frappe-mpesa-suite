@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from .m_pesa_api import (
@@ -44,15 +45,20 @@ class TestMPesaAPI(FrappeTestCase):
             "MiddleName": "Doe",
             "LastName": "Smith",
         }
-        result = confirmation(**args)
+        with patch("frappe.enqueue") as enqueue:
+            result = confirmation(**args)
         self.assertEqual(result["ResultCode"], 0)
         self.assertEqual(result["ResultDesc"], "Accepted")
+        c2b_data = enqueue.call_args.kwargs["c2b_data"]
+        self.assertEqual((c2b_data["transid"], c2b_data["transamount"]), ("123456", 100.0))
 
-        # Test rejected case
+        # A confirmation is always acknowledged (Safaricom only retries otherwise); a bad
+        # amount is caught later, when the receipt is verified or booked.
         args["TransAmount"] = "invalid_amount"
-        result = confirmation(**args)
-        self.assertEqual(result["ResultCode"], 1)
-        self.assertEqual(result["ResultDesc"], "Rejected")
+        with patch("frappe.enqueue") as enqueue:
+            result = confirmation(**args)
+        self.assertEqual(result["ResultCode"], 0)
+        self.assertEqual(enqueue.call_args.kwargs["c2b_data"]["transamount"], 0)
 
     def test_validation(self):
         # Test validation always returns accepted
@@ -62,7 +68,7 @@ class TestMPesaAPI(FrappeTestCase):
 
     @patch("frappe.get_all")
     def test_get_mpesa_mode_of_payment(self, mock_get_all):
-        mock_get_all.return_value = [{"mode_of_payment": "Cash"}]
+        mock_get_all.return_value = [frappe._dict(mode_of_payment="Cash"), frappe._dict(mode_of_payment="Cash")]
 
         company = "Test Company"
 
@@ -84,14 +90,13 @@ class TestMPesaAPI(FrappeTestCase):
         self.assertEqual(payments[0]["amount"], 100.0)
 
     @patch("frappe.get_doc")
-    @patch("frappe.get_all")
-    def test_submit_mpesa_payment(self, mock_get_all, mock_get_doc):
-        mock_get_all.return_value = [{"name": "MP001"}]
-        mock_get_doc.return_value = Mock(payment_entry="PE001")
+    @patch("frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.process_mpesa_payment")
+    def test_submit_mpesa_payment(self, mock_process, mock_get_doc):
+        mock_process.return_value = Mock(payment_entry="PE001")
+        mock_get_doc.return_value = "Payment Entry PE001"
 
-        mpesa_payment = "MP001"
-        customer = "Test Customer"
+        payment_entry = submit_mpesa_payment("MP001", "Test Customer")
 
-        payment_entry = submit_mpesa_payment(mpesa_payment, customer)
-
-        self.assertEqual(payment_entry, "PE001")
+        mock_process.assert_called_once_with("MP001", "Test Customer", submit_payment=True)
+        mock_get_doc.assert_called_once_with("Payment Entry", "PE001")
+        self.assertEqual(payment_entry, "Payment Entry PE001")

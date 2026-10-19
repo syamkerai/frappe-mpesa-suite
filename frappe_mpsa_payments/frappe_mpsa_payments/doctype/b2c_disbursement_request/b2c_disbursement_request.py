@@ -7,7 +7,7 @@ import frappe
 from frappe.model.document import Document
 
 from ...api.b2c import make_b2c_payment_request
-from ...permissions import PAYOUT_ROLES
+from ....permissions import PAYOUT_ROLES
 
 
 class B2CDisbursementRequest(Document):

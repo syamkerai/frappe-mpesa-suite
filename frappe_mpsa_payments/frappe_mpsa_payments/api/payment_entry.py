@@ -250,7 +250,10 @@ def get_outstanding_invoices(
     if invoice_type is None:
         invoice_type = "Sales Invoice"
 
-    account = (get_party_account("Customer", customer, company),)
+    party_account = get_party_account("Customer", customer, company)
+    if not party_account:
+        return []  # unknown customer/company, or no receivable account set up
+    account = (party_account,)
     ple = qb.DocType("Payment Ledger Entry")
     outstanding_invoices = []
     precision = frappe.get_precision(invoice_type, "outstanding_amount") or 2

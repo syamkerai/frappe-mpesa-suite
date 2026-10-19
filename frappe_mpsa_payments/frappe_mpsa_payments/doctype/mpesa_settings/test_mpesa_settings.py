@@ -41,9 +41,19 @@ class TestMpesaSettings(unittest.TestCase):
             write_off_account="Write Off - WP",
             write_off_cost_center="Main - WP",
         ).name
+        # These tests use POS Invoices; ERPNext v16 defaults POS to Sales Invoice mode.
+        if frappe.get_meta("POS Settings").has_field("invoice_type"):
+            frappe.db.set_single_value("POS Settings", "invoice_type", "POS Invoice")
+        # POS invoices need an open POS session for the profile.
+        if not frappe.db.exists("POS Opening Entry", {"pos_profile": self.pos_profile, "status": "Open", "docstatus": 1}):
+            from erpnext.accounts.doctype.pos_opening_entry.test_pos_opening_entry import create_opening_entry
+
+            create_opening_entry(frappe.get_doc("POS Profile", self.pos_profile), frappe.session.user)
 
     def tearDown(self):
-        frappe.db.sql("delete from `tabMpesa Settings`")
+        # Only this suite's records: other suites keep their Mpesa Settings fixtures.
+        for name in ("_Test", "_Account Balance", "Payment"):
+            frappe.db.delete("Mpesa Settings", {"name": name})
         frappe.db.sql(
             "delete from `tabIntegration Request` where integration_request_service = 'Mpesa'"
         )
@@ -277,8 +287,9 @@ class TestMpesaSettings(unittest.TestCase):
         )
 
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "ResponseCode": "0",
+        mock_response.json.return_value = {  # Daraja Pull register reply
+            "ResponseRefID": "0000-0000-0000-0000",
+            "ResponseStatus": "1000",
             "ResponseDescription": "Accept the service request successfully.",
         }
         mock_response.raise_for_status = MagicMock()
@@ -290,7 +301,8 @@ class TestMpesaSettings(unittest.TestCase):
             ),
             patch("requests.post", return_value=mock_response),
         ):
-            result = register_pull_transaction("_Test")
+            # From the form the URL comes from the request; tests have no request.
+            result = register_pull_transaction("_Test", callback_url="https://example.com/api/method/x")
 
         self.assertEqual(result["status"], "success")
         self.assertIn("Accept", result["message"])
@@ -575,9 +587,19 @@ def create_mpesa_settings(payment_gateway_name="Express"):
             consumer_key="5sMu9LVI1oS3oBGPJfh3JyvLHwZOdTKn",
             consumer_secret="VI1oS3oBGPJfh3JyvLHw",
             online_passkey="LVI1oS3oBGPJfh3JyvLHwZOd",
+            paybill_type="Pay Bill",
+            business_shortcode="174379",
             till_number="174379",
         )
     )
+    if doc.meta.has_field("company"):
+        # The Payment Gateway Account and Mode of Payment are made for this company.
+        # The POS tests below use ERPNext's "Wind Power LLC" test company.
+        doc.company = (
+            "Wind Power LLC"
+            if frappe.db.exists("Company", "Wind Power LLC")
+            else frappe.db.get_single_value("Global Defaults", "default_company")
+        )
 
     doc.insert(ignore_permissions=True)
     return doc

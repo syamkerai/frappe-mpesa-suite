@@ -136,3 +136,38 @@ Package `frappe_mpsa_payments/gateway/`, full reference in [docs/PAYMENTS_API.md
 11. The first time **Match and Book Receipts Automatically** is on, it will book every draft
     receipt from the look-back window (45 days) that it can place unambiguously, including any
     left for manual review. Lower the look-back first if that is not wanted.
+
+## Bench-tested on v15 and v16, fixes and Mpesa Settings setup guide (2026-10-19, uncommitted)
+
+All bench test modules pass on Frappe/ERPNext v15 (15.123) and v16 (16.52), with `payments`
+installed, after `bench migrate` of a site installed from the previous commit (indexes, new
+fields and the Suite Settings switch defaults verified). `tests/unit`: 162 pass.
+
+Fixes found by running on a bench:
+- `b2c_disbursement_request.py`: `...permissions` -> `....permissions` (install-app crashed).
+- `money_in/c2b_verify.send_query` (in the go-live hardening work, committed with it): result URLs built with `get_url()`; `build_callback_url` needs a
+  web request, and this runs in background jobs, so no C2B verification query was ever sent.
+  Needs `host_name` in site_config (as B2C and money_out already do).
+- `utils.create_payment_gateway_account` / `create_mode_of_payment`: ERPNext v16 names the
+  Payment Gateway Account after the company, so every Mpesa Settings save failed on v16. Both are
+  now company-aware; saving without a Company no longer crashes ("Mode of Payment None"), and a
+  Company set later gets its Mode of Payment account row.
+- `Mpesa C2B Payment Register`: the shortcode's Mpesa Settings company wins over the user's default
+  company that `insert()` pre-fills (multi-company sites booked to the wrong company).
+- `gateway/intents.py`: "STK callback" is not an Mpesa Match Log method; booking-failure logs were lost.
+- `api/payment_entry.get_outstanding_invoices`: empty list (not a crash) when there is no party account.
+- `B2C Payment Disbursement Reference.is_valid_receiver_contact`: accepts 07../01../+254 forms (it
+  rejected a valid 07 number unless already converted); `validate_mandatory_fields` reference check
+  moved out of the loop.
+- `Mpesa C2B Payment Register URL`: URLs from `get_url()`, status Failed on connection errors, and a
+  **Register URLs Again** button (needed after host_name or the callback token changes).
+- `Mpesa Settings`: test-mode balance / STK branches log the request like the live call does.
+
+Mpesa Settings form: a collapsible **Setup Guide** (once-per-site steps, where each credential comes
+from in sandbox and live, what to do after saving, how to test, common errors) and "where to get
+it" help on every field. Business Shortcode is now visible in sandbox (STK prompts send it there
+too); Till Number shows for Buy Goods or sandbox.
+
+Tests: stale upstream tests rewritten against current code (B2C disbursement and reference, C2B
+URL, api); Mpesa Settings fixtures fixed (paybill type, company, POS opening entry, POS Invoice mode
+on v16); suites no longer leak callback-enforcement settings into each other.

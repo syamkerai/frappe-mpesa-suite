@@ -86,8 +86,8 @@ class B2CPaymentDisbursement(Document):
             if not self.get(field):
                 frappe.throw(f"Field {self.meta.get_label(field)} is mandatory.")
 
-            if not self.references:
-                frappe.throw("At least one reference is required")
+        if not self.references:
+            frappe.throw("At least one reference is required")
 
     def validate_mode_of_payment(self) -> None:
         if not self.mode_of_payment:

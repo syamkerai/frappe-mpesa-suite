@@ -14,7 +14,7 @@ class TestPaymentFunctions(FrappeTestCase):
         customer = "Test Customer"
         pos_profile_name = "Test POS Profile"
 
-        invoices = get_outstanding_invoices(company, currency, customer, pos_profile_name)
+        invoices = get_outstanding_invoices(company, customer)  # no such customer: empty list, no error
 
         # Assert the result
         self.assertTrue(isinstance(invoices, list))

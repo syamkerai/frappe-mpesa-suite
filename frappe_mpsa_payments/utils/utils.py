@@ -125,14 +125,14 @@ def create_payment_gateway_account(gateway, payment_channel="Email", company=Non
         return
 
     # if payment gateway account exists, return
-    if frappe.db.exists(
-        "Payment Gateway Account",
-        {"payment_gateway": gateway, "currency": bank_account.account_currency},
-    ):
+    existing = {"payment_gateway": gateway, "currency": bank_account.account_currency}
+    if frappe.get_meta("Payment Gateway Account").has_field("company"):
+        existing["company"] = company  # ERPNext v16: one gateway account per company
+    if frappe.db.exists("Payment Gateway Account", existing):
         return
 
     try:
-        frappe.get_doc(
+        account = frappe.get_doc(
             {
                 "doctype": "Payment Gateway Account",
                 "is_default": 1,
@@ -141,7 +141,10 @@ def create_payment_gateway_account(gateway, payment_channel="Email", company=Non
                 "currency": bank_account.account_currency,
                 "payment_channel": payment_channel,
             }
-        ).insert(ignore_permissions=True, ignore_if_duplicate=True)
+        )
+        if account.meta.has_field("company"):
+            account.company = company  # ERPNext v16 names the account after the company's abbr
+        account.insert(ignore_permissions=True, ignore_if_duplicate=True)
 
     except frappe.DuplicateEntryError:
         # already exists, due to a reinstall?

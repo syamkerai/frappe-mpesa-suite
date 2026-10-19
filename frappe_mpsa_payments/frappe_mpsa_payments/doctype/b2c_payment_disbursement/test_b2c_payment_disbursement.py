@@ -1,375 +1,165 @@
 # Copyright (c) 2024, Navari Limited and Contributors
 # See license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from .b2c_payment_disbursement import B2CPaymentDisbursement
-from unittest.mock import patch
+
+MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
 
 
 class TestB2CPaymentDisbursement(FrappeTestCase):
+    """Validators of B2C Payment Disbursement, called on an unsaved document (no database rows)."""
+
     def setUp(self):
-        self.payment_disbursement = B2CPaymentDisbursement()
+        self.doc = frappe.new_doc("B2C Payment Disbursement")
 
-    def test_uuid_generation(self):
-        """Test that UUID is generated correctly."""
-        self.payment_disbursement._generate_uuid_v4()
-        self.assertTrue(self.payment_disbursement.uuid)
-        self.assertEqual(len(self.payment_disbursement.uuid), 36)
+    # ------------------------------------------------------------ mandatory fields
+    def _fill_mandatory(self):
+        self.doc.company = "Test Company"
+        self.doc.posting_date = "2024-06-01"
+        self.doc.party_type = "Supplier"
+        self.doc.paid_from = "Test Paid From"
+        self.doc.paid_to = "Test Paid To"
 
-    def test_validate_party_type(self):
-        """Test that party type is validated correctly."""
-        self.payment_disbursement.party_type = "Supplier"
-        self.payment_disbursement.validate_party_type()
-        self.assertEqual(self.payment_disbursement.party_type, "Customer")
-
-        with self.assertRaises(frappe.ValidationError):
-            self.payment_disbursement.party_type = "InvalidType"
-            self.payment_disbursement.validate_party_type()
-
-    def test_validate_mandatory_fields_missing_field(self):
-        """Test that validate_mandatory_fields throws if a mandatory field is missing."""
-        self.payment_disbursement.company = None
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.party_type = "Supplier"
-        self.payment_disbursement.paid_from = "Test Paid From"
-        self.payment_disbursement.paid_to = "Test Paid To"
-        self.payment_disbursement.references = [frappe._dict()]
-        self.payment_disbursement.meta = frappe._dict(get_label=lambda x: x)
-
+    def test_missing_mandatory_field_is_rejected(self):
+        self._fill_mandatory()
+        self.doc.company = None
+        self.doc.append("references", {})
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_mandatory_fields()
+            self.doc.validate_mandatory_fields()
+        self.assertIn("Company is mandatory", str(context.exception))
 
-        self.assertIn("Field company is mandatory", str(context.exception))
-
-    def test_validate_mandatory_fields_no_references(self):
-        """Test that validate_mandatory_fields throws if references are missing."""
-        self.payment_disbursement.company = "Test Company"
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.party_type = "Supplier"
-        self.payment_disbursement.paid_from = "Test Paid From"
-        self.payment_disbursement.paid_to = "Test Paid To"
-        self.payment_disbursement.references = []
-        self.payment_disbursement.meta = frappe._dict(get_label=lambda x: x)
-
+    def test_no_references_is_rejected(self):
+        self._fill_mandatory()
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_mandatory_fields()
-
+            self.doc.validate_mandatory_fields()
         self.assertIn("At least one reference is required", str(context.exception))
 
-    def test_validate_mode_of_payment_required(self):
-        """Test that validate_mode_of_payment throws if mode_of_payment is missing."""
-        self.payment_disbursement.mode_of_payment = None
+    def test_mandatory_fields_and_reference_pass(self):
+        self._fill_mandatory()
+        self.doc.append("references", {})
+        self.doc.validate_mandatory_fields()
 
+    # ------------------------------------------------------------ mode of payment / party type
+    def test_mode_of_payment_required(self):
+        self.doc.mode_of_payment = None
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_mode_of_payment()
-
+            self.doc.validate_mode_of_payment()
         self.assertIn("Mode of Payment is required", str(context.exception))
 
-    def test_validate_mode_of_payment_does_not_set_mpesa_setting_for_other_types(self):
-        """Test that mpesa_setting is not set if payment_type is not Mpesa Disbursement."""
-        self.payment_disbursement.mode_of_payment = "Mpesa-XYZ"
-        self.payment_disbursement.payment_type = "Other Type"
-        self.payment_disbursement.mpesa_setting = None
+    def test_party_type_employee_and_supplier_pass(self):
+        for party_type in ("Employee", "Supplier"):
+            self.doc.party_type = party_type
+            self.doc.validate_party_type()
 
-        # Patch frappe.db.get_value to raise if called
-        original_get_value = frappe.db.get_value
-        frappe.db.get_value = lambda *a, **k: (_ for _ in ()).throw(
-            Exception("Should not be called")
-        )
-        try:
-            self.payment_disbursement.validate_mode_of_payment()
-
-            # Assert that mpesa_setting is still None
-            self.assertIsNone(self.payment_disbursement.mpesa_setting)
-        finally:
-            frappe.db.get_value = original_get_value
-
-    def test_validate_mode_of_payment_sets_mpesa_setting_for_mpesa_disbursement(self):
-        """Test that mpesa_setting is set if payment_type is Mpesa Disbursement."""
-        self.payment_disbursement.mode_of_payment = "Mpesa-XYZ"
-        self.payment_disbursement.payment_type = "Mpesa Disbursement"
-        self.payment_disbursement.mpesa_setting = None
-
-        # Patch frappe.db.get_value to return a mock setting
-        original_get_value = frappe.db.get_value
-        frappe.db.get_value = lambda *a, **k: "Mock Mpesa Setting"
-        try:
-            self.payment_disbursement.validate_mode_of_payment()
-
-            # Assert that mpesa_setting is set correctly
-            self.assertEqual(
-                self.payment_disbursement.mpesa_setting, "Mock Mpesa Setting"
-            )
-        finally:
-            frappe.db.get_value = original_get_value
-
-    def test_validate_party_type_employee(self):
-        """Test that party_type 'Employee' passes validation."""
-        self.payment_disbursement.party_type = "Employee"
-        try:
-            self.payment_disbursement.validate_party_type()
-        except Exception as e:  # fail test if an exception is raised
-            self.fail(
-                "validate_party_type() raised Exception unexpectedly for 'Employee'"
-                + str(e)
-            )
-
-    def test_validate_party_type_supplier(self):
-        """Test that party_type 'Supplier' passes validation."""
-        self.payment_disbursement.party_type = "Supplier"
-        try:
-            self.payment_disbursement.validate_party_type()
-        except Exception as e:  # fail test if an exception is raised
-            self.fail(
-                "validate_party_type() raised Exception unexpectedly for 'Supplier' - "
-                + str(e)
-            )
-
-    def test_validate_party_type_invalid(self):
-        """Test that invalid party_type raises ValidationError."""
-        self.payment_disbursement.party_type = "Customer"
-
+    def test_party_type_customer_is_rejected(self):
+        self.doc.party_type = "Customer"
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_party_type()
-
+            self.doc.validate_party_type()
         self.assertIn("Party Type must be Employee or Supplier", str(context.exception))
 
-    def test_validate_amounts_paid_amount_zero(self):
-        """Test that validate_amounts throws if paid_amount is zero."""
-        self.payment_disbursement.paid_amount = 0
-        self.payment_disbursement.base_paid_amount = 100
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.references = [frappe._dict(allocated_amount=0)]
+    # ------------------------------------------------------------ amounts
+    def _amounts(self, paid, allocations, currency="KES", base=None):
+        self.doc.paid_amount = paid
+        self.doc.base_paid_amount = paid if base is None else base
+        self.doc.paid_from_account_currency = currency
+        self.doc.references = []
+        for amount in allocations:
+            self.doc.append("references", {"allocated_amount": amount})
 
+    def test_zero_or_negative_paid_amount_is_rejected(self):
+        for paid in (0, -10):
+            self._amounts(paid, [paid])
+            with self.assertRaises(frappe.ValidationError) as context:
+                self.doc.validate_amounts()
+            self.assertIn("Paid Amount must be greater than zero", str(context.exception))
+
+    def test_base_paid_amount_required_for_foreign_currency(self):
+        self._amounts(100, [100], currency="USD", base=0)
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_amounts()
-        self.assertIn("Paid Amount must be greater than zero", str(context.exception))
+            self.doc.validate_amounts()
+        self.assertIn("Base Paid Amount (KES) is required for M-Pesa", str(context.exception))
 
-    def test_validate_amounts_paid_amount_negative(self):
-        """Test that validate_amounts throws if paid_amount is negative."""
-        self.payment_disbursement.paid_amount = -10
-        self.payment_disbursement.base_paid_amount = 100
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.references = [frappe._dict(allocated_amount=-10)]
-
+    def test_allocations_must_add_up_to_paid_amount(self):
+        self._amounts(100, [60, 30])
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_amounts()
-        self.assertIn("Paid Amount must be greater than zero", str(context.exception))
+            self.doc.validate_amounts()
+        self.assertIn("Total allocated amount 90.0 must equal Paid Amount 100", str(context.exception))
 
-    def test_validate_amounts_base_paid_amount_required(self):
-        """Test that validate_amounts throws if base_paid_amount is missing and currency is not KES."""
-        self.payment_disbursement.paid_amount = 100
-        self.payment_disbursement.base_paid_amount = None
-        self.payment_disbursement.paid_from_account_currency = "USD"
-        self.payment_disbursement.references = [frappe._dict(allocated_amount=100)]
+    def test_matching_allocations_pass(self):
+        self._amounts(150, [50, 100])
+        self.doc.validate_amounts()
 
+    # ------------------------------------------------------------ reference doctypes
+    def _references(self, *doctypes):
+        self.doc.transaction_to_pay_against = "Purchase Invoice"
+        self.doc.references = []
+        for doctype in doctypes:
+            self.doc.append("references", {"reference_doctype": doctype})
+
+    def test_matching_reference_doctypes_pass(self):
+        self._references("Purchase Invoice", "Purchase Invoice")
+        self.doc.validate_reference_doctypes()
+
+    def test_first_mismatching_reference_doctype_is_reported(self):
+        self._references("Purchase Invoice", "Employee Advance", "Employee Advance")
         with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_amounts()
-        self.assertIn(
-            "Base Paid Amount (KES) is required for M-Pesa", str(context.exception)
-        )
-
-    def test_validate_amounts_total_allocated_not_equal_paid_amount(self):
-        """Test that validate_amounts throws if total allocated does not equal paid_amount."""
-        self.payment_disbursement.paid_amount = 100
-        self.payment_disbursement.base_paid_amount = 100
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.references = [
-            frappe._dict(allocated_amount=60),
-            frappe._dict(allocated_amount=30),
-        ]
-
-        with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_amounts()
-        self.assertIn(
-            "Total allocated amount 90.0 must equal Paid Amount 100",
-            str(context.exception),
-        )
-
-    def test_validate_amounts_success(self):
-        """Test that validate_amounts passes when all values are correct."""
-        self.payment_disbursement.paid_amount = 150
-        self.payment_disbursement.base_paid_amount = 150
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.references = [
-            frappe._dict(allocated_amount=50),
-            frappe._dict(allocated_amount=100),
-        ]
-        try:
-            self.payment_disbursement.validate_amounts()
-        except Exception as e:  # fail test if an exception is raised
-            self.fail(
-                "validate_amounts() raised Exception unexpectedly when values are correct - "
-                + str(e)
-            )
-
-    def test_validate_reference_doctypes_all_match(self):
-        """Test that validate_reference_doctypes passes when all reference doctypes match."""
-        self.payment_disbursement.transaction_to_pay_against = "Purchase Invoice"
-        self.payment_disbursement.references = [
-            frappe._dict(reference_doctype="Purchase Invoice", idx=1),
-            frappe._dict(reference_doctype="Purchase Invoice", idx=2),
-        ]
-
-        try:
-            self.payment_disbursement.validate_reference_doctypes()
-        except Exception as e:
-            self.fail(
-                "validate_reference_doctypes() raised Exception unexpectedly when all doctypes match - "
-                + str(e)
-            )
-
-    def test_validate_reference_doctypes_one_mismatch(self):
-        """Test that validate_reference_doctypes throws if a reference doctype does not match."""
-        self.payment_disbursement.transaction_to_pay_against = "Purchase Invoice"
-        self.payment_disbursement.references = [
-            frappe._dict(reference_doctype="Purchase Invoice", idx=1),
-            frappe._dict(reference_doctype="Employee Advance", idx=2),
-        ]
-
-        with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_reference_doctypes()
-
+            self.doc.validate_reference_doctypes()
         self.assertIn(
             "Reference doctype 'Employee Advance' does not match 'Purchase Invoice' for row 2",
             str(context.exception),
         )
 
-    def test_validate_reference_doctypes_all_mismatch(self):
-        """Test that validate_reference_doctypes throws for the first mismatch found."""
-        self.payment_disbursement.transaction_to_pay_against = "Purchase Invoice"
-        self.payment_disbursement.references = [
-            frappe._dict(reference_doctype="Employee Advance", idx=1),
-            frappe._dict(reference_doctype="Employee Advance", idx=2),
-        ]
-
-        with self.assertRaises(frappe.ValidationError) as context:
-            self.payment_disbursement.validate_reference_doctypes()
-
-        self.assertIn(
-            "Reference doctype 'Employee Advance' does not match 'Purchase Invoice' for row 1",
-            str(context.exception),
+    # ------------------------------------------------------------ set_missing_values
+    def _missing_values(self, **values):
+        self.doc.update(
+            {"company": "Test Company", "posting_date": "2024-06-01", "paid_amount": 100,
+             "paid_from_account_currency": "KES", **values}
         )
 
-    def test_set_missing_values_sets_company_currency(self):
-        """Test that set_missing_values sets company_currency if missing."""
+    def test_company_currency_filled_from_company(self):
+        self._missing_values(company_currency=None, source_exchange_rate=1.0)
+        with patch("frappe.get_cached_value", return_value="KES"):
+            self.doc.set_missing_values()
+        self.assertEqual(self.doc.company_currency, "KES")
 
-        self.payment_disbursement.company_currency = None
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.source_exchange_rate = 1.0
-        self.payment_disbursement.paid_amount = 100
-        
-        # Patch frappe.get_cached_value
-        original_get_cached_value = frappe.get_cached_value
-        frappe.get_cached_value = lambda doctype, name, field: "KES"
-        
-        try:
-            self.payment_disbursement.set_missing_values()
-            self.assertEqual(self.payment_disbursement.company_currency, "KES")
-        finally:
-            frappe.get_cached_value = original_get_cached_value
+    def test_existing_company_currency_kept(self):
+        self._missing_values(company_currency="USD", source_exchange_rate=1.0)
+        with patch("frappe.get_cached_value", return_value="EUR"):
+            self.doc.set_missing_values()
+        self.assertEqual(self.doc.company_currency, "USD")
 
-    @patch("frappe.get_cached_value")
-    def test_set_missing_values_does_not_set_company_currency_if_exists(self, mock_get_cached_value):
-        """Test that set_missing_values does not overwrite company_currency if it already exists."""
-        self.payment_disbursement.company_currency = "USD"
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.source_exchange_rate = 1.0
-        self.payment_disbursement.paid_amount = 100
-        
-        # Mock get_cached_value to return a different currency
-        mock_get_cached_value.return_value = "EUR"
-        
-        self.payment_disbursement.set_missing_values()
-        
-        # Assert that company_currency is still USD
-        self.assertEqual(self.payment_disbursement.company_currency, "USD")
+    def test_source_exchange_rate_filled_when_missing(self):
+        self._missing_values(company_currency="USD", source_exchange_rate=None)
+        with patch("erpnext.setup.utils.get_exchange_rate", return_value=0.0077) as rate:
+            self.doc.set_missing_values()
+        rate.assert_called_once_with("KES", "USD", "2024-06-01")
+        self.assertEqual(self.doc.source_exchange_rate, 0.0077)
 
-    @patch("frappe.get_cached_value")
-    def test_set_missing_values_sets_source_exchange_rate(self, mock_get_cached_value):
-        """Test that set_missing_values sets source_exchange_rate if missing."""
-        self.payment_disbursement.source_exchange_rate = None
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.company_currency = "USD"
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.paid_amount = 100
-        
-        # Mock get_cached_value to return a valid exchange rate
-        mock_get_cached_value.return_value = 110.0
-        
-        self.payment_disbursement.set_missing_values()
-        
-        # Assert that source_exchange_rate is set correctly
-        self.assertEqual(self.payment_disbursement.source_exchange_rate, 110.0)
+    def test_existing_source_exchange_rate_kept(self):
+        self._missing_values(company_currency="USD", source_exchange_rate=1.5)
+        with patch("erpnext.setup.utils.get_exchange_rate", return_value=2.0):
+            self.doc.set_missing_values()
+        self.assertEqual(self.doc.source_exchange_rate, 1.5)
 
-    @patch("frappe.get_cached_value")
-    def test_set_missing_values_does_not_set_source_exchange_rate_if_exists(self, mock_get_cached_value):
-        """Test that set_missing_values does not overwrite source_exchange_rate if it already exists."""
-        self.payment_disbursement.source_exchange_rate = 1.5
-        self.payment_disbursement.paid_from_account_currency = "KES"
-        self.payment_disbursement.company_currency = "USD"
-        self.payment_disbursement.posting_date = "2024-06-01"
-        self.payment_disbursement.paid_amount = 100
-        
-        # Mock get_cached_value to return a different exchange rate
-        mock_get_cached_value.return_value = 2.0
-        
-        self.payment_disbursement.set_missing_values()
-        
-        # Assert that source_exchange_rate is still 1.5
-        self.assertEqual(self.payment_disbursement.source_exchange_rate, 1.5)
+    def test_base_paid_amount_converted_to_kes(self):
+        self._missing_values(company_currency="USD", source_exchange_rate=1.0, paid_from_account_currency="USD")
+        with patch("erpnext.setup.utils.get_exchange_rate", return_value=0.0077):  # USD -> KES "rate" is per KES
+            self.doc.set_missing_values()
+        self.assertAlmostEqual(self.doc.base_paid_amount, 100 / 0.0077)
 
-    @patch("frappe.get_doc")
-    def test_get_mpesa_settings_success(self, mock_get_doc):
-        """Test that _get_mpesa_settings returns the settings document when found."""
-        mock_setting = frappe._dict(
-            name="Test Setting",
-            initiator_name="Test Initiator",
-            security_credential="Test Credential",
-            business_shortcode="123456",
-            consumer_key="CKEY",
-            consumer_secret="CSECRET"
-        )
-        
-        # Mock the get_doc call to return the mock setting
-        self.payment_disbursement.mpesa_setting = "Test Gateway"
-        mock_get_doc.return_value = mock_setting
+    # ------------------------------------------------------------ Mpesa Settings lookup
+    def test_mpesa_settings_found_by_gateway_name(self):
+        self.doc.mode_of_payment = "Mpesa-Payroll"
+        with patch("frappe.get_doc", return_value="settings") as get_doc:
+            self.assertEqual(self.doc._get_mpesa_settings(), "settings")
+        get_doc.assert_called_once_with("Mpesa Settings", {"payment_gateway_name": "Payroll"}, as_dict=True)
 
-        result = self.payment_disbursement._get_mpesa_settings()
-        
-        self.assertEqual(result, mock_setting) # Assert that the returned document matches the mock
-        
-        # Assert that get_doc was called with the correct parameters
-        mock_get_doc.assert_called_once_with(
-            "Mpesa Settings",
-            {"payment_gateway_name": "Test Gateway", "api_type": "MPesa B2C (Business to Customer)"},
-            [
-                "name",
-                "initiator_name",
-                "security_credential",
-                "business_shortcode",
-                "consumer_key",
-                "consumer_secret",
-            ],
-            as_dict=True,
-        )
-
-    @patch("frappe.get_doc")
-    @patch("frappe.throw")
-    @patch("frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement.app_logger")
-    def test_get_mpesa_settings_not_found(self, mock_logger, mock_throw, mock_get_doc):
-        """Test that _get_mpesa_settings throws and logs error if settings not found."""
-        self.payment_disbursement.mpesa_setting = "Missing Gateway"
-        mock_get_doc.side_effect = frappe.DoesNotExistError
-        mock_throw.side_effect = frappe.DoesNotExistError("Not found")
-
-        with self.assertRaises(frappe.DoesNotExistError):
-            self.payment_disbursement._get_mpesa_settings()
-
-        error_msg = "Mpesa Settings not found for payment gateway: Missing Gateway"
-        self.assertEqual(self.payment_disbursement.error, error_msg)
-        mock_logger.error.assert_called_with(error_msg)
-        mock_throw.assert_called_with(error_msg, frappe.DoesNotExistError)
+    def test_missing_mpesa_settings_is_reported(self):
+        self.doc.mode_of_payment = "Mpesa-Missing"
+        with patch("frappe.get_doc", side_effect=frappe.DoesNotExistError):
+            with self.assertRaises(frappe.ValidationError) as context:
+                self.doc._get_mpesa_settings()
+        self.assertIn("No Mpesa Settings found for gateway Mpesa-Missing", str(context.exception))

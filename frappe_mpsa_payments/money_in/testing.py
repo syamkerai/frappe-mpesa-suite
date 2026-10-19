@@ -146,6 +146,11 @@ def enable_money_in(**overrides) -> None:
         "auto_reconcile_bank_transactions",
     ):
         settings.set(flag, 1)
+    # Tests call the callback handlers directly (no token, no source IP); callback auth has its
+    # own tests and other suites may have committed it switched on.
+    settings.enforce_token_c2b = 0
+    settings.enforce_token_results = 0
+    settings.enforce_ip_allowlist = 0
     settings.amount_tolerance = 1
     settings.matching_lookback_days = 45
     settings.sales_order_approver = "Administrator"
@@ -158,7 +163,11 @@ def customer(name: str, customer_name: str | None = None) -> str:
     existing = frappe.db.get_value("Customer", {"customer_name": customer_name or name}, "name")
     if existing and not customer_name:
         return existing
-    doc = frappe.get_doc({"doctype": "Customer", "customer_name": customer_name or name, "customer_type": "Individual"})
+    # ERPNext's v15 test bootstrap leaves Selling Settings on the group "All Customer Groups".
+    group = frappe.db.get_value("Customer Group", {"is_group": 0}, "name")
+    doc = frappe.get_doc(
+        {"doctype": "Customer", "customer_name": customer_name or name, "customer_type": "Individual", "customer_group": group}
+    )
     doc.insert()
     return doc.name
 

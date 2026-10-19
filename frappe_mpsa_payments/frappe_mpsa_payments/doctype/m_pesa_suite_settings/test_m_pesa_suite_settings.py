@@ -31,6 +31,12 @@ class TestMPesaSuiteSettings(IntegrationTestCase):
     def tearDown(self):
         frappe.local.form_dict = frappe._dict()
         frappe.set_user("Administrator")
+        # A rejected callback commits (callbacks._record_rejection), which also commits the
+        # enforcement switched on above; switch it off for the suites that run after this one.
+        frappe.db.set_single_value(
+            SETTINGS, {"enforce_token_results": 0, "enforce_token_c2b": 0, "enforce_ip_allowlist": 0}
+        )
+        frappe.db.commit()
 
     def _request(self, token=None):
         args = {"t": token} if token else {}

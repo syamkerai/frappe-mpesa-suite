@@ -8,7 +8,7 @@ import frappe
 from frappe_mpsa_payments.daraja.callbacks import with_token
 import requests
 from frappe.model.document import Document
-from frappe.utils import get_request_site_address
+from frappe.utils import get_url
 
 from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import get_token
 
@@ -27,9 +27,17 @@ def _is_already_registered(res: dict) -> bool:
 class MpesaC2BPaymentRegisterURL(Document):
     def needs_registration(self) -> bool:
         """Register on first save, after a failure, or when a key field changed - not on every save."""
-        if self.is_new() or self.register_status != "Success":
+        if self.is_new() or self.register_status != "Success" or self.flags.register_again:
             return True
         return any(self.has_value_changed(field) for field in REGISTRATION_FIELDS)
+
+    @frappe.whitelist()
+    def register_again(self):
+        """Send the URLs again, e.g. after host_name or the callback token changed."""
+        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        self.flags.register_again = True
+        self.save()
+        return self.register_status
 
     def validate(self):
         if not self.needs_registration():
@@ -55,7 +63,9 @@ class MpesaC2BPaymentRegisterURL(Document):
             base_url=base_url,
         )
 
-        site_url = get_request_site_address(True)
+        # Public site URL (host_name in site_config, else the request host). Must be https and
+        # reachable from the internet, or Safaricom cannot deliver confirmations.
+        site_url = get_url()
         # Token is appended so C2B token enforcement can be switched on after re-registering.
         validation_url = with_token(
             # site_url + "/api/method/payments.payment_gateways.doctype.mpesa_c2b_payment_register_url.mpesa_api.validation"
@@ -102,10 +112,13 @@ class MpesaC2BPaymentRegisterURL(Document):
             frappe.msgprint(f"Response Content: {errh.response.content}")
         except requests.exceptions.ConnectionError as errc:
             # Handle Connection errors
+            self.register_status = "Failed"
             frappe.msgprint(f"Error Connecting: {errc}")
         except requests.exceptions.Timeout as errt:
             # Handle Timeout errors
+            self.register_status = "Failed"
             frappe.msgprint(f"Timeout Error: {errt}")
         except requests.exceptions.RequestException as err:
             # Handle other exceptions
+            self.register_status = "Failed"
             frappe.msgprint(f"Request Exception: {err}")

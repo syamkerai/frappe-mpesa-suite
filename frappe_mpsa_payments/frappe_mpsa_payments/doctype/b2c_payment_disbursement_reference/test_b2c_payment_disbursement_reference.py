@@ -3,117 +3,71 @@
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from .b2c_payment_disbursement_reference import sanitise_phone_number
-from .b2c_payment_disbursement_reference import is_valid_receiver_contact
+
+from .b2c_payment_disbursement_reference import is_valid_receiver_contact, sanitise_phone_number
 
 
 class TestB2CPaymentDisbursementReference(FrappeTestCase):
-    def test_validate_fails_if_amount_is_less_than_10(self):
-        """Test that the validate method raises a ValidationError if the amount is less than 10"""
-        doc = frappe.get_doc(
+    def _row(self, payment_type="Mpesa Disbursement", **values):
+        row = frappe.get_doc(
             {
-                "doctype": "MPesa B2C Employee Payment Item",
-                "amount": 5,
-                "record_amount": 100,
+                "doctype": "B2C Payment Disbursement Reference",
+                "idx": 1,
+                "party": "_Test Supplier",
+                "partyb": "0712345678",
+                "allocated_amount": 100,
+                **values,
             }
         )
-        with self.assertRaises(frappe.ValidationError):
-            doc.validate()
+        self.parent = frappe.new_doc("B2C Payment Disbursement")  # parent_doc must be a Document
+        self.parent.payment_type = payment_type
+        row.parent_doc = self.parent
+        return row
 
-    def test_validate_fails_if_amount_is_greater_than_record_amount(self):
-        """Test that the validate method raises a ValidationError if the amount is greater than record_amount"""
-        doc = frappe.get_doc(
-            {
-                "doctype": "MPesa B2C Employee Payment Item",
-                "amount": 200,
-                "record_amount": 100,
-            }
-        )
-        with self.assertRaises(frappe.ValidationError):
-            doc.validate()
+    def test_valid_row_passes_and_number_is_normalised(self):
+        row = self._row()
+        row.validate()
+        self.assertEqual(row.partyb, "254712345678")
 
-    def test_validate_fails_if_partyb_is_invalid(self):
-        """Test that the validate method raises a ValidationError if partyb is invalid"""
-        doc = frappe.get_doc(
-            {
-                "doctype": "MPesa B2C Employee Payment Item",
-                "partyb": "some_invalid_number",
-            }
-        )
+    def test_party_is_mandatory(self):
         with self.assertRaises(frappe.ValidationError):
-            doc.validate()
+            self._row(party=None).validate()
 
-    def test_validate_passes_if_partyb_is_valid(self):
-        """Test that the validate method does not raise a ValidationError if partyb is valid"""
-        doc = frappe.get_doc(
-            {
-                "doctype": "MPesa B2C Employee Payment Item",
-                "partyb": "+254712345678",
-            }
-        )
-        try:
-            doc.validate()
-        except frappe.ValidationError:
-            self.fail("validate() raised ValidationError unexpectedly!")
+    def test_amount_below_10_is_rejected(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._row(allocated_amount=5).validate()
+
+    def test_amount_above_outstanding_is_rejected(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._row(allocated_amount=200, outstanding_amount=100).validate()
+
+    def test_invalid_receiver_number_is_rejected(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._row(partyb="some_invalid_number").validate()
+
+    def test_pesalink_needs_bank_code_not_a_phone_number(self):
+        with self.assertRaises(frappe.ValidationError):
+            self._row("Stanbic PesaLink", partyb="0011223344").validate()
+        self._row("Stanbic PesaLink", partyb="0011223344", bank_code="01").validate()
 
     def test_sanitise_phone_number(self):
-        """Test that the sanitise_phone_number function correctly sanitises a phone number"""
-        test_cases = [
-            ("0712345678", "254712345678"),
-            ("+254712345678", "254712345678"),
-            ("254712345678", "254712345678"),
-            ("0712345678 ", "254712345678"),
-            (" 0712345678", "254712345678"),
-            ("0712345678 +", "254712345678"),
-            ("0712345678  ", "254712345678"),
-        ]
+        for raw in ("0712345678", "+254712345678", "254712345678", "0712345678 ", " 0712345678",
+                    "0712345678 +", "0712345678  "):
+            self.assertEqual(sanitise_phone_number(raw), "254712345678", raw)
 
-        for input_number, expected_output in test_cases:
-            self.assertEqual(sanitise_phone_number(input_number), expected_output)
-
-    def test_sanitise_phone_number_invalid(self):
-        """Test that the sanitise_phone_number function does not modify an invalid phone number"""
-        test_cases = [
-            ("+25471234567", "+25471234567"),
+    def test_sanitise_leaves_other_numbers_alone_apart_from_plus_and_spaces(self):
+        for raw, expected in (
+            ("+25471234567", "25471234567"),
             ("07123456789", "07123456789"),
             ("25471234567", "25471234567"),
             ("0712345678a", "0712345678a"),
-            ("0712345678 ", "0712345678 "),
-            ("0112345678", "0112345678"),
-        ]
-
-        for input_number, expected_output in test_cases:
-            self.assertEqual(sanitise_phone_number(input_number), expected_output)
+        ):
+            self.assertEqual(sanitise_phone_number(raw), expected, raw)
 
     def test_is_valid_receiver_contact(self):
-        """Test that the is_valid_receiver_contact function correctly identifies valid and invalid contacts"""
-        valid_contacts = [
-            "254712345678",
-            "+254712345678",
-            "0712345678",
-        ]
-
-        invalid_contacts = [
-            "07123456789",
-            "25471234567",
-            "+25471234567",
-            "0712345678a",
-        ]
-
-        for contact in valid_contacts:
-            self.assertTrue(is_valid_receiver_contact(contact))
-
-        for contact in invalid_contacts:
-            self.assertFalse(is_valid_receiver_contact(contact))
-
-    def test_is_valid_reciever_contact_for_011_phone_numbers(self):
-        """Test that the is_valid_receiver_contact function correctly identifies 011 phone numbers as valid"""
-        invalid_contacts = [
-            "0112345678",
-            "01123456789",
-            "+254112345678",
-            "254112345678",
-        ]
-
-        for contact in invalid_contacts:
-            self.assertTrue(is_valid_receiver_contact(contact))
+        for contact in ("254712345678", "+254712345678", "0712345678", "0112345678", "+254112345678",
+                        "254102345678"):
+            self.assertTrue(is_valid_receiver_contact(contact), contact)
+        for contact in ("07123456789", "25471234567", "+25471234567", "0712345678a", "01123456789",
+                        "254122345678", ""):
+            self.assertFalse(is_valid_receiver_contact(contact), contact)

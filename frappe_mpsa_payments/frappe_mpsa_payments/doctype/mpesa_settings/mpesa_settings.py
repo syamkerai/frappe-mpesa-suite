@@ -199,7 +199,10 @@ class MpesaSettings(Document):
             if in_test():
                 from .test_mpesa_settings import get_payment_request_response_payload
 
-                _response = frappe._dict(get_payment_request_response_payload(amount))
+                # Log the request as the live STK flow does, so the callback can find it.
+                self.handle_api_response(
+                    "CheckoutRequestID", args, frappe._dict(get_payment_request_response_payload(amount))
+                )
             else:
                 stk_request = frappe.new_doc(MPESA_EXPRESS_REQUEST_DOCTYPE)
                 stk_request.update(
@@ -246,7 +249,9 @@ class MpesaSettings(Document):
         if in_test():
             from .test_mpesa_settings import get_test_account_balance_response
 
-            frappe._dict(get_test_account_balance_response())
+            # Log the request as the live call does, so the balance callback can find it.
+            request = {"reference_doctype": self.doctype, "reference_docname": self.name}
+            self.handle_api_response("ConversationID", request, frappe._dict(get_test_account_balance_response()))
         else:
             get_account_balance(self.name)
 
@@ -384,9 +389,10 @@ def create_mode_of_payment(
     with erpnext_app_import_guard():
         from erpnext import get_default_company
 
-    payment_gateway_account = frappe.db.get_value(
-        "Payment Gateway Account", {"payment_gateway": gateway}, ["payment_account"]
-    )
+    filters = {"payment_gateway": gateway}
+    if company and frappe.get_meta("Payment Gateway Account").has_field("company"):
+        filters["company"] = company  # ERPNext v16: one gateway account per company
+    payment_gateway_account = frappe.db.get_value("Payment Gateway Account", filters, ["payment_account"])
 
     mode_of_payment = frappe.db.exists("Mode of Payment", gateway)
     if not mode_of_payment and payment_gateway_account:
@@ -409,7 +415,18 @@ def create_mode_of_payment(
 
         return mode_of_payment
 
-    return frappe.get_doc("Mode of Payment", mode_of_payment)
+    if not mode_of_payment:
+        return None  # no Payment Gateway Account yet (no Company set): created on a later save
+
+    mode_of_payment = frappe.get_doc("Mode of Payment", mode_of_payment)
+    company = company or get_default_company()
+    if company and payment_gateway_account and not any(row.company == company for row in mode_of_payment.accounts):
+        # Company set or changed after the Mode of Payment was made: give it this company's account.
+        account_company = frappe.db.get_value("Account", payment_gateway_account, "company")
+        if account_company == company:
+            mode_of_payment.append("accounts", {"company": company, "default_account": payment_gateway_account})
+            mode_of_payment.save(ignore_permissions=True)
+    return mode_of_payment
 
 
 @frappe.whitelist()

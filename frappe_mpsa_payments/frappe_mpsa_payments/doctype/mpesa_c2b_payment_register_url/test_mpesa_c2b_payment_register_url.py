@@ -1,93 +1,92 @@
 # Copyright (c) 2024, Navari Limited and Contributors
 # See license.txt
 
+from unittest.mock import Mock, patch
+
 import frappe
-import unittest
-from unittest.mock import patch, Mock
-from frappe.utils import get_request_site_address
-from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import get_token
-from frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.test_mpesa_settings import TestMpesaSettings
-from frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_c2b_payment_register_url.mpesa_c2b_payment_register_url import MpesaC2BPaymentRegisterURL
+import requests
+
+from frappe_mpsa_payments.compat import IntegrationTestCase
+
+SETTINGS = "_Test C2B URL"
+MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_c2b_payment_register_url.mpesa_c2b_payment_register_url"
 
 
-def create_mpesa_setting_doc():
-	if not frappe.db.exists("Mpesa Settings", "Test Mpesa Settings"):
-		mpesa_settings1 = frappe.new_doc("Mpesa Settings")
-		mpesa_settings1.payment_gateway_name = "Test Mpesa Settings"
-		mpesa_settings1.mpesa_environment = "sandbox"
-		mpesa_settings1.consumer_key = "xMPJE16CDdAfBmOWvbqRsqlioAcQT77sWw2JD9OcceHp8fHv"
-		mpesa_settings1.consumer_secret = "NDXh2tdne9bMrnOEZXd8gQZiHPMWSpfWc2YXBLGQxiz66OGbcn5S79DKakgt3LQN"
-		mpesa_settings1.shortcode = "123456"
-		mpesa_settings1.business_shortcode = "123456"
-		mpesa_settings1.online_passkey = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919"
-		mpesa_settings1.till_number = "123456"
-		mpesa_settings1.initiator_name = "test_initiator_name"
-		mpesa_settings1.transaction_limit = 1000
-		mpesa_settings1.security_credential = "test_security_credential"
-		mpesa_settings1.sandbox=1
-		mpesa_settings1.save()
-		
-def create_mpesa_c2b_payment_register_url_doc():
-	if not frappe.db.exists("Mpesa C2B Payment Register URL", "Test Mpesa C2B Payment Register URL"):
-		mpesa_c2b_payment_register_url = frappe.new_doc("Mpesa C2B Payment Register URL")
-		mpesa_c2b_payment_register_url.business_shortcode = "123456"
-		mpesa_c2b_payment_register_url.mpesa_settings = "Test Mpesa Settings"
-		mpesa_c2b_payment_register_url.register_status = "Success"
-		mpesa_c2b_payment_register_url.till_number = "123456"
-		mpesa_c2b_payment_register_url.mode_of_payment = "Cash"
-		mpesa_c2b_payment_register_url.company = "Pharma Express du 30 juin"
-		mpesa_c2b_payment_register_url.save()
-	
-class TestMpesaC2BPaymentRegisterURL(TestMpesaSettings):
-	def setUp(self):
-		create_mpesa_setting_doc()
-		create_mpesa_c2b_payment_register_url_doc()
-  
-	def tearDown(self):
-		# Delete the Mpesa Settings document
-		mpesa_settings_doc = frappe.get_doc("Mpesa C2B Payment Register URL", "Test Mpesa Settings")
-		if mpesa_settings_doc:
-			frappe.delete_doc("Mpesa C2B Payment Register URL", "Test Mpesa Settings")
+def company() -> str:
+    return frappe.db.get_single_value("Global Defaults", "default_company") or frappe.db.get_value("Company", {}, "name")
 
-	@patch('requests.post')
-	def test_validate_success(self, mock_post):
-		mock_post.return_value = Mock(status_code=200)
-		mock_post.return_value.json.return_value = {
-			"ResponseDescription": "Success"
-		}
-		mpesa=frappe.get_doc("Mpesa C2B Payment Register URL","Test Mpesa Settings")
-		mpesa.validate()
 
-		self.assertEqual(mpesa.register_status, "Success")
+def create_mpesa_settings():
+    """Settings with a company, so saving it creates the Mode of Payment "Mpesa-<name>"."""
+    if not frappe.db.exists("Mpesa Settings", SETTINGS):
+        frappe.get_doc(
+            {
+                "doctype": "Mpesa Settings",
+                "payment_gateway_name": SETTINGS,
+                "api_type": "MPesa C2B (Customer to Business)",
+                "paybill_type": "Pay Bill",
+                "sandbox": 1,
+                "consumer_key": "key",
+                "consumer_secret": "secret",
+                "online_passkey": "passkey",
+                "business_shortcode": "174379",
+                "till_number": "600984",
+                "company": company(),
+            }
+        ).insert(ignore_permissions=True)
 
-	@patch('requests.post')
-	def test_validate_failure(self, mock_post):
-		mock_post.return_value = Mock(status_code=200)
-		mock_post.return_value.json.return_value = {
-			"ResponseDescription": "Failure"
-		}
-		mpesa=frappe.get_doc("Mpesa C2B Payment Register URL","Test Mpesa Settings")
-		mpesa.validate()
 
-		self.assertEqual(mpesa.register_status, "Failed")
+def response(json_body, status=200):
+    r = Mock(status_code=status)
+    r.json.return_value = json_body
+    r.raise_for_status = Mock()
+    return r
 
-	@patch('requests.post')
-	def test_validate_http_error(self, mock_post):
-		mock_post.side_effect = Exception("HTTP Error")
 
-		mpesa=frappe.get_doc("Mpesa C2B Payment Register URL","Test Mpesa Settings")
-		mpesa.validate()
-  
-		self.assertEqual(mpesa.register_status, "Failed")
-		
+class TestMpesaC2BPaymentRegisterURL(IntegrationTestCase):
+    def setUp(self):
+        frappe.set_user("Administrator")
+        create_mpesa_settings()
+        if frappe.db.exists("Mpesa C2B Payment Register URL", SETTINGS):
+            frappe.delete_doc("Mpesa C2B Payment Register URL", SETTINGS, force=True)
 
-	@patch('requests.post')
-	def test_validate_connection_error(self, mock_post):
-		mock_post.side_effect = ConnectionError("Connection Error")
+    def register(self, post):
+        doc = frappe.get_doc(
+            {
+                "doctype": "Mpesa C2B Payment Register URL",
+                "mpesa_settings": SETTINGS,
+                "company": company(),
+                "mode_of_payment": f"Mpesa-{SETTINGS}",
+            }
+        )
+        with patch(f"{MODULE}.get_token", return_value="token"), patch("requests.post", post):
+            doc.insert(ignore_permissions=True)
+        return doc
 
-		mpesa=frappe.get_doc("Mpesa C2B Payment Register URL","Test Mpesa Settings")
-		mpesa.validate()
-  
-		self.assertEqual(mpesa.register_status, "Failed")
+    def test_success_registers_sandbox_till_with_token_urls(self):
+        post = Mock(return_value=response({"ResponseCode": "0", "ResponseDescription": "Success"}))
+        doc = self.register(post)
+        self.assertEqual(doc.register_status, "Success")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["ShortCode"], "600984")  # sandbox registers the till / test shortcode
+        self.assertIn("m_pesa_api.confirmation", payload["ConfirmationURL"])
+        self.assertIn("m_pesa_api.validation", payload["ValidationURL"])
 
-	
+    def test_already_registered_counts_as_success(self):
+        post = Mock(return_value=response({"errorCode": "500.003.1001", "errorMessage": "Already registered"}))
+        self.assertEqual(self.register(post).register_status, "Success")
+
+    def test_rejection_is_failed(self):
+        post = Mock(return_value=response({"ResponseCode": "1", "ResponseDescription": "Failure"}))
+        self.assertEqual(self.register(post).register_status, "Failed")
+
+    def test_connection_error_is_failed(self):
+        post = Mock(side_effect=requests.exceptions.ConnectionError("down"))
+        self.assertEqual(self.register(post).register_status, "Failed")
+
+    def test_saving_again_does_not_re_register(self):
+        doc = self.register(Mock(return_value=response({"ResponseCode": "0"})))
+        post = Mock()
+        with patch("requests.post", post):
+            doc.save(ignore_permissions=True)
+        post.assert_not_called()

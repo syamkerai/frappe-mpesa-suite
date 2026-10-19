@@ -72,12 +72,5 @@ def sanitise_phone_number(phone_number: str) -> str:
 
 
 def is_valid_receiver_contact(receiver: str) -> bool:
-    """Validates the Receiver's mobile number"""
-    receiver = receiver.replace("+", "").strip()
-    pattern1 = re.compile(r"^2547\d{8}$")
-    pattern2 = re.compile(r"(25410|25411)\d{7}$")
-
-    if receiver.startswith("2547"):
-        return bool(pattern1.match(receiver))
-
-    return bool(pattern2.match(receiver))
+    """True for a Kenyan mobile number: 2547XXXXXXXX, 25410/25411XXXXXXX, or the 07/01, +254 forms."""
+    return bool(re.fullmatch(r"254(7\d{8}|1[01]\d{7})", sanitise_phone_number(str(receiver or "").strip())))
