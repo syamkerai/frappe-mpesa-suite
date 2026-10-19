@@ -46,7 +46,7 @@ mpesa_qp.close_active_dialogs = function () {
  * Show the Mpesa Quick Pay dialog.
  *
  * @param {object}   frm                - Frappe form object
- * @param {string}   page               - "pos" | "invoice"
+ * @param {string}   page               - "invoice" (the POS page integration was removed)
  * @param {function} process_mpesa      - callback(frm, dialog) fired on "Add Payments"
  * @param {number}   outstanding        - amount still to pay, shown in the header
  * @param {object}   config             - { auto_save_invoice, auto_submit_invoice, merge_payments }
@@ -364,11 +364,7 @@ function mpesa_render_totals(dialog) {
 
 	if (total_sel > 0) {
 		dialog.set_df_property("payment_section", "hidden", 0);
-		if (dialog.page === "invoice") {
-			invoice_payment_options(dialog);
-		} else {
-			pos_payment_options(dialog);
-		}
+		invoice_payment_options(dialog);
 	} else {
 		dialog.set_df_property("payment_section", "hidden", 1);
 	}
@@ -446,26 +442,6 @@ function invoice_payment_options(dialog) {
 	wrapper.find("#mpesa-auto-submit").on("change", function () {
 		dialog.auto_submit = $(this).is(":checked");
 	});
-	wrapper.find("#mpesa-merge-payments").on("change", function () {
-		dialog.merge_payments = $(this).is(":checked");
-	});
-}
-
-function pos_payment_options(dialog) {
-	const wrapper = dialog.fields_dict.payment_options_html.$wrapper;
-	if (dialog.selected.length <= 1) {
-		wrapper.html("");
-		return;
-	}
-
-	wrapper.html(`
-		<div class="mpesa-invoice-options">
-			<label class="mpesa-checkbox-label">
-				<input type="checkbox" id="mpesa-merge-payments" ${dialog.merge_payments ? "checked" : ""}>
-				<span>${__("Merge into one payment row")}</span>
-			</label>
-		</div>`);
-
 	wrapper.find("#mpesa-merge-payments").on("change", function () {
 		dialog.merge_payments = $(this).is(":checked");
 	});

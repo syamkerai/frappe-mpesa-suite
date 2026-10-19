@@ -216,7 +216,8 @@ def handle_successful_transaction(request_doc, settings):
             request_doc.get("reference_doctype"), request_doc.get("reference_name")
         ).run_method("on_payment_authorized", "Completed")
         set_mpesa_request_reconciled(request_doc)
-        frappe.db.commit()
+        # No commit here: the caller (money_in.stk_verify job or a manager's Reconcile
+        # click) owns the transaction, so a later failure undoes the whole booking.
 
     if "erpnext" in frappe.get_installed_apps():
         if request_doc.reference_doctype == "Payment Request":
@@ -354,27 +355,6 @@ def handle_successful_transaction(request_doc, settings):
                     log_and_throw_error(
                         "Payment Entry Submission Error", request_doc.name
                     )
-    if request_doc.reference_doctype == "Event Booking":
-        try:
-            frappe.flags.ignore_permissions = True
-            event_booking = frappe.get_doc("Event Booking", request_doc.reference_name)
-            event_booking.submit()
-            event_payment = frappe.get_doc(
-                "Event Payment",
-                {
-                    "reference_docname": event_booking.name,
-                    "reference_doctype": "Event Booking",
-                },
-            )
-            frappe.db.set_value(
-                "Event Payment",
-                event_payment.name,
-                {"payment_received": 1, "payment_id": request_doc.transaction_id},
-            )
-            set_mpesa_request_reconciled(request_doc)
-        except Exception:
-            log_and_throw_error("Event Booking Submission Error", request_doc.name)
-
     event_payload = {
         "status": "Success",
         "request_name": request_doc.name,

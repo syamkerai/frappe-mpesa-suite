@@ -109,7 +109,7 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 		frm.set_query("transaction_to_pay_against", function () {
 			const doctypes =
 				frm.doc.party_type === "Employee"
-					? ["Salary Slip", "Employee Advance", "Expense Claim", "Loan"]
+					? ["Salary Slip", "Employee Advance", "Expense Claim"]
 					: ["Purchase Invoice", "Purchase Order"];
 			return {
 				filters: { name: ["in", doctypes] },
@@ -119,7 +119,7 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 		frm.set_query("reference_doctype", "references", function () {
 			let doctypes = [];
 			if (frm.doc.party_type == "Employee") {
-				doctypes = ["Employee Advance", "Expense Claim", "Salary Slip", "Loan"];
+				doctypes = ["Employee Advance", "Expense Claim", "Salary Slip"];
 			} else if (frm.doc.party_type == "Supplier") {
 				doctypes = ["Purchase Invoice", "Purchase Order"];
 			}

@@ -1,45 +1,16 @@
-import frappe
 from frappe.tests.utils import FrappeTestCase
+
 from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
     get_outstanding_invoices,
-    get_unallocated_payments,
-    get_available_pos_profiles,
     set_paid_amount_and_received_amount,
 )
 
+
 class TestPaymentFunctions(FrappeTestCase):
     def test_get_outstanding_invoices(self):
-        company = "Test Company Maniac"
-        currency = "KES"
-        customer = "Test Customer"
-        pos_profile_name = "Test POS Profile"
+        invoices = get_outstanding_invoices("Test Company Maniac", "Test Customer")  # no such customer: empty list
 
-        invoices = get_outstanding_invoices(company, customer)  # no such customer: empty list, no error
-
-        # Assert the result
         self.assertTrue(isinstance(invoices, list))
-
-    def test_get_unallocated_payments(self):
-        customer = "Test Customer"
-        company = "Test Company Maniac"
-        currency = "KES"
-        mode_of_payment = "Cash"
-
-        # Call the function
-        unallocated_payments = get_unallocated_payments(customer, company, currency, mode_of_payment)
-
-        # Assert the result
-        self.assertTrue(isinstance(unallocated_payments, list))
-
-    # test_process_pos_payment removed: upstream deleted process_pos_payment; the test could not import.
-
-    def test_get_available_pos_profiles(self):
-        company = "Test Company Maniac"
-        currency = "KES"
-
-        pos_profiles = get_available_pos_profiles(company, currency)
-
-        self.assertTrue(isinstance(pos_profiles, list))
 
     def test_set_paid_amount_and_received_amount(self):
         party_account_currency = "KES"

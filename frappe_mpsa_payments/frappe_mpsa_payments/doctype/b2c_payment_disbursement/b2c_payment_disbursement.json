@@ -83,7 +83,7 @@
    "fieldname": "payment_type",
    "fieldtype": "Select",
    "label": "Payment Type",
-   "options": "Mpesa Disbursement\nStanbic Mobile\nStanbic PesaLink",
+   "options": "Mpesa Disbursement",
    "reqd": 1
   },
   {
@@ -227,7 +227,7 @@
    "table_fieldname": "references"
   }
  ],
- "modified": "2025-12-04 10:50:10.973065",
+ "modified": "2026-10-19 10:00:00.000000",
  "modified_by": "a@d.com",
  "module": "Frappe Mpsa Payments",
  "name": "B2C Payment Disbursement",

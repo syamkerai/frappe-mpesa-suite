@@ -1,0 +1,19 @@
+Astral M-Pesa Suite
+Copyright (C) 2026 Astral Industries Limited, Nairobi, Kenya.
+
+This program is a modified version of "Frappe Mpesa Payments"
+(https://github.com/navariltd/frappe-mpsa-payments),
+Copyright (C) 2024-2026 Navari Limited and contributors,
+which is licensed under the GNU Affero General Public License, version 3.
+
+Astral Industries Limited modified it from upstream commit dfa9a23 (2026-08-18) onwards.
+The changes are listed in SUITE_CHANGES.md and in the git history. Some files also carry
+notices from Frappe Technologies Pvt. Ltd. Those notices, and Navari's, stay on the files
+they came with.
+
+This program is free software: you can redistribute it and/or modify it under the terms of
+the GNU Affero General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version. See license.txt.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

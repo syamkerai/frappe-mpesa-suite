@@ -42,6 +42,10 @@
   "result_desc",
   "column_break_euqn",
   "transaction_id",
+  "accounting_section",
+  "accounting_booked",
+  "accounting_attempted_on",
+  "accounting_error",
   "mpesa_tab",
   "section_break_adaq",
   "mpesa_settings",
@@ -53,16 +57,7 @@
   "charges_paid_acct_avlbl_funds",
   "utility_acct_avlbl_funds",
   "working_acct_avlbl_funds",
-  "transaction_completed_datetime",
-  "bank_details_tab",
-  "column_break_kown",
-  "stanbic_settings",
-  "dbs_reference_id",
-  "next_execution_date",
-  "column_break_zmjb",
-  "bank_name",
-  "bank_code",
-  "bank_ac_no"
+  "transaction_completed_datetime"
  ],
  "fields": [
   {
@@ -79,6 +74,32 @@
    "label": "Transaction ID",
    "read_only": 1,
    "unique": 1
+  },
+  {
+   "depends_on": "eval:doc.status=='Paid'",
+   "fieldname": "accounting_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting"
+  },
+  {
+   "default": "0",
+   "description": "Set once a submitted Payment Entry / Journal Entry / Loan Disbursement books this payout. Paid payouts without one are retried every 15 minutes for 30 days.",
+   "fieldname": "accounting_booked",
+   "fieldtype": "Check",
+   "label": "Accounting Booked",
+   "read_only": 1
+  },
+  {
+   "fieldname": "accounting_attempted_on",
+   "fieldtype": "Datetime",
+   "label": "Last Booking Attempt",
+   "read_only": 1
+  },
+  {
+   "fieldname": "accounting_error",
+   "fieldtype": "Small Text",
+   "label": "Accounting Error",
+   "read_only": 1
   },
   {
    "allow_on_submit": 1,
@@ -169,7 +190,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Not Initiated\nInitiated\nPaid\nFailed",
+   "options": "Not Initiated\nInitiated\nPaid\nFailed\nStatus Unknown",
    "read_only": 1
   },
   {
@@ -314,7 +335,7 @@
    "fieldname": "payment_provider",
    "fieldtype": "Select",
    "label": "Payment Provider",
-   "options": "Mpesa\nStanbic",
+   "options": "Mpesa",
    "reqd": 1
   },
   {
@@ -350,21 +371,6 @@
    "label": "Mpesa"
   },
   {
-   "fieldname": "bank_details_tab",
-   "fieldtype": "Tab Break",
-   "label": "Bank Details"
-  },
-  {
-   "fieldname": "bank_name",
-   "fieldtype": "Data",
-   "label": "Bank Name"
-  },
-  {
-   "fieldname": "bank_code",
-   "fieldtype": "Data",
-   "label": "Bank Code"
-  },
-  {
    "fieldname": "b2c_payment_disbursement",
    "fieldtype": "Link",
    "label": "B2C Payment Disbursement",
@@ -382,25 +388,6 @@
    "reqd": 1
   },
   {
-   "fieldname": "column_break_kown",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "stanbic_settings",
-   "fieldtype": "Link",
-   "label": "Stanbic Settings",
-   "options": "Stanbic Settings"
-  },
-  {
-   "fieldname": "column_break_zmjb",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "bank_ac_no",
-   "fieldtype": "Data",
-   "label": "Bank A/C No."
-  },
-  {
    "fieldname": "party_type",
    "fieldtype": "Link",
    "label": "Party Type",
@@ -414,25 +401,13 @@
    "label": "Party",
    "options": "party_type",
    "read_only": 1
-  },
-  {
-   "depends_on": "eval: doc.stanbic_settings",
-   "fieldname": "dbs_reference_id",
-   "fieldtype": "Data",
-   "label": "Dbs Reference Id"
-  },
-  {
-   "depends_on": "eval: doc.stanbic_settings",
-   "fieldname": "next_execution_date",
-   "fieldtype": "Date",
-   "label": "Next Execution Date"
   }
  ],
  "in_create": 1,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2025-07-16 06:44:32.312411",
+ "modified": "2026-10-19 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "B2C Disbursement Request",

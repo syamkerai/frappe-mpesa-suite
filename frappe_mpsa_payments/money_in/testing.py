@@ -146,6 +146,9 @@ def enable_money_in(**overrides) -> None:
         "auto_reconcile_bank_transactions",
     ):
         settings.set(flag, 1)
+    # Verification calls Safaricom; tests that cover it turn it on and mock the calls.
+    settings.verify_c2b_confirmations = 0
+    settings.verify_stk_callbacks = 0
     # Tests call the callback handlers directly (no token, no source IP); callback auth has its
     # own tests and other suites may have committed it switched on.
     settings.enforce_token_c2b = 0

@@ -22,9 +22,6 @@ class B2CDisbursementRequest(Document):
         if not self.originator_conversation_id:
             self.originator_conversation_id = self._generate_uuid_v4()
 
-        if self.stanbic_settings and not self.dbs_reference_id:
-            self.dbs_reference_id = self._generate_uuid_v4()
-
     def on_submit(self):
         make_b2c_payment_request(self.name)
 

@@ -40,14 +40,10 @@ def create_b2c_request(doc_name: str) -> dict:
         frappe.throw(f"B2C request {doc_name} is {doc.status}; only unsent requests are sent")
     validate_b2c_amount_and_party(doc)
 
-    if doc.mpesa_settings:
-        provider = "Mpesa"
-        settings_name = doc.mpesa_settings
-    elif doc.stanbic_settings:
-        provider = "Stanbic"
-        settings_name = doc.stanbic_settings
-    else:
-        frappe.throw(f"You must select either Mpesa or Stanbic settings on {doc_name}")
+    if not doc.mpesa_settings:
+        frappe.throw(f"Select the Mpesa Settings to pay from on {doc_name}")
+    provider = "Mpesa"
+    settings_name = doc.mpesa_settings
 
     callback_url = with_token(
         f"{get_url()}/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.b2c.b2c_results_callback"

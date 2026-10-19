@@ -56,21 +56,25 @@ class MpesaC2BPaymentRegister(Document):
         self.set_missing_values()
 
     def after_insert(self):
+        auto_reconcile = frappe.db.get_value(
+            "Mpesa Settings",
+            {"business_shortcode": self.businessshortcode},
+            "auto_reconcile_c2b",
+        )
+        if not auto_reconcile:
+            return
+
+        # A failed auto-submit must not leave half a Payment Entry behind, and must not
+        # lose the receipt: undo to here and keep the register as a draft for matching/staff.
+        frappe.db.savepoint("mpesa_c2b_auto_submit")
         try:
-            auto_reconcile = frappe.db.get_value(
-                "Mpesa Settings",
-                {"business_shortcode": self.businessshortcode},
-                "auto_reconcile_c2b",
-            )
-
-            if not auto_reconcile:
-                return
-
             self.db_set("submit_payment", 1)
             self.submit()
-
         except Exception as e:
-            frappe.log_error(frappe.get_traceback(), f"C2B Auto-submit Error: {str(e)}")
+            frappe.db.rollback(save_point="mpesa_c2b_auto_submit")
+            self.docstatus = 0
+            self.payment_entry = None
+            frappe.log_error(frappe.get_traceback(), f"C2B Auto-submit Error: {str(e)}"[:140])
 
     def set_missing_values(self):
         self.currency = "KES"
@@ -202,32 +206,31 @@ class MpesaC2BPaymentRegister(Document):
                     frappe.db.rollback(save_point="before_c2b_submit")
                     raise
 
-        if frappe.db.get_global("is_manual_reconciliation") == "1":
-            return
-
+        # Reconciliation is optional: on failure undo its partial writes, keep the payment.
+        frappe.db.savepoint("mpesa_c2b_reconcile")
         try:
             self._reconcile_payment()
 
         except Exception as e:
+            frappe.db.rollback(save_point="mpesa_c2b_reconcile")
             frappe.log_error(
-                frappe.get_traceback(), f"C2B Reconciliation Error: {str(e)}"
+                frappe.get_traceback(), f"C2B Reconciliation Error: {str(e)}"[:140]
             )
 
     def on_cancel(self):
-        """Ensure linked Payment Entry is also cancelled when this record is cancelled."""
+        """Cancel the linked Payment Entry too.
+
+        A failure is raised, not logged: the register must not show as cancelled while its
+        Payment Entry still books the money.
+        """
         if self.payment_entry:
-            try:
-                pe = frappe.get_doc("Payment Entry", self.payment_entry)
-                if pe.docstatus == 1:
-                    pe.cancel()
-                    frappe.msgprint(
-                        _("Linked Payment Entry {0} cancelled").format(pe.name),
-                        alert=True,
-                    )
-            except Exception:
-                frappe.log_error(
-                    frappe.get_traceback(),
-                    f"Failed to cancel Payment Entry {self.payment_entry} for C2B {self.name}",
+            pe = frappe.get_doc("Payment Entry", self.payment_entry)
+            if pe.docstatus == 1:
+                pe.flags.ignore_permissions = self.flags.ignore_permissions
+                pe.cancel()
+                frappe.msgprint(
+                    _("Linked Payment Entry {0} cancelled").format(pe.name),
+                    alert=True,
                 )
 
     def _find_customer_from_billref(self, billrefnumber: str) -> str | None:

@@ -25,13 +25,17 @@ def find_existing(bank_account: str, receipt: str) -> str | None:
     """Live (draft or submitted) statement line for this receipt on this account."""
     if not receipt:
         return None
+    # Both columns are indexed (install.ensure_lookup_indexes), so the locking read only
+    # locks this receipt's rows instead of scanning (and locking) the whole table. It must
+    # stay a locking read: a plain read sees our transaction's snapshot and can miss a line
+    # another worker committed while we waited for the named lock.
     for field in ("reference_number", "transaction_id"):
         name = frappe.db.get_value(
             BT,
-            {"bank_account": bank_account, field: receipt, "docstatus": ["<", 2]},
+            {field: receipt, "bank_account": bank_account, "docstatus": ["<", 2]},
             "name",
             order_by="creation asc",
-            for_update=True,  # locking read: waits for / sees another worker's insert
+            for_update=True,
         )
         if name:
             return name

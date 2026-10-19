@@ -66,7 +66,7 @@ frappe.query_reports["B2C Disbursement Summary"] = {
       get_query: function () {
         const doctypes =
           frappe.query_report.get_filter_value("party_type") === "Employee"
-            ? ["Salary Slip", "Employee Advance", "Expense Claim", "Loan"]
+            ? ["Salary Slip", "Employee Advance", "Expense Claim"]
             : ["Purchase Invoice", "Purchase Order"];
         return {
           filters: {

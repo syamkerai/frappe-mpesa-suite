@@ -61,3 +61,4 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
             je.submit()
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Journal Service Error")
+        raise  # the caller rolls back and the B2C accounting sweep retries

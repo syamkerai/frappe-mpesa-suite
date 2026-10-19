@@ -141,10 +141,10 @@
   }
  ],
  "modified": "2026-02-06 11:36:41.557979",
- "modified_by": "test@navari.co.ke",
+ "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa",
- "owner": "test@navari.co.ke",
+ "owner": "Administrator",
  "standard": 1,
  "title": "M-Pesa"
 }

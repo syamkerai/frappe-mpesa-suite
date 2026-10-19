@@ -275,35 +275,6 @@ class MpesaSettings(Document):
             frappe.throw(_(response["errorMessage"]), title=_("Transaction Error"))
 
 
-def get_completed_integration_requests_info(
-    reference_doctype: str, reference_docname: str, checkout_id: str
-) -> tuple[list, list]:
-    output_of_other_completed_requests = frappe.get_all(
-        "Integration Request",
-        filters={
-            "name": ["!=", checkout_id],
-            "reference_doctype": reference_doctype,
-            "reference_docname": reference_docname,
-            "status": "Completed",
-        },
-        pluck="output",
-    )
-
-    mpesa_receipts, completed_payments = [], []
-
-    for out in output_of_other_completed_requests:
-        out = frappe._dict(loads(out))
-        item_response = out["CallbackMetadata"]["Item"]
-        completed_amount = fetch_param_value(item_response, "Amount", "Name")
-        completed_mpesa_receipt = fetch_param_value(
-            item_response, "MpesaReceiptNumber", "Name"
-        )
-        completed_payments.append(completed_amount)
-        mpesa_receipts.append(completed_mpesa_receipt)
-
-    return mpesa_receipts, completed_payments
-
-
 @frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_RESULT)
 def process_balance_info(**kwargs) -> None:

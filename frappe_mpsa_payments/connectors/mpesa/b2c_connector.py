@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 
 import frappe
+import requests
 from frappe.model.document import Document
 from frappe.utils import get_datetime
 
@@ -177,7 +178,41 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             update_integration_request(
                 integration_request.name, status="Failed", output=str(error)
             )
+            # Only a connect timeout proves the request never reached Safaricom. Any other
+            # transport error (read timeout, reset) may have sent the money: the payout is
+            # "Status Unknown" until a Transaction Status query settles it, and nothing can
+            # resend it meanwhile (create_b2c_request and retry need Not Initiated / Failed).
+            if isinstance(error, requests.exceptions.ConnectTimeout):
+                fields = {"status": "Failed", "error_message": f"Not sent: {type(error).__name__}"}
+            else:
+                fields = {
+                    "status": "Status Unknown",
+                    "error_message": f"No answer from Safaricom ({type(error).__name__}); "
+                    "a Transaction Status check runs before anything else happens.",
+                }
+            if frappe.db.exists(B2C_REQUEST_DOCTYPE, document_name):
+                frappe.db.set_value(B2C_REQUEST_DOCTYPE, document_name, fields)
             # no commit: runs inside B2C Disbursement Request.on_submit; the job commits
+            if fields["status"] == "Failed":
+                frappe.enqueue(
+                    "frappe_mpsa_payments.services.b2c_response_service.update_b2c_reference_status",
+                    queue="short",
+                    timeout=300,
+                    enqueue_after_commit=True,
+                    b2c_request_name=document_name,
+                    enqueue_next=True,
+                )
+            return
+
+        if response is not None and response.status_code >= 500 and not data.get("errorCode"):
+            # A gateway error page, not a Daraja error: the request may have been processed.
+            update_integration_request(integration_request.name, status="Failed", output=str(data))
+            if frappe.db.exists(B2C_REQUEST_DOCTYPE, document_name):
+                frappe.db.set_value(
+                    B2C_REQUEST_DOCTYPE,
+                    document_name,
+                    {"status": "Status Unknown", "error_message": f"HTTP {response.status_code} without a Daraja error"},
+                )
             return
 
         fields = {

@@ -7,5 +7,3 @@ MPESA_C2B_PAYMENT_REGISTER_DOCTYPE: Final[str] = "Mpesa C2B Payment Register"
 ACCESS_TOKENS_DOCTYPE: Final[str] = ""
 B2C_REQUEST_DOCTYPE: Final[str] = "B2C Disbursement Request"
 
-# Stanbic
-STANBIC_SETTINGS_DOCTYPE: Final[str] = "Stanbic Settings"

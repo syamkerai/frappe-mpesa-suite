@@ -376,6 +376,15 @@ def initiate_stk_push(**args) -> any:
 @frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_RESULT)
 def stk_push_callback(**kwargs) -> None:
+    """Store Safaricom's STK result and queue its settlement; nothing is booked here.
+
+    money_in.stk_verify.settle confirms the callback with an STK Query (callbacks are not
+    signed), records status and receipt, commits, and only then books the payment, so a
+    forged callback books nothing and a booking failure cannot lose the receipt.
+    """
+    from ...daraja.verify import PENDING, VERIFIED
+    from ...money_in.stk_verify import queue
+
     checkout_request_id = None
     try:
         transaction_response = frappe._dict(kwargs["Body"]["stkCallback"])
@@ -383,92 +392,44 @@ def stk_push_callback(**kwargs) -> None:
         if not isinstance(checkout_request_id, str):
             log_and_throw_error("Invalid Checkout Request ID")
 
-        result_code = transaction_response.get("ResultCode")
-        status = "Completed" if str(result_code) == "0" else "Failed"
-
-        callback_metadata = transaction_response.get("CallbackMetadata", {}).get(
-            "Item", []
+        frappe.db.get_value(
+            MPESA_EXPRESS_REQUEST_DOCTYPE,
+            {"checkout_request_id": checkout_request_id},
+            "name",
+            for_update=True,
         )
-        metadata_dict = {
-            item.get("Name"): item.get("Value")
-            for item in callback_metadata
-            if "Value" in item
-        }
-
-        transaction_date = metadata_dict.get("TransactionDate")
-        if transaction_date:
-            if not isinstance(transaction_date, str):
-                transaction_date = str(transaction_date)
-
-            date_obj = datetime.datetime.strptime(transaction_date, "%Y%m%d%H%M%S")
-
-            metadata_dict["TransactionDate"] = date_obj
-
         request_doc = frappe.get_doc(
             MPESA_EXPRESS_REQUEST_DOCTYPE, {"checkout_request_id": checkout_request_id}
         )
+        if request_doc.get("verification_status") == VERIFIED:
+            return  # Safaricom re-sent a callback we already settled
 
-        status_update = {
-            "result_code": result_code,
-            "result_desc": transaction_response.get("ResultDesc"),
-            "transaction_id": metadata_dict.get("MpesaReceiptNumber"),
-            "transaction_date": metadata_dict.get("TransactionDate"),
-            "status": status,
-        }
-        if status == "Completed" and metadata_dict.get("Amount") is not None:
-            # book what the customer actually paid, not what was requested
-            status_update["amount"] = flt(metadata_dict.get("Amount"))
-        update_mpesa_request_status(request_doc.name, status_update)
-
-        realtime_payload = {
-            "status": status,
-            "request_name": request_doc.name,
-            "reference_doctype": request_doc.reference_doctype,
-            "reference_name": request_doc.reference_name,
-            "transaction_id": metadata_dict.get("MpesaReceiptNumber"),
-            "amount": request_doc.amount,
-            "result_desc": transaction_response.get("ResultDesc"),
-        }
-        frappe.publish_realtime(
-            event="mpesa_stk_payment_completed",
-            message=realtime_payload,
-            user=request_doc.owner,
-        )
-        frappe.publish_realtime(
-            event="mpesa_stk_payment_completed",
-            message=realtime_payload,
-        )
-
-        request_doc.validate_duplicate_c2b_records()
-
-        integration_req = frappe.get_doc(
-            "Integration Request", {"output": ["like", f"%{checkout_request_id}%"]}
-        )
-        integration_req.flags.ignore_permissions = True
-        current_output = integration_req.output or "{}"
-        output = json.dumps(
+        update_mpesa_request_status(
+            request_doc.name,
             {
-                "stkpush_response": current_output,
-                "callback_result": transaction_response,
-            },
-            indent=4,
-        )
-
-        frappe.db.set_value(
-            "Integration Request",
-            integration_req.name,
-            {
-                "status": status,
-                "output": output,
+                "callback_payload": json.dumps(dict(transaction_response)),
+                "verification_status": PENDING,
             },
         )
 
-        if status == "Completed":
-            request_doc.book_completed_payment()
+        integration_req = frappe.db.get_value(
+            "Integration Request", {"output": ["like", f"%{checkout_request_id}%"]}, ["name", "output"], as_dict=True
+        )
+        if integration_req:
+            frappe.db.set_value(
+                "Integration Request",
+                integration_req.name,
+                "output",
+                json.dumps(
+                    {
+                        "stkpush_response": integration_req.output or "{}",
+                        "callback_result": transaction_response,
+                    },
+                    indent=4,
+                ),
+            )
 
-        if "erpnext" in frappe.get_installed_apps():
-            if request_doc and request_doc.reference_doctype == "Payment Request":
-                publish_stk_status(status, request_doc.reference_name)
+        queue(request_doc.name)
 
     except Exception:
         log_and_throw_error("STK Push Callback Error", checkout_request_id)
@@ -547,6 +508,36 @@ def confirmation(**kwargs):
 
 
 @frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
+def c2b_verification_result(**kwargs):
+    """Transaction Status result for a held C2B confirmation (money_in.c2b_verify)."""
+    ir = kwargs.get("ir")
+    result = kwargs.get("Result") or {}
+    if not ir or not frappe.db.exists("Integration Request", ir) or not isinstance(result, dict):
+        return {"ResultCode": 1, "ResultDesc": "Rejected"}
+    frappe.enqueue(
+        "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.apply_c2b_verification",
+        queue="short",
+        timeout=300,
+        enqueue_after_commit=True,
+        ir=ir,
+        result=result,
+    )
+    return {"ResultCode": 0, "ResultDesc": "Accepted"}
+
+
+def apply_c2b_verification(ir: str, result: dict) -> None:
+    from frappe_mpsa_payments.money_in.c2b_verify import apply_result
+
+    try:
+        apply_result(ir, result)
+        frappe.db.commit()
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), f"M-Pesa C2B verification failed for {ir}"[:140])
+
+
+@frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_C2B)
 def validation(**kwargs):
     context = {"ResultCode": 0, "ResultDesc": "Accepted"}
@@ -559,197 +550,39 @@ def delayed_insert_c2b(c2b_data: dict) -> None:
     This ensures that any Express Request with the same transaction_id
     is already created and can be prioritized.
     """
+    from frappe_mpsa_payments.money_in import c2b_verify
+    from frappe_mpsa_payments.money_in.common import enabled, settings_for_shortcode
+    from frappe_mpsa_payments.money_in.receipts import STK_OWNED, insert_register
+
     try:
         time.sleep(1)
 
-        if c2b_data.get("transid"):
-            express_exists = frappe.db.exists(
-                "Mpesa Express Request", {"transaction_id": c2b_data["transid"]}
+        if not settings_for_shortcode(c2b_data.get("businessshortcode")):
+            # Not one of our paybills/tills: forged, or a shortcode nobody configured.
+            frappe.log_error(
+                f"C2B confirmation for unknown BusinessShortCode: {frappe.as_json(c2b_data)}",
+                "M-Pesa C2B confirmation ignored",
             )
-            if express_exists:
-                frappe.log_error(
-                    f"C2B {c2b_data['transid']} blocked due to existing Express Request",
-                    "C2B Insert Skipped",
-                )
-                return
+            return
 
-        from frappe_mpsa_payments.money_in.common import named_lock
+        if enabled("verify_c2b_confirmations"):
+            # Unsigned callback: the register is created only once Transaction Status
+            # confirms the receipt, amount and shortcode (money_in.c2b_verify).
+            c2b_verify.hold(c2b_data)
+            return
 
         # Safaricom re-sends confirmations; keep exactly one live register per receipt.
-        with named_lock(f"c2b:{c2b_data.get('transid') or frappe.generate_hash(length=10)}"):
-            # locking read: sees rows committed by another worker after our snapshot began
-            if c2b_data.get("transid") and frappe.db.get_value(
-                "Mpesa C2B Payment Register",
-                {"transid": c2b_data["transid"], "docstatus": ["<", 2]},
-                "name",
-                for_update=True,
-            ):
-                return
-
-            doc = frappe.new_doc("Mpesa C2B Payment Register")
-            for k, v in c2b_data.items():
-                setattr(doc, k, v)
-
-            doc.insert(ignore_permissions=True)
-            frappe.db.commit()
-
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "Delayed C2B Insert Error")
-
-
-@frappe.whitelist()
-def get_mpesa_mode_of_payment(company):
-    modes = frappe.get_all(
-        "Mpesa C2B Payment Register URL",
-        filters={"company": company, "register_status": "Success"},
-        fields=["mode_of_payment"],
-    )
-    modes_of_payment = []
-    for mode in modes:
-        if mode.mode_of_payment not in modes_of_payment:
-            modes_of_payment.append(mode.mode_of_payment)
-    return modes_of_payment
-
-
-@frappe.whitelist()
-def get_mpesa_draft_c2b_payments(
-    company,
-    full_name=None,
-    mode_of_payment=None,
-    from_date=None,
-    to_date=None,
-):
-    fields = [
-        "name",
-        "transid",
-        "company",
-        "msisdn",
-        "full_name",
-        "posting_date",
-        "posting_time",
-        "transamount",
-    ]
-
-    frappe.has_permission("Mpesa C2B Payment Register", "read", throw=True)
-    filters = {"company": company, "docstatus": 0}
-    order_by = "posting_date desc, posting_time desc"
-
-    if mode_of_payment:
-        filters["mode_of_payment"] = mode_of_payment
-
-    if full_name:
-        filters["full_name"] = ["like", f"%{full_name}%"]
-
-    if from_date and to_date:
-        filters["posting_date"] = ["between", [from_date, to_date]]
-    elif from_date:
-        filters["posting_date"] = [">=", from_date]
-    elif to_date:
-        filters["posting_date"] = ["<=", to_date]
-
-    payments = frappe.get_list(
-        "Mpesa C2B Payment Register", filters=filters, fields=fields, order_by=order_by
-    )
-
-    return payments
-
-
-@frappe.whitelist()
-def get_draft_pos_invoice(search_term=None):
-    frappe.has_permission("Sales Invoice", "read", throw=True)
-    status_filters = [
-        "Overdue",
-        "Partially Paid",
-        "Unpaid",
-        "Overdue and Discounted",
-        "Partially Paid and Discounted",
-    ]
-
-    or_filters = None
-    if search_term:
-        or_filters = [
-            ["customer", "like", f"%{search_term}%"],
-            ["name", "like", f"%{search_term}%"],
-        ]
-
-    # get_list applies user permissions (the old query-builder select * did not)
-    invoices = frappe.get_list(
-        "Sales Invoice",
-        filters={"docstatus": 1, "status": ["in", status_filters]},
-        or_filters=or_filters,
-        fields=["*"],
-        order_by="posting_date desc",
-    )
-
-    frappe.response["message"] = invoices
-
-
-@frappe.whitelist()
-def submit_mpesa_payment(mpesa_payment, customer):
-    try:
-        doc = process_mpesa_payment(mpesa_payment, customer, submit_payment=True)
-        return frappe.get_doc("Payment Entry", doc.payment_entry)
-    except Exception as e:
-        frappe.log_error(f"Error: {str(e)}", "submit_mpesa_payment")
-        raise
-
-
-@frappe.whitelist()
-def submit_instant_mpesa_payment():
-    mpesa_payment = frappe.form_dict.get("mpesa_payment")
-    customer = None
-    if "erpnext" in frappe.get_installed_apps():
-        customer = frappe.form_dict.get("customer")
-
-    try:
-        process_mpesa_payment(mpesa_payment, customer, submit_payment=False)
-    except Exception as e:
-        frappe.log_error(f"Error: {str(e)}", "submit_instant_mpesa_payment")
-        raise
-
-
-def process_mpesa_payment(mpesa_payment, customer, submit_payment=False):
-    try:
-        doc = frappe.get_doc("Mpesa C2B Payment Register", mpesa_payment)
-        if "erpnext" in frappe.get_installed_apps():
-            doc.customer = customer
-            # TODO: after testing, mode of payment
-            doc.mode_of_payment = get_mode_of_payment(doc)
-        doc.submit_payment = submit_payment
-        doc.save()
-        doc.submit()
+        outcome, _name = insert_register(c2b_data)
+        if outcome == STK_OWNED:
+            frappe.log_error(
+                f"C2B {c2b_data['transid']} blocked due to existing Express Request",
+                "C2B Insert Skipped",
+            )
         frappe.db.commit()
 
-        doc.reload()
-
-        return doc
-    except Exception as e:
-        frappe.log_error(f"Error: {str(e)}", "process_mpesa_payment")
-        raise
-
-
-def get_payment_method(pos_profile):
-    pos_profile_doc = frappe.get_doc("POS Profile", pos_profile)
-    for payment in pos_profile_doc.payments:
-        if payment.default == 1:
-            return payment.mode_of_payment
-    return None
-
-
-def get_mode_of_payment(mpesa_doc):
-    business_short_code = mpesa_doc.businessshortcode
-    mode_of_payment = frappe.get_value(
-        "Mpesa C2B Payment Register URL",
-        {"business_shortcode": business_short_code, "register_status": "Success"},
-        "mode_of_payment",
-    )
-    if mode_of_payment is None:
-        mode_of_payment = frappe.get_value(
-            "Mpesa C2B Payment Register URL",
-            {"till_number": business_short_code, "register_status": "Success"},
-            "mode_of_payment",
-        )
-    return mode_of_payment
+    except Exception:
+        frappe.db.rollback()
+        frappe.log_error(frappe.get_traceback(), "Delayed C2B Insert Error")
 
 
 @frappe.whitelist(allow_guest=True)
@@ -795,6 +628,32 @@ def handle_transaction_status_result():
         return {"status": "error", "message": f"Webhook error: {str(e)}"}
 
 
+def _unsolicited_status_result(result_data: dict, receipt_no: str, credit_shortcode: str) -> str | None:
+    """Reason to reject a Transaction Status result that answers no query of ours, else None."""
+    from ...money_in.c2b_verify import own_shortcodes
+
+    conversation_id = result_data.get("ConversationID")
+    if not conversation_id or not receipt_no:
+        return "Result has no ConversationID or receipt"
+    sent = frappe.db.get_value(
+        "Integration Request",
+        {
+            "integration_request_service": "Mpesa Transaction Status",
+            "status": "Completed",
+            "output": ["like", f"%{conversation_id}%"],
+        },
+        "data",
+    )
+    if not sent:
+        return f"No Transaction Status query of ours has ConversationID {conversation_id}"
+    asked = json.loads(sent)
+    if str(asked.get("transaction_id") or "").strip().upper() != str(receipt_no).strip().upper():
+        return f"Result is for {receipt_no}, but we asked about {asked.get('transaction_id')}"
+    if credit_shortcode and credit_shortcode not in own_shortcodes(asked.get("mpesa_settings")):
+        return f"Receipt {receipt_no} was paid to {credit_shortcode}, not to {asked.get('mpesa_settings')}"
+    return None
+
+
 def process_mpesa_integration_request(integration_request_name):
     """Process the Mpesa Integration Request and publish updates in real-time"""
     try:
@@ -817,10 +676,46 @@ def process_mpesa_integration_request(integration_request_name):
         business_shortcode = str(result_params.get("CreditPartyName") or "").split("-")
 
         if str(result_code) == "0":
-            if frappe.db.exists("Mpesa C2B Payment Register", {"transid": receipt_no}):
-                error_msg = (
-                    f"Duplicate transaction: Receipt No {receipt_no} already exists"
+            from ...money_in.receipts import INSERTED, insert_register
+
+            # Unsigned guest callback: only accept the answer to a query we actually sent,
+            # for the receipt we asked about, paid to one of our shortcodes.
+            rejection = _unsolicited_status_result(result_data, receipt_no, business_shortcode[0].strip())
+            if rejection:
+                integration_request.status = "Failed"
+                integration_request.output = rejection
+                integration_request.save(ignore_permissions=True)
+                frappe.db.commit()
+                frappe.log_error(
+                    f"{rejection}\n\n{integration_request.data}", "M-Pesa Transaction Status result rejected"
                 )
+                return
+
+            debit_party = str(result_params.get("DebitPartyName") or "").split(" - ")
+            name_parts = (
+                debit_party[1].split(" ") if len(debit_party) > 1 else ["", "", ""]
+            )
+            outcome, register_name = insert_register(
+                {
+                    "full_name": result_params.get("DebitPartyName", ""),
+                    "transactiontype": result_params.get("ReasonType", ""),
+                    "transid": receipt_no,
+                    "transtime": result_params.get("InitiatedTime", ""),
+                    "transamount": flt(result_params.get("Amount", 0.0)),
+                    "businessshortcode": business_shortcode[0].strip(),
+                    # Transaction Status does not return the customer's account reference;
+                    # leave billrefnumber empty rather than copy the receipt (it broke matching).
+                    "invoicenumber": result_params.get("TransactionID", ""),
+                    "orgaccountbalance": result_params.get("DebitAccountType", ""),
+                    "thirdpartytransid": result_params.get("OriginatorConversationID", ""),
+                    "msisdn": debit_party[0] if len(debit_party) > 0 else "",
+                    "firstname": name_parts[0],
+                    "middlename": name_parts[1] if len(name_parts) > 1 else "",
+                    "lastname": name_parts[-1] if len(name_parts) > 2 else "",
+                }
+            )
+            if outcome != INSERTED:
+                error_msg = f"Duplicate transaction: Receipt No {receipt_no} already exists"
                 integration_request.status = "Failed"
                 integration_request.output = error_msg
                 integration_request.save(ignore_permissions=True)
@@ -832,34 +727,8 @@ def process_mpesa_integration_request(integration_request_name):
                     user=frappe.session.user,
                 )
                 return
-
-            # Create the Mpesa document
-            mpesa_doc = frappe.new_doc("Mpesa C2B Payment Register")
-            mpesa_doc.full_name = result_params.get("DebitPartyName", "")
-            mpesa_doc.transactiontype = result_params.get("ReasonType", "")
-            mpesa_doc.transid = result_params.get("ReceiptNo", "")
-            mpesa_doc.transtime = result_params.get("InitiatedTime", "")
-            mpesa_doc.transamount = flt(result_params.get("Amount", 0.0))
-            mpesa_doc.businessshortcode = business_shortcode[0].strip()
-            # Transaction Status does not return the customer's account reference;
-            # leave billrefnumber empty rather than copy the receipt (it broke matching).
-            mpesa_doc.invoicenumber = result_params.get("TransactionID", "")
-            mpesa_doc.orgaccountbalance = result_params.get("DebitAccountType", "")
-            mpesa_doc.thirdpartytransid = result_params.get(
-                "OriginatorConversationID", ""
-            )
-
-            debit_party = str(result_params.get("DebitPartyName") or "").split(" - ")
-            mpesa_doc.msisdn = debit_party[0] if len(debit_party) > 0 else ""
-            name_parts = (
-                debit_party[1].split(" ") if len(debit_party) > 1 else ["", "", ""]
-            )
-            mpesa_doc.firstname = name_parts[0]
-            mpesa_doc.middlename = name_parts[1] if len(name_parts) > 1 else ""
-            mpesa_doc.lastname = name_parts[-1] if len(name_parts) > 2 else ""
-
-            mpesa_doc.insert(ignore_permissions=True)
             frappe.db.commit()
+            mpesa_doc = frappe._dict(name=register_name)
 
             success_msg = "Transaction processed successfully"
             integration_request.status = "Completed"
@@ -935,88 +804,6 @@ def handle_queue_timeout():
         error_message = f"Mpesa Timeout Error: {str(e)}"
         frappe.log_error(title="Mpesa Timeout Error", message=error_message)
         return {"status": "error", "message": str(e)}
-
-
-@frappe.whitelist(allow_guest=True)
-@safaricom_callback(KIND_RESULT)
-def verify_transaction(**kwargs) -> None:
-    """Verify the transaction result received via callback from stk."""
-    from ..doctype.mpesa_settings.mpesa_settings import (
-        fetch_param_value,
-        get_completed_integration_requests_info,
-    )
-
-    transaction_response = frappe._dict(kwargs["Body"]["stkCallback"])
-
-    checkout_id = getattr(transaction_response, "CheckoutRequestID", "")
-    if not isinstance(checkout_id, str):
-        frappe.log_error(_("Invalid Checkout Request ID"))
-
-    integration_request = frappe.get_doc("Integration Request", checkout_id)
-    transaction_data = frappe._dict(json.loads(integration_request.data))
-    total_paid = 0
-    success = False  # for reporting successfull callback to point of sale ui
-
-    if str(transaction_response["ResultCode"]) == "0":
-        if (
-            integration_request.reference_doctype
-            and integration_request.reference_docname
-        ):
-            try:
-                item_response = transaction_response["CallbackMetadata"]["Item"]
-                amount = fetch_param_value(item_response, "Amount", "Name")
-                mpesa_receipt = fetch_param_value(
-                    item_response, "MpesaReceiptNumber", "Name"
-                )
-                pr = frappe.get_doc(
-                    integration_request.reference_doctype,
-                    integration_request.reference_docname,
-                )
-
-                mpesa_receipts, completed_payments = (
-                    get_completed_integration_requests_info(
-                        integration_request.reference_doctype,
-                        integration_request.reference_docname,
-                        checkout_id,
-                    )
-                )
-
-                total_paid = amount + sum(completed_payments)
-                mpesa_receipts = ", ".join(mpesa_receipts + [mpesa_receipt])
-
-                if total_paid >= pr.grand_total:
-                    pr.run_method("on_payment_authorized", "Completed")
-                    success = True
-
-                frappe.db.set_value(
-                    "POS Invoice",
-                    pr.reference_name,
-                    "mpesa_receipt_number",
-                    mpesa_receipts,
-                )
-                integration_request.handle_success(transaction_response)
-            except Exception:
-                integration_request.handle_failure(transaction_response)
-                frappe.log_error("Mpesa: Failed to verify transaction")
-
-    else:
-        integration_request.handle_failure(transaction_response)
-
-    frappe.publish_realtime(
-        event="process_phone_payment",
-        doctype="POS Invoice",
-        docname=transaction_data.payment_reference,
-        user=integration_request.owner,
-        message={
-            "amount": total_paid,
-            "success": success,
-            "failure_message": (
-                transaction_response["ResultDesc"]
-                if str(transaction_response["ResultCode"]) != "0"
-                else ""
-            ),
-        },
-    )
 
 
 def build_pull_payload(

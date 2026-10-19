@@ -12,6 +12,11 @@
   "enforce_ip_allowlist",
   "allowed_callback_ips",
   "integration_user",
+  "missing_integration_user",
+  "verification_section",
+  "verify_c2b_confirmations",
+  "column_break_verify",
+  "verify_stk_callbacks",
   "limits_section",
   "amount_tolerance",
   "stk_max_amount",
@@ -109,7 +114,38 @@
    "fieldtype": "Link",
    "options": "User",
    "label": "Integration User",
-   "description": "User that callbacks and background jobs run as. Leave empty to use Administrator. A dedicated System User with only Accounts and M-Pesa roles is recommended."
+   "description": "User that callbacks and background jobs run as. Leave empty to use Administrator (see If No Integration User). A dedicated System User with only Accounts and M-Pesa roles is recommended."
+  },
+  {
+   "fieldname": "missing_integration_user",
+   "fieldtype": "Select",
+   "label": "If No Integration User",
+   "options": "Warn\nRefuse",
+   "default": "Warn",
+   "description": "Warn: callbacks run as Administrator and an Error Log is written once an hour. Refuse: callbacks are rejected until an Integration User is set. Use Refuse in production."
+  },
+  {
+   "fieldname": "verification_section",
+   "fieldtype": "Section Break",
+   "label": "Confirm Callbacks with Safaricom"
+  },
+  {
+   "fieldname": "verify_c2b_confirmations",
+   "fieldtype": "Check",
+   "label": "Verify C2B Confirmations with Transaction Status",
+   "default": "1",
+   "description": "Hold each C2B confirmation until a Transaction Status query confirms its receipt, amount and shortcode; only then create the register. Needs the Initiator and Security Credential on each Mpesa Settings, and the initiator must be allowed to query Transaction Status. Unconfirmed confirmations stay as Integration Requests (service 'Mpesa C2B Verification')."
+  },
+  {
+   "fieldname": "column_break_verify",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "verify_stk_callbacks",
+   "fieldtype": "Check",
+   "label": "Verify STK Callbacks with STK Query",
+   "default": "1",
+   "description": "Confirm each STK callback with an STK Query (and the paid amount against the prompt) before the prompt is marked Completed and booked."
   },
   {
    "fieldname": "limits_section",
@@ -400,7 +436,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-18 15:00:00.000000",
+ "modified": "2026-10-18 23:30:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa Suite Settings",

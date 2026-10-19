@@ -1,8 +1,8 @@
 app_name = "frappe_mpsa_payments"
-app_title = "M-Pesa Suite"
-app_publisher = "Navari Limited, Astral Industries Limited"
+app_title = "Astral M-Pesa Suite"
+app_publisher = "Astral Industries Limited"
 app_description = "M-Pesa C2B, STK, B2C, B2B, bank feeds and reconciliation (Frappe/ERPNext v15 + v16)"
-app_email = "support@navari.co.ke"
+app_email = "finance@astralind.com"
 app_license = "agpl-3.0"
 # required_apps = ["erpnext", "hrms", "lending"]
 
@@ -28,7 +28,7 @@ add_to_apps_screen = [
     {
         "name": "frappe_mpsa_payments",
         "logo": "/assets/frappe_mpsa_payments/m-pesa.png",
-        "title": "M-Pesa",
+        "title": "Astral M-Pesa",
         "route": "/app/m-pesa",
     }
 ]
@@ -52,15 +52,17 @@ app_include_js = "/assets/frappe_mpsa_payments/js/utils.js"
 # webform_include_css = {"doctype": "public/css/doctype.css"}
 
 # include js in page
-page_js = {"point-of-sale": "public/js/pos_quick_pay.js"}
+# page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 doctype_js = {
     "Sales Invoice": "public/js/sales_invoice.js",
-    "POS Invoice": "public/js/pos_invoice.js",
     "Payment Request": "public/js/payment_request.js",
     "Payment Entry": "public/js/payment_entry.js",
+    "B2C Disbursement Request": "public/js/b2c_status_check.js",
+    "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
+    "Integration Request": "public/js/c2b_verification.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -191,7 +193,9 @@ doc_events = {
 scheduler_events = {
     "cron": {
         "*/15 * * * *": [
-            "frappe_mpsa_payments.services.b2c_scheduler_service.update_b2c_disbursement_statuses"
+            "frappe_mpsa_payments.services.b2c_scheduler_service.update_b2c_disbursement_statuses",
+            "frappe_mpsa_payments.services.b2c_postprocess_service.retry_unbooked_payouts",
+            "frappe_mpsa_payments.services.b2c_scheduler_service.check_unsettled_payouts",
         ],
         "*/2 * * * *": ["frappe_mpsa_payments.money_in.events.every_two_minutes"],
         "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"],

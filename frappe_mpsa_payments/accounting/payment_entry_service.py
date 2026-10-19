@@ -58,5 +58,6 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Payment Entry Service Error")
+        raise  # the caller rolls back and the B2C accounting sweep retries
     finally:
         frappe.set_user(current_user)

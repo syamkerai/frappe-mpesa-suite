@@ -1,8 +1,6 @@
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
-from .patches.mpesa_custom_fields import create_custom_pos_fields
-
 MODULE = "Frappe Mpsa Payments"
 
 
@@ -11,21 +9,18 @@ def is_app_installed(app_name: str) -> bool:
 
 
 def after_migrate():
-    from frappe_mpsa_payments.install import ensure_roles, ensure_suite_settings
+    from frappe_mpsa_payments.install import ensure_lookup_indexes, ensure_roles, ensure_suite_settings
 
     ensure_roles()
     ensure_suite_settings()
+    ensure_lookup_indexes()
 
     if is_app_installed("payments"):
         update_settings_module()
 
     if is_app_installed("erpnext"):
-        create_custom_pos_fields()
         create_custom_erpnext_fields()
         create_erpnext_property_setters()
-
-    if is_app_installed("lending"):
-        create_custom_lending_fields()
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
@@ -36,22 +31,6 @@ def update_settings_module():
     if current_module != MODULE:
         frappe.db.set_value("DocType", "Mpesa Settings", "module", MODULE)
         frappe.reload_doctype("Mpesa Settings")
-
-
-def create_custom_lending_fields():
-    custom_fields = {
-        "Loan Disbursement": [
-            {
-                "fieldname": "b2c_payment_disbursement",
-                "label": "B2C Payment Disbursement",
-                "fieldtype": "Link",
-                "insert_after": "reference_date",
-                "options": "B2C Payment Disbursement",
-                "read_only": 1,
-            }
-        ],
-    }
-    create_fields(custom_fields)
 
 
 def create_custom_hrms_fields():
@@ -147,14 +126,6 @@ def create_custom_erpnext_fields():
                 "in_preview": 1,
                 "in_standard_filter": 1,
             },
-        ],
-        "Bank": [
-            {
-                "fieldname": "pesa_link_bank_code",
-                "label": "Pesa Link Bank Code",
-                "fieldtype": "Data",
-                "insert_after": "swift_number",
-            }
         ],
         "Payment Entry Reference": [
             {
@@ -383,65 +354,6 @@ def create_custom_erpnext_fields():
                 "options": "Mode of Payment",
                 "reqd": 1,
                 "insert_after": "company",
-            },
-        ],
-        "Mpesa Payment Reconciliation": [
-            {
-                "fieldname": "company",
-                "fieldtype": "Link",
-                "in_list_view": 1,
-                "label": "Company",
-                "options": "Company",
-                "reqd": 1,
-                "insert_after": "column_break_sbgx",
-            },
-            {
-                "depends_on": "eval: doc.company",
-                "fieldname": "customer",
-                "fieldtype": "Link",
-                "in_list_view": 1,
-                "label": "Customer",
-                "options": "Customer",
-                "reqd": 1,
-                "insert_after": "details_section",
-            },
-            {
-                "fetch_from": "company.default_currency",
-                "fieldname": "currency",
-                "fieldtype": "Link",
-                "label": "Currency",
-                "options": "Currency",
-                "read_only": 1,
-                "insert_after": "customer",
-            },
-            {
-                "fieldname": "invoice_name",
-                "fieldtype": "Link",
-                "label": "Invoice Name",
-                "options": "Sales Invoice",
-                "insert_after": "column_break_asbv",
-            },
-        ],
-        "Stanbic Settings": [
-            {
-                "fieldname": "company",
-                "fieldtype": "Link",
-                "label": "Company",
-                "options": "Company",
-                "insert_after": "payment_gateway_name",
-            },
-        ],
-        "Mpesa Payments Invoices": [
-            {
-                "fieldname": "invoice",
-                "fieldtype": "Link",
-                "in_list_view": 1,
-                "in_preview": 1,
-                "in_standard_filter": 1,
-                "label": "Invoice",
-                "options": "Sales Invoice",
-                "read_only": 1,
-                "insert_after": "details_section",
             },
         ],
     }

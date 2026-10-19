@@ -140,6 +140,7 @@ class MpesaExpressRequest(Document):
         frappe.db.savepoint("before_c2b_neutralize")
         try:
             c2b_doc = frappe.get_doc("Mpesa C2B Payment Register", c2b_name)
+            c2b_doc.flags.ignore_permissions = True  # system clean-up, also cancels its PE
 
             if c2b_doc.docstatus == 1:
                 c2b_doc.cancel()

@@ -9,7 +9,7 @@ import frappe
 from frappe import _
 from frappe.utils import cstr
 
-from .common import REGISTER, enabled, mpesa_gl_accounts
+from .common import REGISTER, enabled, mpesa_gl_accounts, named_lock
 
 
 def _touches_mpesa(doc) -> bool:
@@ -46,21 +46,26 @@ def block_duplicate_receipt(doc) -> None:
     ref = cstr(doc.get("reference_no")).strip()
     if not ref or not _touches_mpesa(doc):
         return
-    for account in {doc.get("paid_from"), doc.get("paid_to")} & mpesa_gl_accounts():
-        existing = frappe.db.sql(
-            """
-            SELECT name FROM `tabPayment Entry`
-            WHERE reference_no = %s AND docstatus < 2 AND name != %s
-              AND (paid_from = %s OR paid_to = %s)
-            LIMIT 1
-            """,
-            (ref, doc.name or "", account, account),
-        )
-        if existing:
-            frappe.throw(
-                _("M-Pesa receipt {0} is already recorded on Payment Entry {1}.").format(ref, existing[0][0]),
-                title=_("Duplicate M-Pesa Receipt"),
+    # Same key as the gateway's direct booking, held until commit, so two workers booking
+    # one receipt cannot both pass the check. The read is a locking read on the indexed
+    # reference_no so it sees an entry committed while we waited for the lock.
+    with named_lock(f"book:{ref}"):
+        for account in {doc.get("paid_from"), doc.get("paid_to")} & mpesa_gl_accounts():
+            existing = frappe.db.sql(
+                """
+                SELECT name FROM `tabPayment Entry`
+                WHERE reference_no = %s AND docstatus < 2 AND name != %s
+                  AND (paid_from = %s OR paid_to = %s)
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (ref, doc.name or "", account, account),
             )
+            if existing:
+                frappe.throw(
+                    _("M-Pesa receipt {0} is already recorded on Payment Entry {1}.").format(ref, existing[0][0]),
+                    title=_("Duplicate M-Pesa Receipt"),
+                )
 
 
 def before_validate(doc, method=None) -> None:

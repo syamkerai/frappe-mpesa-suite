@@ -32,6 +32,40 @@ def ensure_suite_settings() -> None:
         settings.save()  # validate() generates the token and keeps field defaults
 
 
+# Columns the suite looks receipts up by on core tables that ship without an index. Unindexed,
+# every C2B / STK / sweep lookup scans the table, and the locking duplicate checks lock all of it.
+LOOKUP_INDEXES = (
+    ("Bank Transaction", "reference_number"),
+    ("Bank Transaction", "transaction_id"),
+    ("Payment Entry", "reference_no"),
+    ("Integration Request", "request_id"),
+)
+
+
+def ensure_lookup_indexes() -> None:
+    """Index the receipt columns, idempotently (after_install and every migrate).
+
+    A ``search_index`` Property Setter keeps schema sync from dropping the index when the
+    owning app's DocType is re-synced; ``add_index`` (named like sync names it) builds it now.
+    """
+    from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+    for doctype, fieldname in LOOKUP_INDEXES:
+        if not frappe.db.exists("DocType", doctype) or not frappe.get_meta(doctype).has_field(fieldname):
+            continue
+        try:
+            if not frappe.db.exists(
+                "Property Setter",
+                {"doc_type": doctype, "field_name": fieldname, "property": "search_index"},
+            ):
+                make_property_setter(
+                    doctype, fieldname, "search_index", 1, "Check", validate_fields_for_doctype=False
+                )
+            frappe.db.add_index(doctype, [fieldname], index_name=fieldname)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"M-Pesa Suite: could not index {doctype}.{fieldname}")
+
+
 def backfill_single_defaults(doctype: str) -> None:
     """Give newly added Single fields their JSON default.
 

@@ -16,7 +16,7 @@ def on_remote_error(provider: str, data, url: str, doctype: str, document_name: 
     Log and record a remote API error for the given provider and document.
 
     Args:
-        provider: Name of the service provider (e.g., "Mpesa", "Stanbic").
+        provider: Name of the service provider (e.g., "Mpesa").
         data: The error payload or response data.
         url: The full URL that was called.
         doctype: ERPNext DocType linked to this request.
@@ -107,7 +107,7 @@ class BaseAPIConnector:
         Initialize the connector.
 
         Args:
-            provider: Name of the external service (e.g., "Mpesa" or "Stanbic").
+            provider: Name of the external service (e.g., "Mpesa").
             settings_doctype: DocType storing integration settings.
             settings_name: Name of the settings document.
         """

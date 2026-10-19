@@ -2,7 +2,7 @@
 
 import frappe
 
-from . import bank_transaction, matching, payment_request, reconcile, sales_order, stk_poll
+from . import bank_transaction, c2b_verify, matching, payment_request, reconcile, sales_order, stk_poll, stk_verify
 from ..compat import in_test
 from .common import enabled, erpnext_installed
 
@@ -49,7 +49,9 @@ def every_two_minutes() -> None:
     _run("receipt matching", matching.run)
     _run("prepaid orders", sales_order.process_pending_orders)
     _run("payment request status", payment_request.sync_statuses)
-    _run("STK status poll", stk_poll.run)  # last: makes outbound HTTP calls
+    # last: these make outbound HTTP calls
+    _run("STK callback settlement", stk_verify.sweep)
+    _run("STK status poll", stk_poll.run)
 
 
 def every_five_minutes() -> None:
@@ -57,3 +59,4 @@ def every_five_minutes() -> None:
         return
     _run("statement lines", bank_transaction.sweep_missing)
     _run("bank reconciliation", reconcile.run)
+    _run("C2B confirmation verification", c2b_verify.sweep)

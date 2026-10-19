@@ -2,7 +2,6 @@ import frappe
 from frappe.utils import now_datetime
 
 from ...utils.doctype_names import (
-    MPESA_C2B_PAYMENT_REGISTER_DOCTYPE,
     MPESA_EXPRESS_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
 )
@@ -299,6 +298,8 @@ def pull_transaction_on_success(response: dict, document_name: str, **kwargs) ->
     # shape assumed at plan time.
     transactions = _flatten_pull_transactions(response.get("Response", []))
 
+    from ...money_in.receipts import INSERTED, insert_register
+
     created, skipped, failed = 0, 0, 0
     created_records = []
 
@@ -313,32 +314,32 @@ def pull_transaction_on_success(response: dict, document_name: str, **kwargs) ->
                 skipped += 1
                 continue
 
-            if frappe.db.exists(
-                MPESA_C2B_PAYMENT_REGISTER_DOCTYPE, {"transid": transid}
-            ):
-                frappe.log_error(
-                    title="Mpesa Pull Transaction: Duplicate Skipped",
-                    message=f"transid={transid} already exists in {MPESA_C2B_PAYMENT_REGISTER_DOCTYPE}",
-                )
+            # Same c2b:<receipt> lock and duplicate check as the C2B confirmation, so a
+            # pull running while the confirmation lands cannot create a second register.
+            # Pulled rows come straight from Safaricom's API, so they need no verification.
+            amount = float(txn.get("amount") or 0.0)
+            outcome, name = insert_register(
+                {
+                    "transid": transid,
+                    "transtime": _pull_trx_date_to_transtime(txn.get("trxDate")),
+                    "transamount": amount,
+                    "msisdn": txn.get("msisdn", ""),
+                    "businessshortcode": shortcode,
+                    "billrefnumber": txn.get("billreference", ""),
+                    "transactiontype": txn.get("transactiontype", ""),
+                }
+            )
+            if outcome != INSERTED:
                 skipped += 1
                 continue
-
-            doc = frappe.new_doc(MPESA_C2B_PAYMENT_REGISTER_DOCTYPE)
-            doc.transid = transid
-            doc.transtime = _pull_trx_date_to_transtime(txn.get("trxDate"))
-            doc.transamount = float(txn.get("amount") or 0.0)
-            doc.msisdn = txn.get("msisdn", "")
-            doc.businessshortcode = shortcode
-            doc.billrefnumber = txn.get("billreference", "")
-            doc.transactiontype = txn.get("transactiontype", "")
-            doc.insert(ignore_permissions=True)
+            frappe.db.commit()  # background job: keep each receipt and release its lock now
 
             created_records.append(
                 {
                     "transid": transid,
-                    "doc": doc.name,
-                    "amount": doc.transamount,
-                    "msisdn": doc.msisdn,
+                    "doc": name,
+                    "amount": amount,
+                    "msisdn": txn.get("msisdn", ""),
                 }
             )
             created += 1

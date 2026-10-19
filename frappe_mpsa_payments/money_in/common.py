@@ -168,18 +168,43 @@ def compact(value) -> str:
 # ---------------------------------------------------------------- concurrency / users
 @contextmanager
 def named_lock(key: str, timeout: int = 10):
-    """Cross-worker mutex (MariaDB GET_LOCK) for idempotent inserts keyed by receipt."""
+    """Cross-worker mutex (MariaDB GET_LOCK) for idempotent inserts keyed by receipt.
+
+    Held until this transaction commits or rolls back, not just to the end of the block:
+    released earlier, a second worker could take it, miss our uncommitted insert and
+    insert a duplicate. Re-entering the same key in one transaction is a no-op.
+    """
     if frappe.db.db_type != "mariadb":
         yield
         return
     lock = "mpesa:" + hashlib.sha1(key.encode()).hexdigest()  # GET_LOCK names max 64 chars
-    got = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (lock, timeout))[0][0]
-    if not got:
-        frappe.throw(f"Could not acquire lock {lock}")
-    try:
-        yield
-    finally:
-        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock,))
+    held = _held_locks()
+    if lock not in held:
+        got = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (lock, timeout))[0][0]
+        if not got:
+            frappe.throw(f"Could not acquire lock {lock}")
+        if not held:
+            # commit resets the rollback callbacks and vice versa, so exactly one runs
+            frappe.db.after_commit.add(release_named_locks)
+            frappe.db.after_rollback.add(release_named_locks)
+        held.add(lock)
+    yield
+
+
+def _held_locks() -> set:
+    if getattr(frappe.local, "mpesa_named_locks", None) is None:
+        frappe.local.mpesa_named_locks = set()
+    return frappe.local.mpesa_named_locks
+
+
+def release_named_locks() -> None:
+    held = getattr(frappe.local, "mpesa_named_locks", None) or set()
+    frappe.local.mpesa_named_locks = set()
+    for lock in held:
+        try:
+            frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock,))
+        except Exception:
+            pass  # connection gone: MariaDB released it with the session
 
 
 @contextmanager

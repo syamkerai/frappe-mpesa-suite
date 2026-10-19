@@ -12,7 +12,6 @@ from frappe.utils import flt, now
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
-    STANBIC_SETTINGS_DOCTYPE,
 )
 from .. import app_logger
 from .config import DOCTYPE_CONFIGS, DoctypeConfig
@@ -29,6 +28,7 @@ class B2CPaymentDisbursement(Document):
         self.validate_mandatory_fields()
         self.validate_mode_of_payment()
         self.validate_party_type()
+        self.set_outstanding_from_documents()
         for ref in self.references:
             ref.validate()
         self.validate_reference_doctypes()
@@ -44,11 +44,11 @@ class B2CPaymentDisbursement(Document):
         if self.payment_type == "Mpesa Disbursement":
             settings = self._get_mpesa_settings()
 
-        elif self.payment_type in ("Stanbic Mobile", "Stanbic PesaLink"):
-            settings = self._get_stanbic_settings()
-
         else:
             frappe.throw(f"Unsupported payment type: {self.payment_type}")
+
+        if "erpnext" in frappe.get_installed_apps():
+            self.validate_no_double_payout()
 
         for ref in self.references:
             if ref.b2c_disbursement_request:
@@ -73,6 +73,62 @@ class B2CPaymentDisbursement(Document):
             )
 
         self.status = "Initiated"
+
+    def set_outstanding_from_documents(self) -> None:
+        """Outstanding comes from the document, never from the (editable) row."""
+        for ref in self.references:
+            owed = current_outstanding(ref.reference_doctype, ref.reference_name)
+            if owed is not None:
+                ref.outstanding_amount = owed
+
+    def _rows_to_send(self) -> list:
+        """Rows this submit will pay (amended copies of already-sent rows are not re-sent)."""
+        rows = []
+        for ref in self.references:
+            if ref.b2c_disbursement_request:
+                sent_status = frappe.db.get_value(
+                    B2C_REQUEST_DOCTYPE, ref.b2c_disbursement_request, "status"
+                )
+                if sent_status and sent_status != "Failed":
+                    continue
+            rows.append(ref)
+        return rows
+
+    def validate_no_double_payout(self) -> None:
+        """Refuse to pay a document past what it owes, or while another payout for it is open.
+
+        Runs under a per-document lock held until commit, and reads the other payouts with
+        a locking read, so two disbursements submitted at the same moment cannot both pass.
+        """
+        from ....money_in.common import named_lock
+
+        rows = self._rows_to_send()
+        own_requests = [r.b2c_disbursement_request for r in self.references if r.b2c_disbursement_request]
+        totals = {}
+        for ref in rows:
+            key = (ref.reference_doctype, ref.reference_name)
+            totals[key] = totals.get(key, 0) + flt(ref.allocated_amount)
+
+        for (doctype, name), allocated in sorted(totals.items()):
+            if not doctype or not name:
+                continue
+            with named_lock(f"b2c-pay:{doctype}:{name}"):
+                others = open_payouts(doctype, name, exclude_parent=self.name, exclude_requests=own_requests)
+                if others:
+                    frappe.throw(
+                        _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(
+                            doctype, name, ", ".join(sorted({o.parent for o in others}))
+                        ),
+                        title=_("Duplicate Payout"),
+                    )
+                owed = current_outstanding(doctype, name)
+                if owed is not None and flt(allocated, 2) > flt(owed, 2):
+                    frappe.throw(
+                        _("{0} {1} owes {2}; this disbursement allocates {3}.").format(
+                            doctype, name, flt(owed, 2), flt(allocated, 2)
+                        ),
+                        title=_("Allocated More Than Outstanding"),
+                    )
 
     def validate_mandatory_fields(self) -> None:
         mandatory_fields = [
@@ -151,21 +207,6 @@ class B2CPaymentDisbursement(Document):
             )
         except frappe.DoesNotExistError:
             frappe.throw(f"No Mpesa Settings found for gateway {self.mode_of_payment}")
-
-    def _get_stanbic_settings(self) -> frappe._dict:
-        """Fetch via payment_gateway_name in Stanbic Settings."""
-        core = self.mode_of_payment.removeprefix("Stanbic-")
-        gateway_name = core.rsplit("-", 1)[0]
-        try:
-            return frappe.get_doc(
-                STANBIC_SETTINGS_DOCTYPE,
-                {"payment_gateway_name": gateway_name},
-                as_dict=True,
-            )
-        except frappe.DoesNotExistError:
-            frappe.throw(
-                f"No Stanbic Settings found for gateway {self.mode_of_payment}"
-            )
 
     @frappe.whitelist()
     def retry_failed_payments(self) -> None:
@@ -277,11 +318,8 @@ class B2CPaymentDisbursement(Document):
             **config.additional_filters,
         }
 
-        doctype = args.get("transaction_to_pay_against")
-        party_field = "applicant" if doctype == "Loan" else "employee"
-
         if args.get("party"):
-            filters[party_field] = args["party"]
+            filters["employee"] = args["party"]
 
         self._add_date_filter(
             filters,
@@ -603,7 +641,7 @@ class B2CPaymentDisbursement(Document):
 
             party, party_type = party_info["party"], party_info["party_type"]
 
-            # Get phone number or bank_ac_no (required field)
+            # Payee M-Pesa number (required field)
             party_details = self.get_party_identifier(
                 entry, party_type, self.payment_type
             )
@@ -613,15 +651,6 @@ class B2CPaymentDisbursement(Document):
                     title=f"Missing Phone - {party}"[:140],
                     message=f"Skipping entry due to missing phone number for {party}: {entry}",
                 )
-
-            if self.payment_type == "Stanbic PesaLink":
-                if not (
-                    party_details.get("bank_name") and party_details.get("bank_code")
-                ):
-                    frappe.log_error(
-                        title=f"Missing Bank Details - {party}"[:140],
-                        message=f"Skipping entry due to missing bank name or code for {party}: {entry}",
-                    )
 
             currency = entry.get("currency") or self.company_currency
             if not entry.get("currency"):
@@ -647,8 +676,6 @@ class B2CPaymentDisbursement(Document):
                 "currency": currency,
                 "exchange_rate": self._get_exchange_rate(entry, doctype),
                 "partyb": party_details.get("account_number"),
-                "bank_name": party_details.get("bank_name"),
-                "bank_code": party_details.get("bank_code"),
                 "payment_status": "Not Initiated",
             }
             references.append(reference)
@@ -668,8 +695,6 @@ class B2CPaymentDisbursement(Document):
                     "currency": reference["currency"],
                     "exchange_rate": reference["exchange_rate"],
                     "partyb": reference["partyb"],
-                    "bank_name": reference["bank_name"],
-                    "bank_code": reference["bank_code"],
                 },
             )
 
@@ -677,14 +702,8 @@ class B2CPaymentDisbursement(Document):
 
     def _extract_party_info(self, entry: Dict, args: Dict) -> Optional[Dict]:
         """Extract party and party_type from entry or args."""
-        doctype = args.get("transaction_to_pay_against")
-
-        if doctype == "Loan":
-            party = entry.get("applicant")
-            party_type = entry.get("applicant_type")
-        else:
-            party = entry.get("party") or entry.get("employee") or entry.get("supplier")
-            party_type = entry.get("party_type") or args.get("party_type")
+        party = entry.get("party") or entry.get("employee") or entry.get("supplier")
+        party_type = entry.get("party_type") or args.get("party_type")
 
         if not party or not party_type:
             app_logger.info(
@@ -724,50 +743,11 @@ class B2CPaymentDisbursement(Document):
         self, entry: Dict, party_type: str, payment_type: str
     ) -> dict:
         """
-        Return a dictionary containing the mobile number (for Mpesa or Stanbic Mobile)
-        or the bank account details (account number, bank name, and bank code for Stanbic PesaLink)
-        by fetching it from the Bank Account doctype via the Supplier.default_bank_account field.
+        Return {"account_number": <payee's M-Pesa number>}:
+        the employee's cell number, or the supplier contact's phone / mobile.
         """
 
-        result = {"account_number": "", "bank_name": "", "bank_code": ""}
-
-        if payment_type == "Stanbic PesaLink":
-            if party_type == "Supplier":
-                bank_account_name = frappe.db.get_value(
-                    "Supplier", entry.party, "default_bank_account"
-                )
-                if bank_account_name:
-                    bank_details = frappe.db.get_value(
-                        "Bank Account",
-                        bank_account_name,
-                        ["bank_account_no", "bank"],
-                        as_dict=True,
-                    )
-                    if bank_details:
-                        result["account_number"] = (
-                            bank_details.get("bank_account_no") or ""
-                        )
-                        result["bank_name"] = bank_details.get("bank") or ""
-                        result["bank_code"] = frappe.db.get_value(
-                            "Bank", bank_details.get("bank"), "pesa_link_bank_code"
-                        )
-                        return result
-                return result
-
-            elif party_type == "Employee":
-                bank_details = frappe.db.get_value(
-                    "Employee",
-                    entry.employee,
-                    ["bank_ac_no", "bank_name"],
-                    as_dict=True,
-                )
-                if bank_details:
-                    result["account_number"] = bank_details.get("bank_ac_no") or ""
-                    result["bank_name"] = bank_details.get("bank_name") or ""
-                    result["bank_code"] = frappe.db.get_value(
-                        "Bank", bank_details.get("bank_name"), "pesa_link_bank_code"
-                    )
-                return result
+        result = {"account_number": ""}
 
         # Mobile Payouts
         if party_type == "Employee":
@@ -867,22 +847,9 @@ def create_b2c_request(ref, settings, b2c_disbursement):
             "party": ref.party,
         }
 
-        if b2c_disbursement.payment_type in ("Mpesa Disbursement", "Stanbic Mobile"):
-            data["phone_number"] = ref.partyb
-        elif b2c_disbursement.payment_type == "Stanbic PesaLink":
-            data["bank_ac_no"] = ref.partyb
-            data["bank_name"] = ref.bank_name
-            data["bank_code"] = ref.bank_code
-
-        if settings.meta.name == "Mpesa Settings":
-            data["mpesa_settings"] = settings.name
-        elif settings.meta.name == "Stanbic Settings":
-            data["stanbic_settings"] = settings.name
-
-        if b2c_disbursement.payment_type == "Mpesa Disbursement":
-            data["payment_provider"] = "Mpesa"
-        elif b2c_disbursement.payment_type in ("Stanbic Mobile", "Stanbic PesaLink"):
-            data["payment_provider"] = "Stanbic"
+        data["phone_number"] = ref.partyb
+        data["mpesa_settings"] = settings.name
+        data["payment_provider"] = "Mpesa"
 
         b2c_request = frappe.get_doc(data)
         b2c_request.insert(ignore_permissions=True)
@@ -896,3 +863,63 @@ def create_b2c_request(ref, settings, b2c_disbursement):
             title="Failed to create B2C Request", message=frappe.get_traceback()
         )
         frappe.throw(f"Failed to create B2C Request {e}")
+
+
+def current_outstanding(doctype: str | None, name: str | None) -> float | None:
+    """What ``doctype`` ``name`` still owes, read from the document (None: not tracked)."""
+    from ....utils.payouts import OWED_FIELDS, owed
+
+    if not doctype or not name or doctype not in OWED_FIELDS:
+        return None
+    meta = frappe.get_meta(doctype)
+    fields = [f for f in OWED_FIELDS[doctype] if meta.has_field(f)]
+    values = frappe.db.get_value(doctype, name, ["docstatus", *fields], as_dict=True)
+    if not values or values.docstatus != 1:
+        return 0.0
+    return owed(doctype, values)
+
+
+def open_payouts(doctype: str, name: str, exclude_parent: str | None = None, exclude_requests=None) -> list:
+    """Other payouts for this document that have not yet reduced what it owes.
+
+    A row counts unless its payout failed, or it was paid and its accounting entry booked
+    (then the document's outstanding already reflects it). Locking read on the indexed
+    reference_name, so a payout committed while we waited for the lock is seen.
+    """
+    from frappe.utils import add_days, nowdate
+
+    from ....services.b2c_postprocess_service import RETRY_WINDOW_DAYS
+
+    # rows of other disbursements whose request is not created yet have no request name;
+    # the placeholder keeps them in (an empty list would exclude '' and so those rows)
+    exclude_requests = [r for r in (exclude_requests or []) if r] or ["(none)"]
+    # Paid-but-unbooked payouts older than the accounting retry window are left to staff
+    # and must not block new payouts forever (e.g. rows paid before this check existed).
+    booked_cutoff = add_days(nowdate(), -RETRY_WINDOW_DAYS)
+    locking = "FOR UPDATE" if frappe.db.db_type == "mariadb" else ""
+    return frappe.db.sql(
+        f"""
+        SELECT ref.parent, ref.allocated_amount, ref.payment_status, req.status AS request_status
+        FROM `tabB2C Payment Disbursement Reference` ref
+        JOIN `tabB2C Payment Disbursement` d ON d.name = ref.parent
+        LEFT JOIN `tabB2C Disbursement Request` req ON req.name = ref.b2c_disbursement_request
+        WHERE ref.reference_name = %(name)s AND ref.reference_doctype = %(doctype)s
+          AND ref.parent != %(parent)s
+          AND COALESCE(ref.b2c_disbursement_request, '') NOT IN %(own)s
+          AND (d.docstatus = 1 OR (req.name IS NOT NULL AND req.docstatus = 1))
+          AND COALESCE(req.status, ref.payment_status, '') != 'Failed'
+          AND NOT (
+            COALESCE(req.status, '') = 'Paid'
+            AND (COALESCE(req.accounting_booked, 0) = 1 OR req.creation < %(booked_cutoff)s)
+          )
+        {locking}
+        """,
+        {
+            "name": name,
+            "doctype": doctype,
+            "parent": exclude_parent or "",
+            "own": tuple(exclude_requests),
+            "booked_cutoff": booked_cutoff,
+        },
+        as_dict=True,
+    )

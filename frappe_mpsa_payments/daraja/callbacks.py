@@ -113,6 +113,39 @@ def integration_user() -> str:
     return _settings().get("integration_user") or "Administrator"
 
 
+POLICY_WARN = "Warn"
+POLICY_REFUSE = "Refuse"
+
+
+def missing_integration_user_refused() -> bool:
+    """No Integration User set: refuse the callback ("Refuse") or run as Administrator and
+    warn ("Warn", the default until every site has one configured)."""
+    settings = _settings()
+    if not settings or settings.get("integration_user"):
+        return False
+    if (settings.get("missing_integration_user") or POLICY_WARN) == POLICY_REFUSE:
+        _record_rejection("no Integration User set on M-Pesa Suite Settings (policy: Refuse)")
+        return True
+    _warn_missing_integration_user()
+    return False
+
+
+def _warn_missing_integration_user() -> None:
+    cache = get_cache()
+    key = "mpesa_suite:no_integration_user_warned"
+    if cache.get_value(key):
+        return
+    cache.set_value(key, 1, expires_in_sec=3600)  # once an hour, not once per callback
+    frappe.log_error(
+        title="M-Pesa callbacks are running as Administrator",
+        message=(
+            "No Integration User is set on M-Pesa Suite Settings, so Safaricom callbacks run "
+            "as Administrator. Create a user with only the M-Pesa roles it needs, set it as "
+            "the Integration User, then set 'If No Integration User' to Refuse."
+        ),
+    )
+
+
 @contextmanager
 def as_integration_user():
     """Run callback work as the configured integration user, then restore the caller."""
@@ -145,7 +178,7 @@ def safaricom_callback(kind: str = KIND_RESULT, rejected=None):
         def wrapper(*args, **kwargs):
             kwargs.pop(TOKEN_PARAM, None)
             kwargs.pop("cmd", None)
-            if not accept(kind):
+            if not accept(kind) or missing_integration_user_refused():
                 return rejected_response() if rejected is None else rejected
             with as_integration_user():
                 return _call_with_accepted_args(fn, args, kwargs)

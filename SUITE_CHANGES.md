@@ -1,4 +1,7 @@
-# M-Pesa Suite — changes on top of navariltd/frappe-mpsa-payments
+# Astral M-Pesa Suite — changes on top of navariltd/frappe-mpsa-payments
+
+Maintained by Astral Industries Limited. Licence and attribution: [NOTICE](NOTICE),
+[docs/LICENSING.md](docs/LICENSING.md).
 
 Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay page, POS quick pay,
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
@@ -137,6 +140,183 @@ Package `frappe_mpsa_payments/gateway/`, full reference in [docs/PAYMENTS_API.md
     receipt from the look-back window (45 days) that it can place unambiguously, including any
     left for manual review. Lower the look-back first if that is not wanted.
 
+## Go-live hardening: audit 2026-10-18 "Still open" items 1–10 (uncommitted)
+
+Follows [docs/AUDIT_2026-10-18.md](../docs/AUDIT_2026-10-18.md). **`bench migrate` is needed**: it adds
+new fields and settings, and creates indexes on core tables.
+
+**Callbacks are confirmed with Safaricom before any booking (items 1, 2, 4)**
+- *C2B* (switch **Verify C2B Confirmations with Transaction Status**, on by default): a confirmation
+  for a shortcode that is not in Mpesa Settings is dropped. Every other confirmation is held as an
+  Integration Request (service `Mpesa C2B Verification`, Request ID = receipt). A Transaction Status
+  query is sent for it, and the register is created only when the result has the same receipt,
+  status Completed, the same amount and one of our shortcodes. The result must also carry the
+  ConversationID of our query. So registers only hold confirmed money (or money Pull fetched from
+  Safaricom), and matching, statement lines and the gateway need no change. A confirmation that
+  can't be confirmed is re-queried every 10 minutes, 3 times at most, and then marked Failed with an
+  Error Log. The hourly Pull import brings in real receipts anyway. An M-Pesa Manager can press
+  **Release Without Safaricom Confirmation** on the Integration Request, which records who did it
+  and why. This needs the Initiator and Security Credential on every Mpesa Settings, and the
+  initiator must have the Transaction Status role.
+- The manual **Fetch transaction** result (`handle_transaction_status_result`) now accepts only the
+  answer to a query we sent, for the receipt we asked about, paid to our shortcode.
+- *STK* (switch **Verify STK Callbacks with STK Query**, on by default): the callback endpoint only
+  stores the payload (`callback_payload`, Verification Status *Pending*) and queues
+  `money_in.stk_verify.settle`. That job sends an STK Query for the same CheckoutRequestID and checks
+  the paid amount against the prompt. Only then does it set Completed and the receipt, and it
+  commits **before** booking. Booking runs under a savepoint. A failed booking is rolled back,
+  logged, and retried by the 2-minute sweep (3 attempts). A contradiction gives *Mismatch*, and an
+  unanswered query after 6 hours gives *Unverified*. Neither is booked. A prompt is never marked
+  Completed from an unconfirmed callback, so the gateway can't be fooled either.
+- `stk_poll` skips prompts whose callback arrived; the settle job owns those.
+
+**Callbacks without an Integration User (item 3)**: new setting **If No Integration User**.
+*Warn* (default) runs as Administrator and writes one Error Log an hour. *Refuse* rejects the
+callback and counts it. Set an Integration User, then switch to Refuse.
+
+**Locks and indexes (items 5, 6)**
+- `money_in.common.named_lock` now holds MariaDB `GET_LOCK` until the transaction commits or rolls
+  back. It used to release at the end of the block, before the insert was committed. It is
+  re-entrant within one transaction.
+- Indexes (search_index Property Setter plus the index itself, on every migrate):
+  Bank Transaction `reference_number`, `transaction_id`, Payment Entry `reference_no`, and
+  Integration Request `request_id`. The duplicate checks stay locking reads, but they now lock only
+  the receipt's rows instead of scanning the table.
+- One insert path for registers, `money_in.receipts.insert_register`, used by C2B confirmations,
+  Pull imports and Transaction Status results. It takes the same `c2b:<receipt>` lock, does a
+  locking duplicate check, and inserts under a savepoint. Pull commits after each receipt.
+- The Payment Entry duplicate-receipt guard takes `book:<receipt>`, the same key the gateway uses,
+  and reads with `FOR UPDATE`.
+
+**Hooks (item 7)**: register `on_cancel` raises when the Payment Entry can't be cancelled, instead of
+logging it and leaving the PE live. The `after_insert` auto-submit and the `on_submit`
+reconciliation run under savepoints, and the register survives as a draft. The commits inside
+`create_and_reconcile_payment_reconciliation` and `handle_successful_transaction` are removed. The
+Loan Disbursement service no longer commits, and the PE/JE/Loan services re-raise after logging.
+
+**B2C (items 8, 9)**
+- `handle_successful_payment` books under a savepoint and records failures on the B2C request
+  (**Accounting Error**). A payout counts as **Accounting Booked** only when its PE/JE/Loan
+  Disbursement is *submitted*. `retry_unbooked_payouts` runs every 15 minutes and retries paid
+  payouts from the last 30 days.
+- The disbursement's reference **Outstanding** is read-only and recalculated from the document
+  (`utils/payouts.py`). On submit, under a per-document lock, a document can't be paid past what
+  it owes, or while another disbursement's payout for it is in flight or paid but not yet booked.
+- A B2C send that times out after the connection opened is **Status Unknown** (new status), not
+  *Not Initiated*. Nothing can resend it. `check_unsettled_payouts` runs every 15 minutes and
+  starts a B2C Transaction Status query (`money_out.b2c_status`, from the Daraja money-out session)
+  for payouts that are Status Unknown after 5 minutes, or Initiated with no result after 60 minutes,
+  at most once an hour per payout. Only a connect timeout (never sent) becomes *Failed* and can be
+  retried. An HTTP 5xx without a Daraja error code is also Status Unknown.
+
+**Permissions (item 10)**: `get_unallocated_payments` needs read on Payment Entry and the customer, and
+uses `get_list`. `process_mpesa_c2b_customer_credit` and `process_mpesa_c2b_reconciliation` need
+write on Payment Reconciliation and on the invoice(s) and entries, and check that each entry is a
+submitted receipt from that customer. **Mpesa Settings** write and create are limited to System
+Manager and M-Pesa Manager. Accounts Manager can read and export, Accounts User and M-Pesa Viewer
+can read. Sites with customised permissions (Role Permission Manager) keep theirs, so check them.
+
+**Rollout additions**
+- Before migrating, give every Mpesa Settings an Initiator with the Transaction Status role, or turn
+  the C2B verification off. Otherwise confirmations wait for Pull or a manager's release.
+- Watch Integration Requests with service `Mpesa C2B Verification` and status Failed, and Express
+  Requests with Verification Status Mismatch or Unverified.
+- nginx must overwrite `X-Forwarded-For` (`proxy_set_header X-Forwarded-For $remote_addr;`) before
+  the IP allow-list means anything (audit "Still open" #2, which needs no code change).
+
+Tests: `tests/unit/test_verify.py` (decisions, pure) and `money_in/test_verification.py` (bench:
+held C2B, forged amount, foreign ConversationID, unknown shortcode, forged/confirmed/short STK, re-sent
+callback, lock held until rollback).
+
+## Daraja money-out APIs: Reversal, B2B, Transaction Status for B2C (uncommitted)
+
+The top three missing APIs from `docs/AUDIT_2026-10-18.md`, built to `docs/daraja_api_reference.md`
+§9, §11 and §13. New package `frappe_mpsa_payments/money_out/`, plus pure request/result helpers
+in `daraja/money_out.py`. `bench migrate` creates the three new DocTypes.
+
+**Shared rules** (the same as B2C payouts)
+- A request is sent only from a submitted document whose status is `Not Initiated`, under a row
+  lock. The amount must be whole shillings; it is refused, never rounded.
+- Safaricom's ack sets `Initiated`. Only the Result callback sets the final status.
+- If the connection never opened, the status is `Failed`. If the request may have reached
+  Safaricom (read timeout, dropped connection), the status is `Unknown`. Nothing is resent
+  automatically.
+- Each API has its own Result URL and its own QueueTimeOut URL
+  (`money_out.api.<x>_result` / `<x>_queue_timeout`). Both carry the callback token and
+  `?ref=<document>`. A queue timeout only ticks **Queue Timed Out** and never sets a final
+  status.
+- Results are matched by the ack's ConversationID / OriginatorConversationID. `ref` is used
+  only when no ack arrived, and only if the IDs don't contradict it. A re-sent result is
+  ignored once a final result is recorded.
+- ResultCode is compared as a string (B2B sends `"0"`, Reversal sends `0` or `"R000001"`).
+  `ResultParameter` may be a list, a single dict, or missing.
+- Tokens come from `daraja/client.py`, with one refresh on a token error. Request bodies are
+  logged through `scrub_payload`. Initiator and SecurityCredential come from Mpesa Settings,
+  so **Regenerate Security Credential** is needed first.
+
+**Mpesa Reversal Request** (`MRV-…`)
+- Linked to an **Mpesa C2B Payment Register**. The C2B form has an Actions → **Reverse Payment**
+  button that creates a draft. The receipt and amount are copied from the register, and the
+  amount must be the whole payment.
+- The shortcode is found from the register, and there can be only one live reversal per
+  receipt.
+- Submit and cancel need a payout or admin role: System Manager, M-Pesa Manager, M-Pesa Payer
+  or Accounts Manager. Accounts User can only read.
+- Result `0` sets **Reversed** and `R000001` sets **Already Reversed**; any other code sets
+  **Failed**. A successful reversal adds a comment on the register. **Any Payment Entry booked
+  from that receipt is not touched: cancel or reverse it by hand.**
+
+**Mpesa B2B Payment Request** (`MB2B-…`): BusinessPayBill or BusinessBuyGoods
+- Pays a supplier's paybill (account number required) or till. It can link a Supplier and a
+  submitted KES Purchase Invoice. The amount can't exceed what is left to pay, counting other
+  unbooked requests for the same invoice.
+- The shortcode's transaction limit is enforced, and paying our own shortcode is refused.
+- Submit needs PAYOUT_ROLES. Accounts User can prepare drafts.
+- A request can be cancelled when it is Not Initiated or Failed. An **Unknown** request can be
+  cancelled only by an admin, after checking the statement. Redo a failed payment with
+  cancel + amend.
+- Paid enqueues a Payment Entry (Pay, Supplier) from the shortcode's mapped Bank Account. It is
+  allocated to the Purchase Invoice if one is linked, and submitted when **Submit B2C Accounting
+  Entries** is on in Mpesa Settings. It is idempotent: an existing PE with the receipt as
+  reference is linked instead. A booking failure is logged and commented, and the payment
+  stays Paid.
+
+**Transaction Status for B2C** (**Mpesa B2C Status Query**, `MB2CQ-…`)
+- B2C Disbursement Request → Actions → **Check Status with M-Pesa** (payout/admin roles). It is
+  shown for submitted M-Pesa payouts still in `Not Initiated`, `Initiated` or `Status Unknown`, meaning the
+  request was sent but no result has come back.
+- The query uses the receipt if known, otherwise `OriginalConversationID` = our
+  OriginatorConversationID. Only one open query is allowed per payout every 2 minutes.
+- The result changes the payout only while it is unsettled:
+  - `TransactionStatus = Completed`, with the same amount, a receipt, and the same
+    OriginatorConversationID, sets **Paid**. `result_code = "0"` makes a late real Result a
+    no-op, and the same `update_b2c_reference_status` job books the payout.
+  - `Failed` / `Declined` / `Expired` / `Cancelled` sets **Failed**, so **Retry Payment**
+    (new OriginatorConversationID) becomes available.
+  - Anything else ("not found" right after sending, pending, amount mismatch) is **Unresolved**,
+    and the payout is left alone. Closes audit item 9.
+
+**Hooks**: two `doctype_js` lines (B2C status button, C2B Reverse button). No doc_events or
+scheduler changes.
+
+**Tests**
+- `tests/unit/test_money_out.py`: request bodies, result parsing, and status decisions.
+- `tests/unit/test_money_out_flow.py`: the full send → ack → result flow on an in-memory
+  `frappe` stub (`tests/unit/fake_frappe.py`). It covers row lock, Unknown on timeout, token
+  retry, re-sent results, ID mismatch, queue timeouts, the status-query rules and the role
+  gates.
+- `pytest tests/unit`: 140 pass. Small bench tests sit next to each DocType. **None of this has
+  run on a bench or against the Daraja sandbox yet.**
+
+**Unverified / to check in sandbox**
+- Whether Transaction Status accepts our OriginatorConversationID as `OriginalConversationID`
+  (some integrations need Safaricom's ConversationID).
+- The `TransactionStatus` strings other than "Completed".
+- Whether BusinessBuyGoods needs an `AccountReference` (the reference doc says paybill only, and
+  we follow it).
+- Reversal `ReceiverParty` for a till: we send the Mpesa Settings business shortcode.
+- `create_request_log` commits on v15. That happens before the HTTP call, the same as B2C today.
+
 ## Bench-tested on v15 and v16, fixes and Mpesa Settings setup guide (2026-10-19, uncommitted)
 
 All bench test modules pass on Frappe/ERPNext v15 (15.123) and v16 (16.52), with `payments`
@@ -171,3 +351,38 @@ too); Till Number shows for Buy Goods or sandbox.
 Tests: stale upstream tests rewritten against current code (B2C disbursement and reference, C2B
 URL, api); Mpesa Settings fixtures fixed (paybill type, company, POS opening entry, POS Invoice mode
 on v16); suites no longer leak callback-enforcement settings into each other.
+
+## Unused upstream features removed, app rebranded to Astral (2026-10-19, uncommitted)
+
+Checked on Astral's live site before removing: no Stanbic Settings and no Stanbic payouts, no B2C
+payouts against Loans, no POS payment by M-Pesa (8 POS-mode Sales Invoices and 3 POS Invoices,
+none paid by phone), and the Mpesa Payment Reconciliation tool was never installed.
+
+**Removed**
+- Stanbic: the `stanbic` module (Stanbic Settings, Stanbic Sort Code), `connectors/stanbic`, the
+  Stanbic Mobile / PesaLink payment types, and the bank fields on B2C requests and rows
+  (`stanbic_settings`, `dbs_reference_id`, `next_execution_date`, `bank_*`). Also removed: the
+  Bank `pesa_link_bank_code` field. B2C now pays from Mpesa Settings only.
+- B2C against Loans: `accounting/loan_disbursement_service.py`, the Loan option in disbursement
+  forms and reports, and the Loan Disbursement custom field.
+- POS: the point-of-sale page script, `pos_invoice.js`, the KlikPOS STK endpoints, the legacy
+  `verify_transaction` callback and its POS tests, the POS Invoice "Request for Payment" button and
+  POS Settings field, and the POS branch of the quick-pay dialog.
+- Event Booking branch in `handle_successful_transaction`.
+- Mpesa Payment Reconciliation tool (with Mpesa Draft Payments and Mpesa Payments Invoices), its
+  endpoints (`get_unallocated_payments`, `process_mpesa_c2b_reconciliation`,
+  `process_mpesa_c2b_customer_credit`, `submit_mpesa_payment`, ...), the `is_manual_reconciliation`
+  global flag, and its workspace links.
+- On migrate, patch `remove_unused_upstream_features` deletes those DocTypes, their custom fields
+  and the empty Stanbic module. POS Invoice `mpesa_receipt_number` is kept because it holds data.
+
+**Kept**: the Sales Invoice desk tools (STK on an invoice or payment row, quick-pay dialog for
+received M-Pesa payments), Payment Request STK (all 411 of Astral's prompts), and the
+Payment Gateway DocType.
+
+**Rebrand**: the app title is **Astral M-Pesa Suite**, publisher and author are Astral Industries
+Limited, the README is rewritten, a NOTICE file is added, and the workspace no longer carries
+Navari's test users. The Python package, module and DocType names don't change, because
+Safaricom callback URLs and existing data depend on them. Navari's copyright headers and the AGPL
+licence stay, as the licence requires. `docs/LICENSING.md` lists every file that came from upstream
+for legal review.

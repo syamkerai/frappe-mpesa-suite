@@ -16,18 +16,15 @@ def process_b2c_result(provider: str, payload: dict) -> None:
     req = frappe.db.get_value(
         B2C_REQUEST_DOCTYPE,
         {"originator_conversation_id": originator_id},
-        ["name", "mpesa_settings", "stanbic_settings"],
+        ["name", "mpesa_settings"],
         as_dict=True,
     )
     if not req:
         frappe.throw(f"No B2C request for OriginatorConversationID {originator_id}")
 
-    if req.mpesa_settings:
-        provider, settings_name = "Mpesa", req.mpesa_settings
-    elif req.stanbic_settings:
-        provider, settings_name = "Stanbic", req.stanbic_settings
-    else:
-        frappe.throw(f"B2C request {req.name} has no provider settings")
+    if not req.mpesa_settings:
+        frappe.throw(f"B2C request {req.name} has no Mpesa Settings")
+    provider, settings_name = "Mpesa", req.mpesa_settings
 
     # Now load the connector with a real settings_name
     connector = get_b2c_connector(provider, settings_name)

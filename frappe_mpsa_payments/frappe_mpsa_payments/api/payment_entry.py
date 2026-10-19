@@ -1,6 +1,3 @@
-import ast
-import json
-
 import frappe
 import frappe.defaults
 from frappe import _, qb
@@ -13,7 +10,6 @@ from frappe.utils import (
 
 from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import (
     sanitize_mobile_number,
-    submit_mpesa_payment,
 )
 from frappe_mpsa_payments.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 
@@ -352,112 +348,6 @@ def get_held_invoices(party_type, party):
     return held_invoices
 
 
-@frappe.whitelist()
-def get_unallocated_payments(customer, company, currency, mode_of_payment=None):
-    """
-    Retrieve unallocated payments for a given customer, company, and currency.
-
-    Args:
-            customer (str): Customer for whom payments are being retrieved.
-            company (str): Company for which payments are being retrieved.
-            currency (str): Currency of the payments.
-            mode_of_payment (str, optional): Mode of payment for filtering payments. Defaults to None.
-
-    Returns:
-            list: List of unallocated payments.
-    """
-    filters = {
-        "party": customer,
-        "company": company,
-        "docstatus": 1,
-        "party_type": "Customer",
-        "payment_type": "Receive",
-        "unallocated_amount": [">", 0],
-        "paid_from_account_currency": currency,
-    }
-    if mode_of_payment:
-        filters.update({"mode_of_payment": mode_of_payment})
-    unallocated_payment = frappe.get_all(
-        "Payment Entry",
-        filters=filters,
-        fields=[
-            "name",
-            "paid_amount",
-            "party_name as customer_name",
-            "received_amount",
-            "posting_date",
-            "unallocated_amount",
-            "mode_of_payment",
-            "paid_from_account_currency as currency",
-        ],
-        order_by="posting_date asc",
-    )
-    return unallocated_payment
-
-
-def get_total_amount_selected_mpesa_payments(selected_mpesa_payments):
-    """
-    Calculate the total amount of selected mpesa payments.
-
-    Args:
-            selected_mpesa_payments (list): List of selected mpesa payments.
-
-    Returns:
-            float: Total amount of selected mpesa payments.
-    """
-    total = 0
-    for mpesa_payment in selected_mpesa_payments:
-        doc = frappe.get_doc("Mpesa C2B Payment Register", mpesa_payment)
-        total += flt(doc.get("transamount"))
-
-    return total
-
-
-def get_total_amount_selected_payments(invoice):
-    """
-    Calculate the total amount of selected payments.
-
-    Args:
-            selected_payments (list): List of selected payments.
-
-    Returns:
-            float: Total amount of selected payments.
-    """
-    total = 0
-    doc = frappe.get_doc("POS Invoice", invoice)
-    for payment in doc.payments:
-        total += flt(payment.get("amount"))
-    return total
-
-
-def get_mode_of_payment(pos_profile):
-    pos_doc = frappe.get_doc("POS Profile", pos_profile)
-    for payment in pos_doc.payments:
-        if payment.get("default") == 1:
-            return payment.get("mode_of_payment")
-
-
-@frappe.whitelist()
-def get_available_pos_profiles(company, currency):
-    """
-    Retrieve available POS profiles for a given company and currency.
-
-    Args:
-            company (str): Company for which POS profiles are being retrieved.
-            currency (str): Currency of the POS profiles.
-
-    Returns:
-            list: List of available POS profiles.
-    """
-    pos_profiles_list = frappe.get_list(
-        "POS Profile",
-        filters={"disabled": 0, "company": company, "currency": currency},
-        page_length=1000,
-        pluck="name",
-    )
-    return pos_profiles_list
-
-
 def create_and_reconcile_payment_reconciliation(
     outstanding_invoices, customer, company, payment_entries
 ):
@@ -525,61 +415,14 @@ def create_and_reconcile_payment_reconciliation(
             frappe.log_error(f"Failed to process payment {payment_entry}: {str(e)}")
             continue
 
+    # No commit: this also runs inside Mpesa C2B Payment Register.on_submit, whose savepoint
+    # undoes a failed reconciliation; HTTP callers are committed when the request ends.
     try:
         reconcile_doc.allocate_entries(args)
         reconcile_doc.reconcile()
-        frappe.db.commit()
     except Exception as e:
         frappe.log_error(f"Reconciliation failed: {str(e)}")
         frappe.throw(_("Reconciliation failed: {0}").format(str(e)))
-
-
-@frappe.whitelist()
-def process_mpesa_c2b_reconciliation(mpesa_names, invoice_names):
-    if isinstance(mpesa_names, str):
-        mpesa_names = json.loads(mpesa_names)
-    if isinstance(invoice_names, str):
-        invoice_names = json.loads(invoice_names)
-
-    if not invoice_names:
-        frappe.throw(_("No invoices provided."))
-
-    first_invoice_name = invoice_names[0]
-    first_invoice = frappe.get_doc("Sales Invoice", first_invoice_name)
-    customer = first_invoice.get("customer")
-    company = first_invoice.get("company")
-
-    frappe.session.is_manual_reconciliation = True
-    frappe.db.set_global("is_manual_reconciliation", "1")
-
-    try:
-        payment_entries = [
-            submit_mpesa_payment(mpesa_name, customer).get("name")
-            for mpesa_name in mpesa_names
-        ]
-
-        create_and_reconcile_payment_reconciliation(
-            invoice_names, customer, company, payment_entries
-        )
-
-    finally:
-        frappe.db.set_global("is_manual_reconciliation", "0")
-        if hasattr(frappe.session, "is_manual_reconciliation"):
-            del frappe.session.is_manual_reconciliation
-
-
-@frappe.whitelist()
-def process_mpesa_c2b_customer_credit():
-    payment_entries_list = frappe.form_dict.get("payment_entries")
-    payment_entries = ast.literal_eval(payment_entries_list)
-    invoice_name = frappe.form_dict.get("invoice_name")
-    invoice = frappe.get_doc("Sales Invoice", invoice_name)
-    customer = invoice.get("customer")
-    company = invoice.get("company")
-
-    create_and_reconcile_payment_reconciliation(
-        invoice_name, customer, company, payment_entries
-    )
 
 
 @frappe.whitelist()

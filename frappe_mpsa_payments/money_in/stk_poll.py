@@ -30,14 +30,18 @@ def run(limit: int = 20) -> None:
     if not enabled("poll_stk_status"):
         return
     now = now_datetime()
+    filters = {
+        "docstatus": 1,
+        "status": ["in", ["In Progress", "Pending", "Initiated"]],
+        "checkout_request_id": ["is", "set"],
+        "creation": ["between", [add_to_date(now, minutes=-60), add_to_date(now, minutes=-2)]],
+    }
+    if frappe.get_meta(EXPRESS).has_field("verification_status"):
+        # a callback arrived: money_in.stk_verify settles it (and books it), not the poller
+        filters["verification_status"] = ["is", "not set"]
     names = frappe.get_all(
         EXPRESS,
-        filters={
-            "docstatus": 1,
-            "status": ["in", ["In Progress", "Pending", "Initiated"]],
-            "checkout_request_id": ["is", "set"],
-            "creation": ["between", [add_to_date(now, minutes=-60), add_to_date(now, minutes=-2)]],
-        },
+        filters=filters,
         pluck="name",
         order_by="creation asc",
         limit=limit,
@@ -49,10 +53,10 @@ def run(limit: int = 20) -> None:
             frappe.log_error(frappe.get_traceback(), f"STK status poll failed for {name}")
 
 
-def poll(name: str) -> str | None:
+def stk_query(req) -> dict | None:
+    """STK Query for an Mpesa Express Request; the response body, or None if unreadable."""
     from ..frappe_mpsa_payments.api.m_pesa_api import generate_request_password
 
-    req = frappe.get_doc(EXPRESS, name)
     settings = frappe.get_doc("Mpesa Settings", req.settings)
     timestamp = daraja_timestamp()
     payload = {
@@ -70,6 +74,14 @@ def poll(name: str) -> str | None:
     try:
         data = response.json()
     except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def poll(name: str) -> str | None:
+    req = frappe.get_doc(EXPRESS, name)
+    data = stk_query(req)
+    if data is None:
         return None
 
     code = data.get("ResultCode")

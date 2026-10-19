@@ -45,11 +45,6 @@ class TestB2CPaymentDisbursementReference(FrappeTestCase):
         with self.assertRaises(frappe.ValidationError):
             self._row(partyb="some_invalid_number").validate()
 
-    def test_pesalink_needs_bank_code_not_a_phone_number(self):
-        with self.assertRaises(frappe.ValidationError):
-            self._row("Stanbic PesaLink", partyb="0011223344").validate()
-        self._row("Stanbic PesaLink", partyb="0011223344", bank_code="01").validate()
-
     def test_sanitise_phone_number(self):
         for raw in ("0712345678", "+254712345678", "254712345678", "0712345678 ", " 0712345678",
                     "0712345678 +", "0712345678  "):

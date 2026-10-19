@@ -47,7 +47,12 @@
   "amended_from",
   "column_break_nmct",
   "result_code",
-  "result_desc"
+  "result_desc",
+  "verification_section",
+  "verification_status",
+  "booking_attempts",
+  "column_break_verif",
+  "callback_payload"
  ],
  "fields": [
   {
@@ -101,6 +106,41 @@
    "fieldname": "result_desc",
    "fieldtype": "Data",
    "label": "Result Desc",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "verification_status",
+   "fieldname": "verification_section",
+   "fieldtype": "Section Break",
+   "label": "Callback Verification"
+  },
+  {
+   "description": "Pending: callback received, being confirmed with an STK Query. Mismatch / Unverified: Safaricom did not confirm it, so nothing was booked.",
+   "fieldname": "verification_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Verification Status",
+   "options": "\nPending\nVerified\nMismatch\nUnverified",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "booking_attempts",
+   "fieldtype": "Int",
+   "label": "Booking Attempts",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_verif",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "callback_payload",
+   "fieldtype": "Code",
+   "label": "Callback Payload",
+   "options": "JSON",
    "read_only": 1
   },
   {
@@ -334,7 +374,7 @@
    "link_fieldname": "reference_docname"
   }
  ],
- "modified": "2026-10-18 16:00:00.000000",
+ "modified": "2026-10-18 23:30:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "Mpesa Express Request",

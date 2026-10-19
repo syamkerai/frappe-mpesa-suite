@@ -11,9 +11,6 @@ from frappe.utils import flt
 class B2CPaymentDisbursementReference(Document):
     def validate(self) -> None:
         """Validation Hook"""
-        parent_doc = getattr(self, "parent_doc", None)
-        payment_type = parent_doc.payment_type
-
         if not self.party:
             frappe.throw(
                 f"Row #{self.idx}: Party is mandatory",
@@ -38,7 +35,7 @@ class B2CPaymentDisbursementReference(Document):
                 title="Validation Error",
             )
 
-        if payment_type != "Stanbic PesaLink" and self.partyb:
+        if self.partyb:
             mobile_no = sanitise_phone_number(self.partyb)
 
             if not is_valid_receiver_contact(mobile_no):
@@ -49,14 +46,6 @@ class B2CPaymentDisbursementReference(Document):
                 )
 
             self.partyb = mobile_no
-
-        if payment_type == "Stanbic PesaLink":
-            if not self.bank_code:
-                frappe.throw(
-                    f"Row #{self.idx}: Bank Code is Required",
-                    frappe.ValidationError,
-                    title="Validation Error",
-                )
 
 
 def sanitise_phone_number(phone_number: str) -> str:
