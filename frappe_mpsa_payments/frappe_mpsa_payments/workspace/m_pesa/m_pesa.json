@@ -68,7 +68,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Disbursements",
-   "link_count": 2,
+   "link_count": 4,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
@@ -89,6 +89,26 @@
    "label": "B2C Disbursement Request",
    "link_count": 0,
    "link_to": "B2C Disbursement Request",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Supplier M-Pesa Account",
+   "link_count": 0,
+   "link_to": "Supplier M-Pesa Account",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "B2B Supplier Payment",
+   "link_count": 0,
+   "link_to": "Mpesa B2B Payment Request",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -172,7 +192,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-10-19 10:00:00.000000",
+ "modified": "2026-10-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa",

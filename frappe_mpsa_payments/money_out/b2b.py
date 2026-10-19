@@ -10,6 +10,7 @@ from frappe.utils import flt, getdate, nowdate
 
 from ..daraja import money_out as daraja
 from ..utils.phone import normalize_msisdn
+from . import supplier_accounts
 from .common import apply_ack, callback_url, initiator_settings, lock_for_send, log_callback, post
 from .results import find_request
 
@@ -21,6 +22,7 @@ LIVE = ("Not Initiated", "Initiated", "Unknown", "Paid")
 
 def send_b2b(name: str) -> None:
     doc = lock_for_send(B2B_DOCTYPE, name)
+    supplier_accounts.check_before_send(doc)
     settings = initiator_settings(doc.mpesa_settings)
     payload = daraja.b2b_payload(
         initiator=settings.initiator_name,
@@ -72,6 +74,10 @@ def handle_result(result: dict, ref: str | None) -> None:
     log_callback({"Result": result}, "Mpesa B2B Result", B2B_DOCTYPE, doc.name, "Completed")
 
     if outcome == "Paid":
+        try:
+            supplier_accounts.record_receiver_name(doc, values.get("ReceiverPartyPublicName"))
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"M-Pesa B2B {doc.name}: receiver name check failed")
         frappe.enqueue(
             "frappe_mpsa_payments.money_out.b2b.book_payment_entry",
             queue="short",
@@ -90,6 +96,9 @@ def handle_queue_timeout(payload: dict, ref: str | None) -> None:
 
 # ---------------------------------------------------------------- validation
 def validate_request(doc) -> None:
+    if doc.purchase_invoice and not doc.supplier:
+        doc.supplier = frappe.db.get_value("Purchase Invoice", doc.purchase_invoice, "supplier")
+    supplier_accounts.apply_destination(doc)
     try:
         daraja.whole_shillings(doc.amount)
     except ValueError as e:

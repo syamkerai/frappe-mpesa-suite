@@ -92,6 +92,9 @@ class FakeDB:
         rows = self._rows(doctype, filters or {})
         return [r.get(pluck) for r in rows] if pluck else [_dict(r) for r in rows]
 
+    def get_single_value(self, doctype, field, cache=False):
+        return self.table(doctype).get(doctype, {}).get(field)
+
     def savepoint(self, name):
         pass
 
@@ -188,6 +191,10 @@ def build():
     frappe.enqueue = lambda method, **kw: frappe.enqueued.append((method, kw))
     frappe.publish_realtime = lambda *a, **kw: None
     frappe.get_installed_apps = lambda: ["frappe", "erpnext"]
+    frappe.messages = []
+    frappe.msgprint = lambda msg, *a, **kw: frappe.messages.append(msg)
+    frappe.get_all = lambda doctype, *a, **kw: frappe.db.get_all(doctype, *a, **kw)
+    frappe.get_list = frappe.get_all
 
     utils = types.ModuleType("frappe.utils")
 
@@ -208,7 +215,7 @@ def build():
     utils.getdate = lambda v=None: (v.date() if isinstance(v, datetime.datetime) else v) or datetime.date.today()
     utils.nowdate = lambda: datetime.date.today().isoformat()
     utils.now_datetime = lambda: datetime.datetime(2026, 10, 18, 12, 0, 0)
-    utils.add_to_date = lambda dt, minutes=0, **kw: dt + datetime.timedelta(minutes=minutes)
+    utils.add_to_date = lambda dt, minutes=0, hours=0, **kw: dt + datetime.timedelta(minutes=minutes, hours=hours)
     utils.get_url = lambda *a, **kw: "https://erp.example.com"
     utils.get_datetime = lambda v: v
     frappe.utils = utils

@@ -19,6 +19,7 @@
   "party_section",
   "company",
   "supplier",
+  "supplier_mpesa_account",
   "column_break_b",
   "purchase_invoice",
   "payment_entry",
@@ -39,6 +40,7 @@
   "trans_completed_time",
   "column_break_res",
   "receiver_public_name",
+  "receiver_name_mismatch",
   "debit_party_charges",
   "debit_account_balance"
  ],
@@ -57,7 +59,8 @@
    "options": "BusinessPayBill\nBusinessBuyGoods",
    "default": "BusinessPayBill",
    "reqd": 1,
-   "in_list_view": 1
+   "in_list_view": 1,
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account"
   },
   {
    "fieldname": "receiver_shortcode",
@@ -65,14 +68,17 @@
    "label": "Supplier Paybill / Till",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account",
+   "description": "Copied from the supplier's approved M-Pesa account."
   },
   {
    "fieldname": "account_reference",
    "fieldtype": "Data",
    "label": "Account Number",
    "mandatory_depends_on": "eval:doc.command_id==\"BusinessPayBill\"",
-   "depends_on": "eval:doc.command_id==\"BusinessPayBill\""
+   "depends_on": "eval:doc.command_id==\"BusinessPayBill\"",
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account"
   },
   {
    "fieldname": "amount",
@@ -135,6 +141,14 @@
    "label": "Supplier",
    "options": "Supplier",
    "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "supplier_mpesa_account",
+   "fieldtype": "Link",
+   "label": "Supplier M-Pesa Account",
+   "options": "Supplier M-Pesa Account",
+   "description": "Approved paybill / till of the supplier. The number and account are taken from it.",
    "search_index": 1
   },
   {
@@ -289,6 +303,14 @@
    "no_copy": 1
   },
   {
+   "fieldname": "receiver_name_mismatch",
+   "fieldtype": "Check",
+   "label": "Receiver Name Did Not Match",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
    "fieldname": "debit_party_charges",
    "fieldtype": "Data",
    "label": "Charges",
@@ -306,7 +328,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-18 20:00:00.000000",
+ "modified": "2026-10-19 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "Mpesa B2B Payment Request",

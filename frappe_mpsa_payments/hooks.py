@@ -63,6 +63,7 @@ doctype_js = {
     "B2C Disbursement Request": "public/js/b2c_status_check.js",
     "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
     "Integration Request": "public/js/c2b_verification.js",
+    "Supplier": "public/js/supplier.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -224,6 +225,9 @@ scheduler_events = {
 # override_doctype_dashboards = {
 # 	"Task": "frappe_mpsa_payments.task.get_dashboard_data"
 # }
+override_doctype_dashboards = {
+    "Supplier": "frappe_mpsa_payments.money_out.supplier_dashboard.get_data"
+}
 
 # exempt linked doctypes from being automatically cancelled
 #
