@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, get_url, now_datetime
 
+from ..daraja.guard import callback_url_problems
 from .framework import CASE, FAILED, PASSED, PENDING, RUN, SKIPPED, WAITING, Ctx, Fail, Skip, post_callback, rejected
 from .guard import lab_enabled, require_lab
 from .scenarios import BY_KEY, SCENARIOS
@@ -181,6 +182,9 @@ def health_check(run) -> list:
         add("warning", "Public address", f"{url} is http; sandbox allows it, production needs https")
     else:
         add("ok", "Public address", url)
+    # Daraja refuses any callback URL with a banned word, so one in the host breaks them all.
+    for problem in callback_url_problems(url, sandbox=True):
+        add("error", "Public address", f"{url}: {problem}; Safaricom refuses every callback URL on it")
 
     suite = frappe.get_single("M-Pesa Suite Settings")
     add("ok" if suite.integration_user else "warning", "Integration User",

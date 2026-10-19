@@ -32,6 +32,7 @@ def send_b2b(name: str) -> None:
         party_a=settings.business_shortcode,
         party_b=doc.receiver_shortcode,
         account_reference=doc.account_reference,
+        fallback_reference=doc.name,
         requester=doc.requester,
         remarks=doc.remarks,
         occasion=doc.occasion,

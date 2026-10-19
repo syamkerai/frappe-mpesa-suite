@@ -596,9 +596,10 @@ def get_doctype_fields(doctype):
 # Safaricom throttles bursts; pace the batch rather than fire 69 requests flat out.
 BULK_REGISTRATION_DELAY_SECONDS = 1
 
+# Daraja bans "mpesa" in callback URLs, so new registrations use the m_pesa_api endpoint;
+# pull_transaction_callback below stays for shortcodes registered with the old URL.
 PULL_REGISTRATION_CALLBACK = (
-    "frappe_mpsa_payments.frappe_mpsa_payments.doctype"
-    ".mpesa_settings.mpesa_settings.pull_transaction_callback"
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.pull_registration_result"
 )
 
 

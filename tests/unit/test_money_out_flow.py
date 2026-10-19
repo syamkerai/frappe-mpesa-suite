@@ -48,7 +48,9 @@ def env(monkeypatch):
             "responses": [],
         }
         monkeypatch.setattr(common, "bearer_headers", lambda s, force=False: {"Authorization": "Bearer tok"})
-        monkeypatch.setattr(common, "invalidate_token", lambda s: mods["sent"].append("invalidate"))
+        monkeypatch.setattr(
+            common, "invalidate_token", lambda s, rejected=None: mods["sent"].append(f"invalidate {rejected}")
+        )
 
         def fake_post(url, json=None, headers=None, timeout=None):
             mods["sent"].append((url, json))
@@ -128,8 +130,18 @@ def test_token_error_refreshes_once_and_resends(env):
     row = b2b_row(env)
     env.responses += [Resp({"errorCode": "404.001.03", "errorMessage": "Invalid Access Token"}, 404), Resp(ACK)]
     env.b2b.send_b2b("MB2B-1")
-    assert "invalidate" in env.sent and len([s for s in env.sent if s != "invalidate"]) == 2
+    # Only the refused token is dropped, so a fresher token another worker cached survives.
+    assert "invalidate tok" in env.sent and len([s for s in env.sent if s != "invalidate tok"]) == 2
     assert row["status"] == "Initiated"
+
+
+def test_b2b_buy_goods_sends_account_reference(env):
+    # Daraja's BusinessBuyGoods body lists AccountReference without marking it optional.
+    b2b_row(env, command_id="BusinessBuyGoods", receiver_shortcode="123456", account_reference=None)
+    env.responses.append(Resp(ACK))
+    env.b2b.send_b2b("MB2B-1")
+    _, body = env.sent[0]
+    assert body["CommandID"] == "BusinessBuyGoods" and body["AccountReference"] == "MB2B-1"
 
 
 # ---------------------------------------------------------------- B2B result

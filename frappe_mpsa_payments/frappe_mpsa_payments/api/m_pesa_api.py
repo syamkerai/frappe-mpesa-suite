@@ -12,7 +12,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt
 
-from ...daraja.callbacks import KIND_C2B, KIND_RESULT, safaricom_callback
+from ...daraja.callbacks import KIND_C2B, KIND_PULL, KIND_RESULT, safaricom_callback
 from ...daraja.guard import daraja_timestamp, stk_amount, truncate_reference
 from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
 
@@ -51,11 +51,35 @@ def _result_parameters(result_data: dict) -> list:
     return [p for p in params if isinstance(p, dict)]
 
 
+ACCOUNT_BALANCE_RESULT_METHOD = (
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.account_balance_result"
+)
+
+
+@frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_RESULT)
+def account_balance_result(**kwargs) -> None:
+    """Account Balance ResultURL. Daraja bans the word "query" in callback URLs."""
+    _handle_balance_result(**kwargs)
+
+
 @frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_RESULT)
 def balance_query_callback(**kwargs) -> None:
-    import json
+    """Upstream ResultURL name, kept so results for requests sent before the rename land."""
+    _handle_balance_result(**kwargs)
 
+
+@frappe.whitelist(allow_guest=True)
+@safaricom_callback(KIND_PULL)
+def pull_registration_result(**kwargs) -> dict:
+    """Pull Transactions register CallBackURL. Daraja bans "mpesa" in callback URLs, which the
+    older ``doctype.mpesa_settings...pull_transaction_callback`` path contains."""
+    frappe.log_error(title="Mpesa Pull Transaction Callback", message=frappe.as_json(kwargs))
+    return {"ResultCode": 0, "ResultDesc": "Accepted"}
+
+
+def _handle_balance_result(**kwargs) -> None:
     args = frappe._dict(kwargs)
     result_data = args.get("Result")
     if not result_data:
@@ -171,9 +195,7 @@ def get_account_balance(name: str) -> Any:
 
         endpoint = "/mpesa/accountbalance/v1/query"
 
-        callback_url = build_callback_url(
-            "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.balance_query_callback"
-        )
+        callback_url = build_callback_url(ACCOUNT_BALANCE_RESULT_METHOD)
         timeout_url = build_callback_url(
             "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_queue_timeout"
         )
@@ -537,11 +559,15 @@ def apply_c2b_verification(ir: str, result: dict) -> None:
         frappe.log_error(frappe.get_traceback(), f"M-Pesa C2B verification failed for {ir}"[:140])
 
 
+# Daraja C2B "Response Codes": accept with the string "0"; reject only with C2B00011-C2B00016.
+C2B_VALIDATION_ACCEPTED = {"ResultCode": "0", "ResultDesc": "Accepted"}
+C2B_VALIDATION_REJECTED = {"ResultCode": "C2B00016", "ResultDesc": "Rejected"}  # "Other Error"
+
+
 @frappe.whitelist(allow_guest=True)
-@safaricom_callback(KIND_C2B)
+@safaricom_callback(KIND_C2B, rejected=C2B_VALIDATION_REJECTED)
 def validation(**kwargs):
-    context = {"ResultCode": 0, "ResultDesc": "Accepted"}
-    return dict(context)
+    return dict(C2B_VALIDATION_ACCEPTED)
 
 
 def delayed_insert_c2b(c2b_data: dict) -> None:

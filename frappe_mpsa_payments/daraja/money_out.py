@@ -100,12 +100,16 @@ def b2b_payload(
     account_reference: str | None = None,
     requester: str | None = None,
     occasion: str | None = None,
+    fallback_reference: str | None = None,
 ) -> dict:
+    """``fallback_reference`` fills AccountReference for BusinessBuyGoods when the till needs no
+    account number: Daraja's BuyGoods body lists AccountReference without marking it optional."""
     if command_id not in B2B_COMMANDS:
         raise ValueError(f"B2B CommandID must be one of {B2B_COMMANDS}, got {command_id!r}")
     if not str(party_b or "").strip().isdigit():
         raise ValueError(f"B2B receiver (PartyB) must be a paybill or till number, got {party_b!r}")
-    if command_id == B2B_PAYBILL and not str(account_reference or "").strip():
+    reference = str(account_reference or "").strip()
+    if command_id == B2B_PAYBILL and not reference:
         raise ValueError("BusinessPayBill needs an AccountReference (the supplier's account number)")
     payload = {
         "Initiator": initiator,
@@ -116,12 +120,11 @@ def b2b_payload(
         "Amount": whole_shillings(amount),
         "PartyA": str(party_a).strip(),
         "PartyB": str(party_b).strip(),
+        "AccountReference": reference or str(fallback_reference or "").strip() or "Payment",
         "Remarks": clamp_remarks(remarks, "Supplier payment"),
         "QueueTimeOutURL": queue_timeout_url,
         "ResultURL": result_url,
     }
-    if command_id == B2B_PAYBILL:
-        payload["AccountReference"] = str(account_reference).strip()
     if requester:
         payload["Requester"] = str(requester).strip()
     if occasion:

@@ -20,7 +20,14 @@ from frappe.utils import get_url
 
 from ..frappe_mpsa_payments.connectors.connectors import TOKEN_ERROR_CODES
 from ..daraja.callbacks import with_token
-from ..daraja.client import CONNECT_TIMEOUT, READ_TIMEOUT, base_url, bearer_headers, invalidate_token
+from ..daraja.client import (
+    CONNECT_TIMEOUT,
+    READ_TIMEOUT,
+    base_url,
+    bearer_headers,
+    bearer_token,
+    invalidate_token,
+)
 from ..daraja.guard import redact_headers, scrub_payload
 from ..utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 
@@ -89,21 +96,19 @@ def post(settings, endpoint: str, payload: dict, *, doctype: str, name: str, des
         reference_docname=name,
     )
 
-    def _send(force_token=False):
-        return requests.post(
-            url,
-            json=payload,
-            headers=bearer_headers(settings, force=force_token),
-            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-        )
+    def _send():
+        headers = bearer_headers(settings)
+        response = requests.post(url, json=payload, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        return bearer_token(headers), response
 
     try:
-        response = _send()
+        token, response = _send()
         data = _json(response)
         if str(data.get("errorCode") or "") in TOKEN_ERROR_CODES:
             # Safaricom refused the token, so nothing was processed: refresh once and resend.
-            invalidate_token(settings)
-            response = _send(force_token=True)
+            # Drop only that token; a fresher one another worker cached is used as is.
+            invalidate_token(settings, rejected=token)
+            _, response = _send()
             data = _json(response)
     except requests.ConnectTimeout as e:
         _close_log(log, "Failed", error=f"Not sent: {type(e).__name__}")

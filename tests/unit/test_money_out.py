@@ -75,13 +75,31 @@ def test_b2b_paybill_payload():
     assert p["QueueTimeOutURL"] != p["ResultURL"]
 
 
-def test_b2b_buy_goods_has_no_account_reference():
+def test_b2b_buy_goods_sends_account_reference():
+    # Daraja's BusinessBuyGoods body lists AccountReference without marking it optional.
     p = m.b2b_payload(
         **CRED, **URLS, command_id="BusinessBuyGoods", amount=50, party_a="600992", party_b="123456",
-        account_reference="ignored", remarks="Lunch",
+        account_reference="TILL-REF", remarks="Lunch",
     )
-    assert p["CommandID"] == "BusinessBuyGoods"
-    assert "AccountReference" not in p and "Requester" not in p and "Occassion" not in p
+    assert p["CommandID"] == "BusinessBuyGoods" and p["AccountReference"] == "TILL-REF"
+    assert "Requester" not in p and "Occassion" not in p
+
+
+@pytest.mark.parametrize("fallback,expected", [("MB2B-26-10-000001", "MB2B-26-10-000001"), (None, "Payment")])
+def test_b2b_buy_goods_without_reference_uses_fallback(fallback, expected):
+    p = m.b2b_payload(
+        **CRED, **URLS, command_id="BusinessBuyGoods", amount=50, party_a="600992", party_b="123456",
+        remarks="Lunch", fallback_reference=fallback,
+    )
+    assert p["AccountReference"] == expected
+
+
+def test_b2b_paybill_ignores_fallback_reference():
+    with pytest.raises(ValueError):
+        m.b2b_payload(
+            **CRED, **URLS, command_id="BusinessPayBill", amount=50, party_a="600992", party_b="888880",
+            remarks="x", fallback_reference="MB2B-1",
+        )
 
 
 @pytest.mark.parametrize(

@@ -19,13 +19,17 @@ site** before going live. It refuses to run on live keys.
 On [developer.safaricom.co.ke](https://developer.safaricom.co.ke):
 
 1. Go to **My Apps → Add a new app** and tick every product: M-Pesa Express, C2B, B2C, B2B,
-   Transaction Status, Account Balance and Reversal.
+   Transaction Status, Account Balance and Reversal. Safaricom's pages disagree on whether one
+   app can hold both C2B and B2C. If the portal refuses, make a second app for B2C and give it its
+   own Mpesa Settings record (same shortcode, that app's key and secret), then point the test
+   run's B2C field at it.
 2. Copy the app's **Consumer Key** and **Consumer Secret**.
-3. Open the **Test Credentials** page and note:
+3. Open the **Test Credentials** page (you must be logged in) and note:
    - Initiator Name and Initiator Password
-   - Shortcode 1 (Party A, 600xxx) and Shortcode 2 (Party B)
-   - Test MSISDN
-   - the M-Pesa Express shortcode **174379** and its **Passkey**
+   - Shortcode 1 (Party A, 600xxx), which works for every API except B2B, and Shortcode 2,
+     which is B2B's Party B
+   - Test MSISDN (Daraja's docs use **254708374149**)
+   - the M-Pesa Express shortcode **174379** (for M-Pesa Express only) and its **Passkey**
 
 Type secrets into the ERPNext forms directly. Never paste them into chats or tickets.
 
@@ -75,6 +79,11 @@ initiator in sandbox.
 
 Pull Transactions cannot be tested in the sandbox (Safaricom does not offer it there), and real
 customer payments cannot be either. Both get a KES 1–10 live check at go-live.
+
+Sandbox quirks Safaricom documents: STK test money is reversed automatically at 6am the next day,
+so a sandbox balance can change overnight; C2B simulation exists only in the sandbox; register the
+C2B URLs again before simulating if the sandbox has forgotten them. Safaricom doesn't publish the
+queue-timeout message, so the lab never relies on one.
 
 ## 6. Go-live gate
 

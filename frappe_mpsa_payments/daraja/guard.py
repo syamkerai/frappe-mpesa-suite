@@ -4,12 +4,22 @@ import hmac
 import ipaddress
 import re
 
-# Safaricom Daraja callback sources. The published callback IPs (196.201.214.200/206/207/208,
-# 196.201.213.44/114, 196.201.212.69/74/127/129/136/138) all sit in these /24s. Editable in
-# M-Pesa Suite Settings; confirm against your go-live pack before enforcing.
+# Safaricom Daraja callback sources. The 12 IPs Daraja publishes (GettingStarted, "Callback
+# and IP Whitelisting": 196.201.214.200/206/207/208, 196.201.213.44/114,
+# 196.201.212.69/74/127/129/136/138) all sit in these /24s. Editable in M-Pesa Suite Settings.
 DEFAULT_SAFARICOM_IPS = """196.201.212.0/24
 196.201.213.0/24
 196.201.214.0/24"""
+
+# Daraja per-transaction limits (MpesaExpressSimulate FAQ 5, BusinessToCustomer FAQ 9).
+STK_MIN_AMOUNT = 1
+STK_MAX_AMOUNT = 250000
+B2C_MIN_AMOUNT = 10
+B2C_MAX_AMOUNT = 250000
+
+# Daraja rejects callback URLs containing these words in any case (FAQ 19, C2B "URL
+# Requirements"). Upstream endpoint names already in use are listed in daraja_api_reference.md.
+BANNED_URL_WORDS = ("m-pesa", "mpesa", "safaricom", "exe", "exec", "cmd", "sql", "query")
 
 
 def parse_allowlist(text: str | None) -> list:
@@ -33,6 +43,25 @@ def ip_allowed(ip: str | None, allowlist_text: str | None) -> bool:
     except ValueError:
         return False
     return any(addr in net for net in parse_allowlist(allowlist_text))
+
+
+def callback_url_problems(url: str | None, sandbox=False) -> list:
+    """Reasons Safaricom would refuse this callback URL; empty when it looks acceptable.
+
+    Production URLs must be HTTPS (sandbox may use HTTP) and no URL may contain a banned
+    word in any case (FAQ 19 and C2B "URL Requirements").
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ["the callback URL is empty"]
+    scheme, _, rest = text.partition("://")
+    problems = []
+    if not sandbox and scheme.lower() != "https":
+        problems.append("production callback URLs must use HTTPS")
+    found = [w for w in BANNED_URL_WORDS if w in rest.lower()]
+    if found:
+        problems.append("it contains words Safaricom refuses: " + ", ".join(found))
+    return problems
 
 
 def token_matches(given: str | None, expected: str | None) -> bool:
@@ -65,12 +94,14 @@ def truncate_reference(value, limit: int = 12) -> str:
 
 
 def stk_amount(value) -> int:
-    """STK Amount must be a whole number >= 1; round half up, never send decimals."""
+    """STK Amount must be a whole number from 1 to 250,000; round half up, never send decimals."""
     from decimal import ROUND_HALF_UP, Decimal
 
     amount = int(Decimal(str(value or 0)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    if amount < 1:
-        raise ValueError("STK amount must be at least 1")
+    if amount < STK_MIN_AMOUNT:
+        raise ValueError(f"STK amount must be at least {STK_MIN_AMOUNT}")
+    if amount > STK_MAX_AMOUNT:
+        raise ValueError(f"STK amount must be at most {STK_MAX_AMOUNT:,}")
     return amount
 
 

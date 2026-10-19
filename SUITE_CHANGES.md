@@ -408,3 +408,47 @@ Sandbox-ticked Mpesa Settings and M-Pesa admin roles, so it can never use live k
   when no record was found.
 - Saving an Mpesa Settings whose shortcode another record uses shows which record books receipts.
 - Setup guide: one record per shortcode; the API operator needs a role per API.
+
+## Daraja docs verified first-hand (2026-10-19, uncommitted)
+
+Hermes read Safaricom's own Daraja pages and answered the 31 open questions
+(`../docs/DARAJA_VERIFIED_2026-10-19.md`). `../docs/daraja_api_reference.md` now marks each item
+verified, not stated, or contradicted by Safaricom's own pages. Code changed where a fact differed:
+
+- **Banned words in callback URLs.** Daraja refuses callback URLs containing mpesa, M-Pesa,
+  safaricom, exe, exec, cmd, sql or query, and the FAQ states this for every callback. Three
+  upstream URLs broke it, so they are no longer sent; the old endpoints stay so results for requests
+  already sent still land:
+  - Account Balance ResultURL `balance_query_callback` → `m_pesa_api.account_balance_result`.
+  - Pull Transactions register CallBackURL `doctype.mpesa_settings…pull_transaction_callback` →
+    `m_pesa_api.pull_registration_result` (affects new registrations only).
+  - B2C ResultURL loses the unused `?provider=Mpesa`.
+  - `daraja.guard.callback_url_problems` checks HTTPS (production) and banned words. C2B URL
+    registration now refuses to send a URL that fails, because production registration is
+    one-time. A unit test scans every `@safaricom_callback` endpoint, and another fails if the app
+    sends a legacy URL again.
+- **C2B validation reply** is now exactly the documented shape: `{"ResultCode": "0"}` to accept, and
+  `C2B00016` ("Other Error") when the IP or token check fails, instead of the undocumented `1`.
+- **Amount limits.** STK refuses more than KES 250,000. B2C refuses amounts outside 10–250,000
+  before sending (it only checked for whole shillings).
+- **B2B Buy Goods sends AccountReference.** Daraja's BuyGoods body lists it and doesn't mark it
+  optional. Paybill still requires the supplier's account number; a till without one gets the
+  request's name.
+- **OAuth tokens.** Each token request revokes the previous token. Token fetches now run under a
+  Redis lock, so workers that miss the cache at the same moment reuse one token instead of revoking
+  each other's. A token-error retry drops the cached token only if it is still the one Safaricom
+  refused (`invalidate_token(rejected=…)`), so it no longer throws away a fresher token another
+  worker just fetched. If Redis can't lock, the fetch goes ahead without the lock, as before.
+- Checked and already right: the 12 published callback IPs are inside the default allow-list; RSA
+  PKCS#1 v1.5; STK till mapping; every documented STK result code; B2C v3 with
+  OriginatorConversationID; Reversal `RecieverIdentifierType` 11 and R000001; only C2B receipts can
+  be reversed; Transaction Status `OriginalConversationID`; Account Balance column order
+  (Current|Available|Reserved|Uncleared); `500.003.1001` treated as already registered; Pull paging
+  by page number.
+- Sandbox guide: one app per product if the portal won't combine C2B and B2C; Short code 2 is
+  B2B's Party B; STK test money auto-reverses at 6am.
+
+Still open with Safaricom (pages conflict or are silent): STK Timestamp time zone; what happens to
+an AccountReference over 12 characters; one app for C2B and B2C; `BusinessPayToBulk` vs
+`BusinessTransferFromMMFToUtility`; B2B from a Business One Account or a till; Pull offset
+semantics; the QueueTimeOut payload.

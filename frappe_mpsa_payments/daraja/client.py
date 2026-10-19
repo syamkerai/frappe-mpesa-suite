@@ -5,6 +5,7 @@ expiry margin and no credentials written to the database or Integration Request.
 """
 
 import hashlib
+from contextlib import contextmanager
 
 import frappe
 import requests
@@ -20,6 +21,8 @@ CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 # Refresh the token this many seconds before Safaricom says it expires (tokens last 3599s).
 TOKEN_SAFETY_MARGIN = 120
+# Longest a worker waits for another worker's token fetch (connect + read timeout).
+TOKEN_LOCK_SECONDS = CONNECT_TIMEOUT + READ_TIMEOUT
 
 
 def base_url(sandbox) -> str:
@@ -29,6 +32,31 @@ def base_url(sandbox) -> str:
 def _token_key(consumer_key: str, url: str) -> str:
     digest = hashlib.sha256(f"{consumer_key}|{url.rstrip('/')}".encode()).hexdigest()[:24]
     return f"mpesa_suite:daraja_token:{digest}"
+
+
+@contextmanager
+def _fetch_lock(cache, key: str):
+    """Hold a Redis lock while fetching a token; carry on without one if Redis can't lock.
+
+    Each token request invalidates the previous token (Daraja Authorization FAQ 3), so two
+    workers that miss the cache together would otherwise revoke each other's tokens.
+    """
+    lock, acquired = None, False
+    try:
+        make_key = getattr(cache, "make_key", None)
+        name = make_key(f"{key}:lock") if make_key else f"{key}:lock"
+        lock = cache.lock(name, timeout=TOKEN_LOCK_SECONDS, blocking_timeout=TOKEN_LOCK_SECONDS)
+        acquired = bool(lock.acquire())
+    except Exception:
+        acquired = False
+    try:
+        yield
+    finally:
+        if acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass  # expired while fetching; the next fetch takes a fresh lock
 
 
 def fetch_token(consumer_key: str, consumer_secret: str, url: str, force: bool = False) -> str:
@@ -43,6 +71,15 @@ def fetch_token(consumer_key: str, consumer_secret: str, url: str, force: bool =
         if cached:
             return cached
 
+    with _fetch_lock(cache, key):
+        if not force:
+            cached = cache.get_value(key)  # another worker fetched while we waited
+            if cached:
+                return cached
+        return _request_token(cache, key, consumer_key, consumer_secret, url)
+
+
+def _request_token(cache, key: str, consumer_key: str, consumer_secret: str, url: str) -> str:
     endpoint = f"{url.rstrip('/')}/oauth/v1/generate?grant_type=client_credentials"
     try:
         response = requests.get(
@@ -84,11 +121,25 @@ def get_access_token(settings, force: bool = False) -> str:
     )
 
 
-def invalidate_token(settings) -> None:
+def invalidate_token(settings, rejected: str | None = None) -> None:
+    """Drop the cached token. With ``rejected`` (the token Safaricom refused), only drop it if
+    the cache still holds that token: another worker may already have cached a fresh one, and
+    fetching again would revoke it."""
     if isinstance(settings, str):
         settings = frappe.get_doc("Mpesa Settings", settings)
-    if settings.consumer_key:
-        get_cache().delete_value(_token_key(settings.consumer_key, base_url(settings.sandbox)))
+    if not settings.consumer_key:
+        return
+    cache = get_cache()
+    key = _token_key(settings.consumer_key, base_url(settings.sandbox))
+    if rejected and cache.get_value(key) not in (None, rejected):
+        return
+    cache.delete_value(key)
+
+
+def bearer_token(headers: dict) -> str | None:
+    """The token inside a ``bearer_headers`` dict, to pass back as ``rejected``."""
+    value = str((headers or {}).get("Authorization") or "")
+    return value.split(" ", 1)[1] if value.startswith("Bearer ") else None
 
 
 def bearer_headers(settings, force: bool = False) -> dict:

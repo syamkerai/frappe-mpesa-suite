@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 import frappe
 
 from frappe_mpsa_payments.daraja.callbacks import with_token
+from frappe_mpsa_payments.daraja.guard import callback_url_problems
 import requests
 from frappe.model.document import Document
 from frappe.utils import get_url
@@ -78,6 +79,18 @@ class MpesaC2BPaymentRegisterURL(Document):
             + "/api/method/frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.confirmation"
         )
         register_url = base_url + "/mpesa/c2b/v2/registerurl"
+
+        # Production registration is one-time (Daraja C2B), so never spend it on a URL
+        # Safaricom would refuse or could not reach.
+        problems = [
+            f"{label}: {problem}"
+            for label, url in (("Confirmation URL", confirmation_url), ("Validation URL", validation_url))
+            for problem in callback_url_problems(url, sandbox=env == "sandbox")
+        ]
+        if problems:
+            self.register_status = "Failed"
+            frappe.msgprint("<br>".join(problems), title="C2B URLs not registered", indicator="red")
+            return
 
         payload = {
             "ShortCode": business_shortcode,
