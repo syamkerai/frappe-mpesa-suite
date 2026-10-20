@@ -238,3 +238,37 @@ def test_matching_name_clears_flag(env):
     env.sa.record_receiver_name(doc, "888880 - TOTAL KENYA LTD")
     assert env.frappe.db.table(ACC)["MSA-1"]["name_mismatch"] == 0
     assert not env.frappe.db.table(B2B)["MB2B-1"].get("receiver_name_mismatch")
+
+
+# ---------------------------------------------------------------- blocked after a name mismatch
+def test_mismatched_account_is_blocked_on_save_and_send(env):
+    account(env, name_mismatch=1, last_receiver_name="888880 - JOHN DOE ENTERPRISES")
+    with pytest.raises(env.frappe.ValidationError, match="blocked"):
+        env.sa.apply_destination(request(env, supplier_mpesa_account="MSA-1"))
+    with pytest.raises(env.frappe.ValidationError, match="blocked"):  # picked automatically
+        env.sa.apply_destination(request(env))
+    account(env)  # flag cleared, request saved, then a mismatch is recorded before sending
+    doc = request(env, supplier_mpesa_account="MSA-1")
+    env.sa.apply_destination(doc)
+    env.frappe.db.table(ACC)["MSA-1"].update(name_mismatch=1, last_receiver_name="888880 - JOHN DOE")
+    with pytest.raises(env.frappe.ValidationError, match="blocked"):
+        env.sa.check_before_send(doc)
+
+
+@pytest.mark.parametrize("adopt, expected", [(True, "JOHN DOE ENTERPRISES"), (False, "Total Kenya")])
+def test_manager_confirms_receiver_name(env, adopt, expected):
+    account(env, name_mismatch=1, last_receiver_name="888880 - JOHN DOE ENTERPRISES")
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    env.sa.confirm_receiver_name(env.frappe.get_doc(ACC, "MSA-1"), adopt_name=adopt)
+    row = env.frappe.db.table(ACC)["MSA-1"]
+    assert row["name_mismatch"] == 0 and row["expected_name"] == expected
+    assert any("confirmed with the supplier" in c[2] for c in env.frappe.comments)
+    env.sa.apply_destination(request(env, supplier_mpesa_account="MSA-1"))  # payable again
+
+
+def test_clerk_cannot_unblock(env):
+    account(env, name_mismatch=1, last_receiver_name="888880 - JOHN DOE")
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with pytest.raises(env.frappe.PermissionError):
+        env.sa.confirm_receiver_name(env.frappe.get_doc(ACC, "MSA-1"), adopt_name=True)
+    assert env.frappe.db.table(ACC)["MSA-1"]["name_mismatch"] == 1

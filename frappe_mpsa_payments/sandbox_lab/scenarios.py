@@ -10,6 +10,7 @@ import json
 import frappe
 from frappe.utils import cint, flt, now_datetime
 
+from ..daraja.guard import is_zero_code
 from . import payloads
 from .framework import (
     AUTO,
@@ -118,6 +119,8 @@ def held_confirmation(since, bill_ref: str | None = None, transid: str | None = 
         filters["request_id"] = transid
     elif bill_ref:
         filters["data"] = ["like", f'%"billrefnumber": "{bill_ref}"%']
+        # The forged-receipt test uses the same invoice number; never mistake its ZZ receipt for ours.
+        filters["request_id"] = ["not like", f"{payloads.FAKE_RECEIPT_PREFIX}%"]
     rows = frappe.get_all(IR, filters=filters, fields=["name", "status", "error", "request_id"],
                           order_by="creation desc", limit=1)
     return rows[0] if rows else None
@@ -184,7 +187,7 @@ def simulate_c2b(ctx, bill_ref: str) -> None:
                            description="Mpesa C2B Simulate (sandbox lab)")
         if error:
             raise Fail(f"Could not reach Daraja ({error})")
-        if str(data.get("ResponseCode")) == "0" or "accept" in str(data.get("ResponseDescription", "")).lower():
+        if is_zero_code(data.get("ResponseCode")) or "accept" in str(data.get("ResponseDescription", "")).lower():
             ctx.save(bill_ref=bill_ref, since=now_datetime(), amount=amount(ctx), simulate_answer=data)
             return
         answers.append(data)
@@ -196,7 +199,8 @@ def c2b_arrival(ctx):
     since, ref = ctx.state["since"], ctx.state["bill_ref"]
     rows = frappe.get_all(
         REGISTER,
-        filters={"billrefnumber": ref, "creation": [">=", since], "docstatus": ["<", 2]},
+        filters={"billrefnumber": ref, "creation": [">=", since], "docstatus": ["<", 2],
+                 "transid": ["not like", f"{payloads.FAKE_RECEIPT_PREFIX}%"]},  # not the lab's forgeries
         fields=["*"], order_by="creation asc",
     )
     rows = [r for r in rows if abs(flt(r.transamount) - flt(ctx.state["amount"])) < 0.01]

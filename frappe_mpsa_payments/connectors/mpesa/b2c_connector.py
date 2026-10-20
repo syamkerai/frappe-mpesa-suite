@@ -8,6 +8,7 @@ from frappe.model.document import Document
 from frappe.utils import get_datetime
 
 from ...daraja.apis import initiator_party_a
+from ...daraja.guard import is_zero_code
 from ...utils.doctype_names import B2C_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
 from ..abstract import B2CConnector
 from ..base_connector import (
@@ -132,7 +133,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
 
             # ResponseCode 0 only means Safaricom accepted the request; money moves (or not)
             # when the Result callback arrives, which is the only place Paid is set.
-            status = "Initiated" if str(response_code) == "0" else "Failed"
+            status = "Initiated" if is_zero_code(response_code) else "Failed"
 
             fields = {
                 "conversation_id": data.get("ConversationID", ""),
@@ -310,9 +311,12 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         req.save(ignore_permissions=True)
 
         if self.integration_request:
+            # The callback log takes Integration Request statuses, not the payout's: upstream's
+            # status=req.status made every Paid result fail validation and roll back (15.3.1,
+            # which Astral runs, used "Completed").
             update_integration_request(
                 self.integration_request.name,
-                status=req.status,
+                status="Completed" if req.status == "Paid" else "Failed",
                 output=json.dumps(payload),
             )
         else:

@@ -20,6 +20,7 @@ from frappe import _
 from frappe.utils import add_to_date, cint, cstr, get_url, now_datetime
 
 from ..daraja import apis, verify
+from ..daraja.guard import is_zero_code
 from ..daraja.money_out import result_values, transaction_status_payload
 from .common import EXPRESS, REGISTER, named_lock, settings_for_shortcode
 
@@ -143,7 +144,7 @@ def send_query(ir_name: str) -> None:
         settings=settings_name,
         conversation_id=(ack or {}).get("ConversationID"),
         originator_conversation_id=(ack or {}).get("OriginatorConversationID"),
-        last_error=error or (None if str((ack or {}).get("ResponseCode")) == "0" else cstr((ack or {}).get("errorMessage") or ack)),
+        last_error=error or (None if is_zero_code((ack or {}).get("ResponseCode")) else cstr((ack or {}).get("errorMessage") or ack)),
     )
     frappe.db.commit()
 

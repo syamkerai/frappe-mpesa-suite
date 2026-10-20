@@ -107,6 +107,10 @@ def post_callback(method: str, payload: dict, token: bool = True, **params) -> t
     Safaricom does (so the IP allow-list, token check and integration user all apply).
     Returns (http_status, the endpoint's answer)."""
     url = callback_url(method, token=token, **params)
+    # The endpoint runs in another worker: it can only see (and lock) what this test already
+    # created once it is committed. Without this, a forged callback for a prompt made a moment
+    # ago waits on our own uncommitted row until the lock times out.
+    frappe.db.commit()
     response = requests.post(url, json=payload, timeout=(10, 60))
     try:
         body = response.json()

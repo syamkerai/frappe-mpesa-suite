@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import frappe
 from frappe import _
-from frappe.utils import flt, get_request_site_address
+from frappe.utils import flt, get_url
 
 from .doctype_names import ACCESS_TOKENS_DOCTYPE, MPESA_EXPRESS_REQUEST_DOCTYPE
 
@@ -152,7 +152,9 @@ def create_payment_gateway_account(gateway, payment_channel="Email", company=Non
 
 
 def build_callback_url(endpoint: str, add_token: bool = True) -> str:
-    base_url = get_request_site_address(True)
+    # get_url(), not get_request_site_address(True): the full-address form reads the current
+    # request's URI and raises "object is not bound" in background jobs and scripts.
+    base_url = get_url()
     parsed_url = urlparse(base_url)
 
     if not (
@@ -171,6 +173,44 @@ def log_and_throw_error(err_msg, context=None):
     frappe.log_error(frappe.get_traceback(), err_msg)
     if context:
         frappe.throw(_(f"{err_msg}: {context}"))
+
+
+def _book_invoice_payment(request_doc, sales_invoice) -> None:
+    """Payment Entry for a paid STK prompt against a submitted, non-POS Sales Invoice.
+
+    One entry per receipt (the receipt is its reference); allocation capped at what the
+    invoice still owes, the rest stays unallocated on the customer.
+    """
+    from ..frappe_mpsa_payments.api.payment_entry import create_payment_entry
+    from ..money_in.common import mode_of_payment_for, named_lock
+
+    receipt = request_doc.transaction_id
+    settings_name = request_doc.get("settings") or frappe.db.get_value(
+        "Payment Gateway", request_doc.payment_gateway, "gateway_controller"
+    )
+    with named_lock(f"book:{receipt}"):
+        if frappe.db.get_value("Payment Entry", {"reference_no": receipt, "docstatus": ["<", 2]}, "name", for_update=True):
+            return
+        paid = flt(request_doc.amount)
+        owed = flt(frappe.db.get_value("Sales Invoice", sales_invoice.name, "outstanding_amount"))
+        refs = None
+        if owed > 0:
+            refs = [{"reference_doctype": "Sales Invoice", "reference_name": sales_invoice.name,
+                     "allocated_amount": min(paid, owed)}]
+        paid_on = frappe.utils.getdate(request_doc.get("transaction_date") or frappe.utils.nowdate())
+        cost_center = sales_invoice.get("cost_center") or (
+            frappe.db.get_value("Mpesa Settings", settings_name, "cost_center")
+            if settings_name and frappe.get_meta("Mpesa Settings").has_field("cost_center") else None
+        )
+        try:
+            create_payment_entry(
+                sales_invoice.company, sales_invoice.customer, paid,
+                sales_invoice.get("party_account_currency") or sales_invoice.currency or "KES",
+                mode_of_payment_for(settings_name) or request_doc.payment_gateway, "Customer",
+                paid_on, receipt, paid_on, cost_center, 1, references=refs,
+            )
+        except Exception:
+            log_and_throw_error("Payment Creation Error", request_doc.name)
 
 
 def _stk_paid_covers_payment_request(request_doc) -> bool:
@@ -306,19 +346,9 @@ def handle_successful_transaction(request_doc, settings):
                         log_and_throw_error(
                             "Sales Invoice Submission Error", request_doc.name
                         )
-                try:
-                    payment_row = sales_invoice.append("payments", {})
-                    paid = flt(request_doc.amount)
-                    outstanding = flt(sales_invoice.outstanding_amount)
-                    # never book more than the invoice still owes
-                    payment_row.amount = min(paid, outstanding) if outstanding > 0 else paid
-                    payment_row.mode_of_payment = request_doc.payment_gateway
-                    payment_row.reference_no = request_doc.transaction_id
-                    payment_row.clearance_date = frappe.utils.nowdate()
-                except Exception:
-                    log_and_throw_error("Payment Creation Error", request_doc.name)
-
-                sales_invoice.save(ignore_permissions=True)
+                # Upstream appended a payments row and saved: a submitted invoice refuses that
+                # (UpdateAfterSubmitError), so every such prompt stayed paid but unbooked.
+                _book_invoice_payment(request_doc, sales_invoice)
                 set_mpesa_request_reconciled(request_doc)
 
         elif request_doc.reference_doctype == "Sales Invoice Payment":

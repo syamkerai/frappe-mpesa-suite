@@ -15,6 +15,7 @@ from frappe.model.document import Document
 
 from ....compat import in_test
 from ....daraja import apis
+from ....daraja.guard import is_zero_code
 from ....permissions import ADMIN_ROLES, FINANCE_ROLES, require_for_direct_call
 from ....daraja.callbacks import KIND_PULL, KIND_RESULT, safaricom_callback, with_token
 from frappe.utils import (
@@ -540,7 +541,7 @@ def process_transaction_status(integration_request_name):
             result_url=result_url,
         )
 
-        if response.get("ResponseCode") == "0":
+        if is_zero_code(response.get("ResponseCode")):
             integration_request.status = "Completed"
             integration_request.output = dumps(response)
             integration_request.save(ignore_permissions=True)

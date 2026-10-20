@@ -7,6 +7,7 @@ from frappe_mpsa_payments.daraja.guard import (
     DEFAULT_SAFARICOM_IPS,
     callback_url_problems,
     ip_allowed,
+    is_zero_code,
     parse_allowlist,
     redact_headers,
     stk_amount,
@@ -72,6 +73,15 @@ def test_stk_amount_whole_numbers(value, expected):
 def test_stk_amount_rejects_below_one(value):
     with pytest.raises(ValueError):
         stk_amount(value)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [("0", True), (0, True), ("00000000", True), (" 0 ", True),  # sandbox registerurl answers "00000000"
+     ("", False), (None, False), ("1", False), ("C2B00011", False), ("500.003.1001", False), ("10", False)],
+)
+def test_is_zero_code(value, expected):
+    assert is_zero_code(value) is expected
 
 
 def test_stk_amount_daraja_maximum():

@@ -95,3 +95,15 @@ queue-timeout message, so the lab never relies on one.
 Run the whole lab twice in a row with every row **Passed**, with the go-live switches on (both
 Verify switches, both Require Token switches, Match and Book Receipts). Keep the test runs: they
 are the sign-off record.
+
+## 7. Running the lab on a local bench
+
+- Expose the site with a tunnel (ngrok's free plan gives you a fixed dev domain) and set
+  `host_name` to its bare `https://` address.
+- On a dev bench Frappe appends the web port to `host_name` in `get_url()`, so callback URLs
+  point at a port the tunnel doesn't serve. Set `bench set-config -g -p restart_supervisor_on_update 1`
+  (production benches already have it).
+- Sandbox test shortcodes (600xxx) and the `testapi` initiator are shared by many developers.
+  Expect "API password is locked" (8006) and C2B confirmations going to whoever registered URLs
+  last. Re-register before a C2B round and retry another day if they never arrive.
+- If Safaricom answers with a 403 HTML page (Incapsula), wait a minute and retry. It blocks bursts.

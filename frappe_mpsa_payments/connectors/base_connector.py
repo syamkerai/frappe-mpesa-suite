@@ -58,8 +58,19 @@ def update_integration_request(
             output if doc.output in (None, "null") else (doc.output + "\n" + output)
         )
 
-    doc.status = status
+    doc.status = integration_request_status(status)
     doc.save(ignore_permissions=True)
+
+
+# Integration Request.status only takes these; a document status passed by mistake must not
+# make the save (and the whole callback with it) fail.
+INTEGRATION_REQUEST_STATUSES = ("Queued", "Authorized", "Completed", "Cancelled", "Failed")
+
+
+def integration_request_status(status: str | None) -> str:
+    if status in INTEGRATION_REQUEST_STATUSES:
+        return status
+    return "Failed" if str(status or "").strip().lower() in ("failed", "error", "rejected") else "Completed"
 
 
 class ErrorObserver:

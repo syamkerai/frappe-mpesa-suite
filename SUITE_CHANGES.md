@@ -487,3 +487,50 @@ Receive C2B, Send STK Prompts, B2C Payouts, B2B Supplier Payments, Reversals
   B2C") had sent 21 STK prompts and receives C2B, so the patch also keeps STK for any record with
   Express Requests and C2B for any record with C2B receipts on its shortcode. Result there:
   4139683 = B2C; 4134019 = C2B + STK + B2C; 208911 = C2B + STK.
+
+## Fixes found by the first Sandbox Lab run (2026-10-20, uncommitted)
+
+Ran the lab against Daraja's sandbox from a local v15 bench behind an ngrok tunnel. 10 tests
+passed, including STK end to end on a real phone: paid and booked once, unanswered prompt books
+nothing, a re-sent callback changes nothing, the status check leaves it booked once, and a forged
+"paid" callback's receipt is never booked. The run found these bugs:
+
+- **C2B URL registration marked a success as Failed.** The sandbox's v2 registerurl answers
+  `ResponseCode "00000000"`, not the documented `"0"`. New `daraja.guard.is_zero_code` accepts any
+  all-zero code; used on every "request accepted" check (registerurl, B2C/B2B/Reversal/Status acks,
+  C2B verification, lab simulate). Result codes in callbacks are unchanged.
+- **Account Balance and STK prompts crashed outside a web request** ("object is not bound").
+  `build_callback_url` read the request URI through `get_request_site_address(True)`; it now uses
+  `get_url()`, so background jobs and scripts work.
+- **An STK prompt made on a Sales Invoice was paid but never booked.** Upstream appended a
+  payments row to the submitted invoice and saved it, which Frappe refuses
+  (UpdateAfterSubmitError). It now books a Payment Entry against the invoice (receipt as
+  reference, one per receipt, allocation capped at what is owed). Astral's live prompts all use
+  Payment Requests (326 of 326), so this path had never run there.
+- **Every successful B2C payout failed to record.** The result handler copied the payout status
+  ("Paid") onto the Integration Request, whose status cannot be "Paid", so the save failed and the
+  whole callback rolled back: the payout stayed Initiated and was never booked. This came from
+  upstream's version-16 branch (`status=req.status`); Navari 15.3.1, which Astral runs live, used
+  "Completed". It now logs Completed/Failed, and `update_integration_request` maps any other value.
+- **A supplier account whose receiver name did not match could still be paid.** After a B2B payment
+  whose M-Pesa receiver name differs from the approved supplier name, the account is now blocked:
+  new B2B requests to it are refused with the reason until an M-Pesa manager checks with the
+  supplier and presses **Receiver Name Confirmed** (optionally adopting the reported name).
+- Lab: the C2B arrival checks ignore the lab's own `ZZ` forged receipts (the forged-receipt test
+  uses the same invoice number), and `post_callback` commits before posting, so a forged callback
+  for a prompt made a moment earlier no longer waits on an uncommitted row.
+
+Because the sandbox initiator stayed locked, B2B, B2C, C2B and Reversal were also run on the lab site
+with only Safaricom's side simulated: its documented ack, and its verified result / confirmation
+samples posted through the public URL. Everything else ran for real. B2B: payload, Paid, Payment
+Entry against the Purchase Invoice (draft or submitted per setting), re-sent result, failure,
+receiver-name alert and block. B2C: payload, Paid, row and disbursement status, Payment Entry,
+re-sent result, failure. C2B: exact reference, mistyped reference repaired, unknown reference left
+for review, duplicate confirmation. Reversal: Reversed, second reversal refused, R000001.
+
+Sandbox behaviour seen (not app faults): the shared test initiator answered 8006 "API password
+is locked", so Balance, B2B, B2C and Reversal cannot pass until Safaricom unlocks it. C2B simulate
+is accepted but confirmations never arrive, because test shortcodes like 600584 are shared and
+Safaricom delivers to whoever registered URLs last. The sandbox sometimes completes an STK prompt
+by itself. Safaricom's firewall (Incapsula) blocks bursts of calls with a 403 page; a retry after a
+pause works. These flows get their proof in the KES 1-10 live checks at go-live.

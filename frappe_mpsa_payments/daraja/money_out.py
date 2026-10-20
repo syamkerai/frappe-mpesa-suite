@@ -11,6 +11,8 @@ dict, or absent.
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from .guard import is_zero_code
+
 REVERSAL_ENDPOINT = "/mpesa/reversal/v1/request"
 B2B_ENDPOINT = "/mpesa/b2b/v1/paymentrequest"
 TRANSACTION_STATUS_ENDPOINT = "/mpesa/transactionstatus/v1/query"
@@ -51,7 +53,7 @@ def clamp_remarks(text, default: str = "Payment") -> str:
 
 def ack_accepted(data) -> bool:
     """Synchronous ack: ``ResponseCode "0"`` only means Safaricom queued the request."""
-    return isinstance(data, dict) and str(data.get("ResponseCode", "")).strip() == "0"
+    return isinstance(data, dict) and is_zero_code(data.get("ResponseCode"))
 
 
 # ---------------------------------------------------------------- request bodies

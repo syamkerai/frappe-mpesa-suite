@@ -45,6 +45,16 @@ def ip_allowed(ip: str | None, allowlist_text: str | None) -> bool:
     return any(addr in net for net in parse_allowlist(allowlist_text))
 
 
+def is_zero_code(value) -> bool:
+    """True for Safaricom's "accepted" codes: 0, "0" and "00000000".
+
+    The docs show ResponseCode "0", but the sandbox's C2B v2 registerurl answers
+    "00000000" ("Success"), so an exact == "0" check calls a success a failure.
+    """
+    text = str(value if value is not None else "").strip()
+    return bool(text) and set(text) == {"0"}
+
+
 def callback_url_problems(url: str | None, sandbox=False) -> list:
     """Reasons Safaricom would refuse this callback URL; empty when it looks acceptable.
 

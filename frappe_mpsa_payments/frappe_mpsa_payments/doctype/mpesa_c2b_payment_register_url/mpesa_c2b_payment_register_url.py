@@ -7,7 +7,7 @@ import frappe
 
 from frappe_mpsa_payments.daraja import apis
 from frappe_mpsa_payments.daraja.callbacks import with_token
-from frappe_mpsa_payments.daraja.guard import callback_url_problems
+from frappe_mpsa_payments.daraja.guard import callback_url_problems, is_zero_code
 import requests
 from frappe.model.document import Document
 from frappe.utils import get_url
@@ -111,7 +111,7 @@ class MpesaC2BPaymentRegisterURL(Document):
                 res = r.json()
             except ValueError:
                 res = {}
-            if str(res.get("ResponseCode")) == "0":
+            if is_zero_code(res.get("ResponseCode")):  # the sandbox answers "00000000"
                 self.register_status = "Success"
             elif _is_already_registered(res):
                 # Safaricom keeps the first registration; the shortcode is set up.

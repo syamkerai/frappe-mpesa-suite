@@ -29,6 +29,7 @@ def test_remarks_are_2_to_100_chars():
 def test_ack_needs_string_or_int_zero():
     assert m.ack_accepted({"ResponseCode": "0"})
     assert m.ack_accepted({"ResponseCode": 0})
+    assert m.ack_accepted({"ResponseCode": "00000000"})  # what the sandbox actually sends
     assert not m.ack_accepted({"ResponseCode": "1"})
     assert not m.ack_accepted({"errorCode": "400.002.02"})
     assert not m.ack_accepted(None)

@@ -32,6 +32,8 @@ ACCOUNT_FIELDS = [
     "expected_name",
     "active_from",
     "is_default",
+    "name_mismatch",
+    "last_receiver_name",
 ]
 
 
@@ -115,6 +117,13 @@ def usable_problem(acc, supplier=None) -> str | None:
         return f"Supplier M-Pesa Account {acc.name} belongs to {acc.supplier}, not {supplier}"
     if acc.active_from and get_datetime(acc.active_from) > now_datetime():
         return f"Supplier M-Pesa Account {acc.name} is on hold until {acc.active_from} (new accounts wait before first use)"
+    if cint(acc.get("name_mismatch")):
+        # A paybill whose holder is not the supplier is how invoice-redirection fraud looks.
+        return (
+            f"Supplier M-Pesa Account {acc.name} is blocked: M-Pesa last paid {acc.get('last_receiver_name')!r}, "
+            f"not {acc.expected_name!r}. A manager must check with the supplier and press Receiver Name "
+            "Confirmed on the account before it is paid again."
+        )
     return None
 
 
@@ -143,6 +152,15 @@ def apply_destination(doc) -> None:
     """Copy the destination from the approved account; typed numbers are not trusted."""
     if not doc.supplier_mpesa_account and doc.supplier:
         doc.supplier_mpesa_account = pick_account(doc.supplier)
+        if not doc.supplier_mpesa_account:
+            # Say why the supplier's approved account can't be used (blocked, on hold, ...).
+            problems = [
+                usable_problem(r, doc.supplier)
+                for r in frappe.get_all(ACCOUNT_DOCTYPE, filters={"supplier": doc.supplier, "docstatus": 1},
+                                        fields=ACCOUNT_FIELDS, order_by="is_default desc, creation asc")
+            ]
+            if problems and all(problems):
+                frappe.throw(problems[0])
 
     if doc.supplier_mpesa_account:
         acc = get_account(doc.supplier_mpesa_account)
@@ -220,6 +238,20 @@ def record_receiver_name(doc, received_name) -> None:
     doc.add_comment("Comment", message)
     frappe.log_error(title=f"M-Pesa B2B receiver name mismatch {doc.name}", message=message)
     _alert(message, doc)
+
+
+def confirm_receiver_name(doc, adopt_name: bool = False) -> None:
+    """A manager checked with the supplier: unblock the account, optionally taking M-Pesa's name."""
+    require(ADMIN_ROLES)
+    if not cint(doc.get("name_mismatch")):
+        return
+    values = {"name_mismatch": 0}
+    note = f"Receiver name {doc.get('last_receiver_name')!r} confirmed with the supplier by {frappe.session.user}"
+    if adopt_name and doc.get("last_receiver_name"):
+        values["expected_name"] = re.sub(r"^\s*\d+\s*-\s*", "", doc.last_receiver_name).strip()
+        note += f"; expected name changed from {doc.expected_name!r} to {values['expected_name']!r}"
+    frappe.db.set_value(ACCOUNT_DOCTYPE, doc.name, values)
+    doc.add_comment("Comment", note + ".")
 
 
 def _alert(message, doc) -> None:

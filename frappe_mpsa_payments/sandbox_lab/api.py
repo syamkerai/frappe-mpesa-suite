@@ -7,6 +7,7 @@ import frappe
 from frappe.utils import cint
 
 from ..daraja.callbacks import KIND_RESULT, rejected_response, safaricom_callback
+from ..daraja.guard import is_zero_code
 from . import payloads
 from .framework import AUTO, PENDING, RUN, post_callback
 from .guard import lab_enabled, require_lab, require_sandbox_settings
@@ -97,7 +98,7 @@ def simulate_c2b(mpesa_settings: str, shortcode: str, amount: int, bill_ref: str
         if error:
             frappe.throw(f"Could not reach Daraja ({error})")
         answers.append(data)
-        if str(data.get("ResponseCode")) == "0" or "accept" in str(data.get("ResponseDescription", "")).lower():
+        if is_zero_code(data.get("ResponseCode")) or "accept" in str(data.get("ResponseDescription", "")).lower():
             return data
     frappe.throw(f"Safaricom refused the simulated payment: {answers}")
 

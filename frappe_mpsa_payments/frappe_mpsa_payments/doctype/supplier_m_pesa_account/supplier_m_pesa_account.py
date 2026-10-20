@@ -27,6 +27,11 @@ class SupplierMPesaAccount(Document):
     def before_cancel(self):
         self.is_default = 0
 
+    @frappe.whitelist()
+    def confirm_receiver_name(self, adopt_name: int = 0):
+        """Unblock after a name mismatch, once a manager has checked with the supplier."""
+        supplier_accounts.confirm_receiver_name(self, bool(int(adopt_name or 0)))
+
 
 @frappe.whitelist()
 def accounts_for_supplier(supplier: str) -> list:
