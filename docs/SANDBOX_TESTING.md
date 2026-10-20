@@ -37,9 +37,14 @@ Type secrets into the ERPNext forms directly. Never paste them into chats or tic
 
 | Record | Settings |
 |---|---|
-| Mpesa Settings "Sandbox C2B" | **Sandbox** ticked; the key and secret; **Business Shortcode** and **Till Number** both = Shortcode 1 (600xxx). B2C, B2B, balance and reversal send the Business Shortcode as the paying party; Initiator Name and Password from Test Credentials; Company and Accounting Mapping. |
+| Mpesa Settings "Sandbox C2B" | **Sandbox** ticked; the key and secret; **Business Shortcode** and **Till Number** both = Shortcode 1 (600xxx). Under **APIs this record uses** tick Receive C2B, B2C Payouts, B2B Supplier Payments and Reversals. In sandbox, B2C, B2B, balance, status and reversal send the **Till Number** as the paying party; Initiator Name and Password from Test Credentials; Company and Accounting Mapping. |
 | Mpesa C2B Payment Register URL | For "Sandbox C2B". Register Status must be **Success**. |
-| Mpesa Settings "Sandbox STK" | **Sandbox** ticked; the key and secret; **Business Shortcode 174379**; the sandbox **Passkey**; Company. |
+| Mpesa Settings "Sandbox STK" | **Sandbox** ticked; the key and secret; **Business Shortcode 174379**; the sandbox **Passkey**; **Send STK Prompts** ticked; Company. |
+
+One record can also do everything, like a live Business One Account: Business Shortcode **174379**
+(STK), Till Number **600xxx** (C2B and every money-out API), all switches ticked, and the same record
+in every field of the test run. **Health Check** lists each record's switches and names any the run
+needs but the record lacks.
 | M-Pesa Suite Settings | Integration User. Keep both **Verify** switches on. Leave the IP allow-list **off** while testing, because the lab's replay and forgery posts come from the server itself. |
 | Test Sales Invoice | Submitted, with at least 5 × the test amount outstanding. |
 | Test Supplier | One **approved Supplier M-Pesa Account** to Party B (600000). For the lab, set **Hold New Supplier M-Pesa Accounts** to 0. |

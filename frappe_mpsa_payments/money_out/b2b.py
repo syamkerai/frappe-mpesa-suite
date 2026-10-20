@@ -8,6 +8,7 @@ Paid/Failed, a re-sent Result is ignored, and the queue timeout has its own URL.
 import frappe
 from frappe.utils import flt, getdate, nowdate
 
+from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..utils.phone import normalize_msisdn
 from . import supplier_accounts
@@ -24,12 +25,13 @@ def send_b2b(name: str) -> None:
     doc = lock_for_send(B2B_DOCTYPE, name)
     supplier_accounts.check_before_send(doc)
     settings = initiator_settings(doc.mpesa_settings)
+    apis.require(settings, apis.B2B)
     payload = daraja.b2b_payload(
         initiator=settings.initiator_name,
         security_credential=settings.security_credential,
         command_id=doc.command_id,
         amount=doc.amount,
-        party_a=settings.business_shortcode,
+        party_a=apis.initiator_party_a(settings),
         party_b=doc.receiver_shortcode,
         account_reference=doc.account_reference,
         fallback_reference=doc.name,
@@ -120,9 +122,17 @@ def validate_request(doc) -> None:
         doc.requester = msisdn
 
     settings = doc.mpesa_settings and frappe.db.get_value(
-        "Mpesa Settings", doc.mpesa_settings, ["business_shortcode", "transaction_limit"], as_dict=True
+        "Mpesa Settings",
+        doc.mpesa_settings,
+        ["name", "business_shortcode", "till_number", "sandbox", "transaction_limit", *apis.ALL],
+        as_dict=True,
     )
-    if settings and str(settings.business_shortcode or "").strip() == doc.receiver_shortcode:
+    if settings:
+        apis.require(settings, apis.B2B)
+    if settings and doc.receiver_shortcode in {
+        str(settings.business_shortcode or "").strip(),
+        apis.initiator_party_a(settings),
+    }:
         frappe.throw("Receiver is this business's own shortcode")
     if settings and flt(settings.transaction_limit) and flt(doc.amount) > flt(settings.transaction_limit):
         frappe.throw(f"Amount is above this shortcode's transaction limit of {settings.transaction_limit}")

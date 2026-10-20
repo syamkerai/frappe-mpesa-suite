@@ -452,3 +452,33 @@ Still open with Safaricom (pages conflict or are silent): STK Timestamp time zon
 an AccountReference over 12 characters; one app for C2B and B2C; `BusinessPayToBulk` vs
 `BusinessTransferFromMMFToUtility`; B2B from a Business One Account or a till; Pull offset
 semantics; the QueueTimeOut payload.
+
+## Per-API switches on Mpesa Settings (2026-10-19, uncommitted)
+
+One shortcode can collect and pay out (M-PESA Business One Account), so the single required
+upstream **API Type** is replaced by one switch per API, under **APIs this record uses**:
+Receive C2B, Send STK Prompts, B2C Payouts, B2B Supplier Payments, Reversals
+(`frappe_mpsa_payments/daraja/apis.py`).
+
+- **What a switch gates:** what the app *sends*. STK (Express Request, `initiate_stk_push`,
+  Mpesa API Client), C2B URL registration, B2C payouts, B2B payments and Reversals each refuse
+  with "does not have … ticked" when their switch is off: when the draft is saved, and again
+  just before sending. Payments Safaricom reports are always recorded, whatever the switches say.
+  Transaction Status and Account Balance are read-only and have no switch, because C2B and B2C
+  verification depend on Transaction Status.
+- **Migration** (patch `mpesa_settings_api_switches`): each record gets the switch for its old
+  API Type, plus every API it was already used for. That means C2B for any record with a C2B
+  Register URL, and B2C, B2B or Reversals for any record with a request of that kind. Everything
+  else starts off. **Old API Type** stays on the form, read-only. A new record created by code that
+  still sets `api_type` gets the matching switch.
+- **Booking received money:** when several records share a shortcode, the one with Receive C2B or
+  Send STK ticked wins (was: anything not "MPesa B2C"), then the oldest.
+- **Sandbox Party A:** instead of a new `sandbox_party_a` field, the sandbox test shortcode
+  (600xxx) already kept in **Till Number** (used for C2B registration, Pull and Status) is now also
+  Party A for B2C, B2B, Reversal and Balance (`apis.initiator_party_a`). Live records still send
+  the Business Shortcode, so nothing changes in production. One sandbox record can hold 174379 for
+  STK and 600xxx for everything else.
+- Saving a record needs at least one switch. Ticking a money-out switch without an Initiator shows
+  a warning. The Sandbox Lab health check lists each record's switches and flags any its tests need.
+- Not done: a separate Working Account bank mapping for B2B and B2C top-ups (B2B debits the Working
+  account, collections and B2C use Utility).

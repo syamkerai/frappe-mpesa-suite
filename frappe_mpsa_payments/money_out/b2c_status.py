@@ -9,6 +9,7 @@ matches our amount, and only while the payout is still unsettled.
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
+from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..utils.doctype_names import B2C_REQUEST_DOCTYPE
 from .common import callback_url, initiator_settings, log_callback, post
@@ -68,7 +69,7 @@ def start_query(b2c_request: str) -> str:
     payload = daraja.transaction_status_payload(
         initiator=settings.initiator_name,
         security_credential=settings.security_credential,
-        party_a=settings.business_shortcode,
+        party_a=apis.initiator_party_a(settings),
         transaction_id=b2c.transaction_id or None,
         original_conversation_id=None if b2c.transaction_id else b2c.originator_conversation_id,
         result_url=callback_url("b2c_status_result", ref=query.name),

@@ -7,6 +7,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from ....daraja import apis
 from ....daraja.guard import parse_allowlist
 
 ADMIN_ROLES = ("System Manager", "M-Pesa Manager")
@@ -20,9 +21,9 @@ class MpesaAPIClient(Document):
             validate_https(self.webhook_url, _("Webhook URL"))
         if self.allowed_ips and not parse_allowlist(self.allowed_ips):
             frappe.throw(_("Allowed Source IPs has no valid IP or CIDR."))
-        api_type = frappe.db.get_value("Mpesa Settings", self.mpesa_settings, "api_type")
-        if api_type and api_type != "MPesa Express":
-            frappe.throw(_("Prompts must be sent from an MPesa Express record, not {0}.").format(api_type))
+        settings = frappe.db.get_value("Mpesa Settings", self.mpesa_settings, list(apis.ALL), as_dict=True)
+        if settings and (reason := apis.refusal(settings, apis.STK, self.mpesa_settings)):
+            frappe.throw(_("Prompts are sent from this record. {0}").format(reason))
 
     def before_insert(self):
         # Both secrets always exist, so per-payment callback_url webhooks are signed too.

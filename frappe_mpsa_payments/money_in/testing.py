@@ -80,7 +80,9 @@ def _mpesa_settings() -> None:
             {
                 "doctype": "Mpesa Settings",
                 "payment_gateway_name": SETTINGS,
-                "api_type": "MPesa Express",
+                "use_c2b": 1,
+                "use_stk": 1,
+                "use_reversal": 1,
                 "paybill_type": "Pay Bill",
                 "sandbox": 1,
                 "company": COMPANY,

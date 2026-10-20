@@ -11,7 +11,7 @@ For chatbots (WhatsApp, web chat), online shops and any outside system that need
 
 In the ERP: **Mpesa API Client → New**
 - **Client Name**, e.g. `WhatsApp Bot`
-- **Prompt On**: the MPesa Express settings, e.g. `208911`
+- **Prompt On**: the Mpesa Settings the prompts come from (it needs **Send STK Prompts** ticked), e.g. `208911`
 - Allowed actions, maximum amount, optional allowed IPs and rate limit
 - **Webhook URL** (HTTPS) to be told when payments finish
 

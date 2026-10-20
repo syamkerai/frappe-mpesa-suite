@@ -6,6 +6,7 @@ import frappe
 from frappe.model.document import Document
 from frappe_mpsa_payments.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 from frappe.exceptions import DoesNotExistError
+from ....daraja import apis
 from ....permissions import ADMIN_ROLES, require
 from ....utils.utils import (
     handle_successful_transaction,
@@ -58,6 +59,8 @@ class MpesaExpressRequest(Document):
                 self.validate_payment_request_amount()
 
         self.set_missing_values()
+        if self.settings and (self.is_new() or self.docstatus == 0):
+            apis.require(self.settings, apis.STK)  # submitted requests still take their callbacks
 
         if self.phone_number and not validate_phone_number(self.phone_number):
             frappe.throw(
@@ -96,6 +99,8 @@ class MpesaExpressRequest(Document):
         #         frappe.throw("Missing reference document to determine conversion rate.")
 
     def before_submit(self):
+        if self.settings:
+            apis.require(self.settings, apis.STK)
         if not self.amount or self.amount <= 0:
             frappe.throw("Amount must be greater than zero to initiate STK Push.")
         if not self.phone_number:

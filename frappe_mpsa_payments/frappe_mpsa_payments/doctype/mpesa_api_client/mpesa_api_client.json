@@ -88,7 +88,7 @@
    "options": "Mpesa Settings",
    "label": "Prompt On (Mpesa Settings)",
    "reqd": 1,
-   "description": "Paybill or till the STK prompts are sent from (an MPesa Express record)."
+   "description": "Paybill or till the STK prompts are sent from (a record with Send STK Prompts ticked)."
   },
   {
    "fieldname": "max_amount",

@@ -7,6 +7,7 @@ import requests
 from frappe.model.document import Document
 from frappe.utils import get_datetime
 
+from ...daraja.apis import initiator_party_a
 from ...utils.doctype_names import B2C_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
 from ..abstract import B2CConnector
 from ..base_connector import (
@@ -64,6 +65,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         self.initiator_name = s.initiator_name
         self.security_credential = s.security_credential
         self.business_shortcode = s.business_shortcode
+        self.party_a = initiator_party_a(s)  # the 600xxx test shortcode in sandbox
         self._token = s.access_token
         self._expiry = s.token_expiry
         self._base_url = (
@@ -89,7 +91,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             "SecurityCredential": self.security_credential,
             "CommandID": b2c_request_doc.commandid,
             "Amount": int(b2c_request_doc.amount),  # whole shillings, checked before sending
-            "PartyA": self.business_shortcode,
+            "PartyA": self.party_a,
             "PartyB": b2c_request_doc.phone_number,
             "Remarks": b2c_request_doc.remarks,
             # A queue timeout is not a result: the payout may still complete, so it must

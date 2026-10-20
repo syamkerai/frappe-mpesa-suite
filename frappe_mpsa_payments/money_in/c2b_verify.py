@@ -19,7 +19,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, get_url, now_datetime
 
-from ..daraja import verify
+from ..daraja import apis, verify
 from ..daraja.money_out import result_values, transaction_status_payload
 from .common import EXPRESS, REGISTER, named_lock, settings_for_shortcode
 
@@ -122,7 +122,7 @@ def send_query(ir_name: str) -> None:
     payload = transaction_status_payload(
         initiator=settings.initiator_name,
         security_credential=settings.security_credential,
-        party_a=settings.business_shortcode,
+        party_a=apis.initiator_party_a(settings),
         transaction_id=data["transid"],
         result_url=callback_url(f"{RESULT_METHOD}?ir={ir_name}"),  # token appended
         queue_timeout_url=callback_url(TIMEOUT_METHOD),

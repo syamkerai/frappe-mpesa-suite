@@ -14,6 +14,6 @@ frappe.ui.form.on("Mpesa API Client", {
 					frm.call("rotate_webhook_secret").then(() => frm.reload_doc())
 				), __("Credentials"));
 		}
-		frm.set_query("mpesa_settings", () => ({ filters: { api_type: "MPesa Express" } }));
+		frm.set_query("mpesa_settings", () => ({ filters: { use_stk: 1 } }));
 	},
 });

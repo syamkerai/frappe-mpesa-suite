@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 
 import frappe
 
+from frappe_mpsa_payments.daraja import apis
 from frappe_mpsa_payments.daraja.callbacks import with_token
 from frappe_mpsa_payments.daraja.guard import callback_url_problems
 import requests
@@ -47,6 +48,7 @@ class MpesaC2BPaymentRegisterURL(Document):
         sandbox_url = "https://sandbox.safaricom.co.ke"
         live_url = "https://api.safaricom.co.ke"
         mpesa_settings = frappe.get_doc("Mpesa Settings", self.mpesa_settings)
+        apis.require(mpesa_settings, apis.C2B)
         env = "production" if not mpesa_settings.sandbox else "sandbox"
         business_shortcode = (
             mpesa_settings.business_shortcode

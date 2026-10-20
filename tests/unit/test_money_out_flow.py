@@ -21,6 +21,10 @@ SETTINGS = {
     "sandbox": 1,
     "transaction_limit": 0,
     "consumer_key": "k",
+    "use_c2b": 1,
+    "use_b2c": 1,
+    "use_b2b": 1,
+    "use_reversal": 1,
 }
 
 
@@ -225,6 +229,31 @@ def test_reversal_send_body(env):
     assert body["RecieverIdentifierType"] == "11" and body["ReceiverParty"] == "600999"
     assert body["Amount"] == 500
     assert row["status"] == "Initiated"
+
+
+# ---------------------------------------------------------------- per-API switches
+@pytest.mark.parametrize(
+    "switch,make,send",
+    [
+        ("use_b2b", lambda env: b2b_row(env), lambda env: env.b2b.send_b2b("MB2B-1")),
+        ("use_reversal", lambda env: reversal_row(env), lambda env: env.reversal.send_reversal("MRV-1")),
+    ],
+)
+def test_record_without_the_switch_sends_nothing(env, switch, make, send):
+    env.frappe.db.table("Mpesa Settings")[SETTINGS["name"]][switch] = 0
+    row = make(env)
+    with pytest.raises(env.frappe.ValidationError, match="ticked under APIs"):
+        send(env)
+    assert env.sent == [] and row["status"] == "Not Initiated"
+
+
+def test_sandbox_money_out_uses_the_test_shortcode_in_till_number(env):
+    # One sandbox record: 174379 for STK in Business Shortcode, 600xxx for the rest in Till Number.
+    env.frappe.db.table("Mpesa Settings")[SETTINGS["name"]].update(business_shortcode="174379", till_number="600999")
+    reversal_row(env)
+    env.responses.append(Resp(ACK))
+    env.reversal.send_reversal("MRV-1")
+    assert env.sent[0][1]["ReceiverParty"] == "600999"
 
 
 @pytest.mark.parametrize("code,status", [(0, "Reversed"), ("R000001", "Already Reversed"), ("R000002", "Failed")])

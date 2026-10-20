@@ -12,6 +12,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt
 
+from ...daraja import apis
 from ...daraja.callbacks import KIND_C2B, KIND_PULL, KIND_RESULT, safaricom_callback
 from ...daraja.guard import daraja_timestamp, stk_amount, truncate_reference
 from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
@@ -205,7 +206,7 @@ def get_account_balance(name: str) -> Any:
             "SecurityCredential": settings.get_password("security_credential")
             or security_credential,
             "CommandID": "AccountBalance",
-            "PartyA": settings.business_shortcode,
+            "PartyA": apis.initiator_party_a(settings),
             "IdentifierType": "4",
             "Remarks": "Balance",
             "QueueTimeOutURL": timeout_url,
@@ -337,6 +338,8 @@ def initiate_stk_push(**args) -> any:
         frappe.log_error(
             _("Missing required fields: {0}").format(", ".join(missing_fields))
         )
+    if args.get("payment_gateway"):
+        apis.require(args.payment_gateway[6:], apis.STK)  # outside the try: the caller must see it
 
     try:
         callback_url = build_callback_url(

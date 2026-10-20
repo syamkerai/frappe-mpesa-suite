@@ -8,6 +8,8 @@ from contextlib import contextmanager
 import frappe
 from frappe.utils import cint, cstr, flt, getdate
 
+from ..daraja import apis
+
 SUITE = "M-Pesa Suite Settings"
 REGISTER = "Mpesa C2B Payment Register"
 EXPRESS = "Mpesa Express Request"
@@ -46,30 +48,27 @@ def erpnext_installed() -> bool:
 
 
 # ---------------------------------------------------------------- shortcode -> books
-B2C_ONLY = "MPesa B2C (Business to Customer)"
-
-
 def settings_for_shortcode(shortcode) -> str | None:
     """Mpesa Settings name for a paybill/till number (business shortcode or till).
 
     One shortcode may do everything (Safaricom "Business One Account": Paybill, STK, B2C and
     B2B on one number), ideally as one record. When several records share the number, money
-    received is booked with a record that collects (C2B / Express) before a B2C-only one,
-    then the oldest, so the choice never depends on database order.
+    received is booked with a record that collects (C2B or STK ticked) before one that only
+    pays out, then the oldest, so the choice never depends on database order.
     """
     code = cstr(shortcode).strip()
     if not code:
         return None
     rows = frappe.get_all(
         "Mpesa Settings",
-        fields=["name", "business_shortcode", "till_number", "api_type"],
+        fields=["name", "business_shortcode", "till_number", *apis.COLLECTING],
         order_by="creation asc",
     )
     # strip(): tolerate stray spaces stored on the till (seen in production data)
     matches = [r for r in rows if code in (cstr(r.business_shortcode).strip(), cstr(r.till_number).strip())]
     if not matches:
         return None
-    matches.sort(key=lambda r: 1 if r.api_type == B2C_ONLY else 0)  # stable: oldest first otherwise
+    matches.sort(key=lambda r: 0 if apis.collects(r) else 1)  # stable: oldest first otherwise
     return matches[0].name
 
 

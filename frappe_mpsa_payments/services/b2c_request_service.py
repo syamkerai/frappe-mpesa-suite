@@ -4,6 +4,7 @@ from frappe_mpsa_payments.daraja.callbacks import with_token
 from frappe.utils import flt, get_url
 
 from frappe_mpsa_payments.connectors.factory import get_b2c_connector
+from frappe_mpsa_payments.daraja import apis
 from frappe_mpsa_payments.daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from frappe_mpsa_payments.utils.doctype_names import B2C_REQUEST_DOCTYPE
 from frappe_mpsa_payments.utils.phone import normalize_msisdn
@@ -47,6 +48,7 @@ def create_b2c_request(doc_name: str) -> dict:
 
     if not doc.mpesa_settings:
         frappe.throw(f"Select the Mpesa Settings to pay from on {doc_name}")
+    apis.require(doc.mpesa_settings, apis.B2C)
     provider = "Mpesa"
     settings_name = doc.mpesa_settings
 

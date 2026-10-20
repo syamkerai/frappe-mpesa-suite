@@ -8,12 +8,21 @@ from urllib.parse import urlparse
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, get_url, now_datetime
 
+from ..daraja import apis
 from ..daraja.guard import callback_url_problems
 from .framework import CASE, FAILED, PASSED, PENDING, RUN, SKIPPED, WAITING, Ctx, Fail, Skip, post_callback, rejected
 from .guard import lab_enabled, require_lab
 from .scenarios import BY_KEY, SCENARIOS
 
 PING = "frappe_mpsa_payments.sandbox_lab.api.ping"
+
+# Switches each test-run record needs; the reversal test reverses a receipt on the C2B record.
+LAB_APIS = {
+    "c2b_settings": {apis.C2B, apis.REVERSAL},
+    "stk_settings": {apis.STK},
+    "b2c_settings": {apis.B2C},
+    "b2b_settings": {apis.B2B},
+}
 
 
 # ---------------------------------------------------------------- loading
@@ -209,6 +218,19 @@ def health_check(run) -> list:
                 add("error", f"Initiator: {name}", "Initiator Name / Password missing (Daraja Test Credentials)")
         if field == "stk_settings" and not frappe.db.get_value("Payment Gateway", {"gateway_controller": name}, "name"):
             add("error", f"Payment Gateway: {name}", "missing: set the Company on this Mpesa Settings and save")
+
+    # A record may fill several roles, so collect what each needs before checking its switches.
+    needs = {}
+    for field, wanted in LAB_APIS.items():
+        if run.get(field):
+            needs.setdefault(run.get(field), set()).update(wanted)
+    for name, wanted in needs.items():
+        s = frappe.db.get_value("Mpesa Settings", name, list(apis.ALL), as_dict=True) or {}
+        missing = [apis.LABELS[api] for api in apis.ALL if api in wanted and not apis.enabled(s, api)]
+        if missing:
+            add("error", f"APIs: {name}", "tick " + ", ".join(missing) + " under APIs this record uses")
+        else:
+            add("ok", f"APIs: {name}", apis.describe(s))
 
     try:
         status, answer = post_callback(PING, {"ping": 1})

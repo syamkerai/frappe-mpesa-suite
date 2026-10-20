@@ -14,6 +14,7 @@ from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
 
 from ....compat import in_test
+from ....daraja import apis
 from ....permissions import ADMIN_ROLES, FINANCE_ROLES, require_for_direct_call
 from ....daraja.callbacks import KIND_PULL, KIND_RESULT, safaricom_callback, with_token
 from frappe.utils import (
@@ -144,7 +145,27 @@ class MpesaSettings(Document):
                 if rate.currency == "KES":
                     frappe.throw(_("Conversion rate for KES cannot be set."))
 
+        self.validate_api_switches()
         self.warn_shared_shortcode()
+
+    def validate_api_switches(self) -> None:
+        """At least one API; money-out APIs need an API operator (Initiator)."""
+        if self.is_new() and self.api_type:
+            # Created by code that still sets the old single-purpose field.
+            legacy = apis.switches_from_legacy(self.api_type)
+            for api in (apis.C2B, apis.STK, apis.B2C):
+                self.set(api, legacy[api])
+        if not apis.enabled_apis(self):
+            frappe.throw(_("Tick at least one API under APIs this record uses."))
+        missing = [apis.LABELS[api] for api in apis.PAYING if apis.enabled(self, api)]
+        if missing and not (self.initiator_name and (self.initiator_password or self.security_credential)):
+            frappe.msgprint(
+                _("{0} need an Initiator Name and Initiator Password (an API operator with a role for each).").format(
+                    ", ".join(missing)
+                ),
+                title=_("Initiator missing"),
+                indicator="orange",
+            )
 
     def warn_shared_shortcode(self) -> None:
         """One shortcode can do Paybill, STK, B2C and B2B (Safaricom Business One Account); keep it on
@@ -511,11 +532,7 @@ def process_transaction_status(integration_request_name):
             initiator=settings.initiator_name,
             security_credential=settings.security_credential,
             transaction_id=transaction_id,
-            party_a=(
-                settings.business_shortcode
-                if not settings.sandbox
-                else settings.till_number
-            ),
+            party_a=apis.initiator_party_a(settings),
             identifier_type=4,  # Organization Short Code
             remarks=remarks,
             occasion="Ok",
