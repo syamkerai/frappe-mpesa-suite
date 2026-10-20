@@ -482,3 +482,8 @@ Receive C2B, Send STK Prompts, B2C Payouts, B2B Supplier Payments, Reversals
   a warning. The Sandbox Lab health check lists each record's switches and flags any its tests need.
 - Not done: a separate Working Account bank mapping for B2B and B2C top-ups (B2B debits the Working
   account, collections and B2C use Utility).
+- Rehearsed on a restored copy of Astral's live site (2026-10-20): Navari 15.3.1 replaced by the
+  suite, `migrate` clean, no rows or columns lost. The rehearsal showed 4134019 (old type "MPesa
+  B2C") had sent 21 STK prompts and receives C2B, so the patch also keeps STK for any record with
+  Express Requests and C2B for any record with C2B receipts on its shortcode. Result there:
+  4139683 = B2C; 4134019 = C2B + STK + B2C; 208911 = C2B + STK.

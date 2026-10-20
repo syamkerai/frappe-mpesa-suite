@@ -33,6 +33,12 @@ def test_legacy_keeps_every_api_the_record_was_used_for():
     assert flags[apis.B2B] == 0 and flags[apis.REVERSAL] == 0
 
 
+def test_b2c_record_that_sent_stk_keeps_stk():
+    # Astral's 4134019: API Type "MPesa B2C", yet it sent STK prompts and has C2B URLs.
+    flags = apis.switches_from_legacy(B2C, registered_c2b=True, sent_stk=True, sent_b2c=True)
+    assert on(flags) == sorted([apis.B2C, apis.C2B, apis.STK])
+
+
 def test_legacy_money_out_only_when_already_used():
     flags = apis.switches_from_legacy(C2B, sent_b2b=True, sent_reversal=True)
     assert on(flags) == sorted([apis.C2B, apis.B2B, apis.REVERSAL])

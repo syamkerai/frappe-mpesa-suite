@@ -95,6 +95,7 @@ def switches_from_legacy(
     api_type: str | None,
     *,
     registered_c2b: bool = False,
+    sent_stk: bool = False,
     sent_b2c: bool = False,
     sent_b2b: bool = False,
     sent_reversal: bool = False,
@@ -102,8 +103,9 @@ def switches_from_legacy(
     """Switch values for an existing record, from its old ``api_type`` and what it was used for.
 
     Upstream let any record do anything, so each API a record was already used for stays on:
-    C2B URLs registered on an Express record keep C2B, a B2C payout from an Express record's
-    Mode of Payment keeps B2C. Everything else starts off.
+    C2B URLs registered (or C2B receipts) keep C2B, Express Requests keep STK, a B2C payout
+    from the record's Mode of Payment keeps B2C. Everything else starts off. (Astral's
+    4134019 is "MPesa B2C" but sent STK prompts and receives C2B.)
     """
     flags = {api: 0 for api in ALL}
     legacy = LEGACY_API_TYPES.get(str(api_type or "").strip())
@@ -111,6 +113,8 @@ def switches_from_legacy(
         flags[legacy] = 1
     if registered_c2b:
         flags[C2B] = 1
+    if sent_stk:
+        flags[STK] = 1
     if sent_b2c:
         flags[B2C] = 1
     if sent_b2b:
