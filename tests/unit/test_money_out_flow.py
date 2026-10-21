@@ -208,6 +208,111 @@ def test_b2b_queue_timeout_flags_but_never_settles(env):
     assert row["queue_timed_out"] == 1 and row["status"] == "Initiated"
 
 
+# Names are sequential and, with enforcement off, anyone can post a "Result": ``ref`` alone
+# must never settle a request that got an ack, nor one that cannot have reached Safaricom.
+FORGED = {"ResultType": 0, "ResultCode": 0, "ResultDesc": "ok", "TransactionID": "QAB1234567"}
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_b2b_result_without_ids_never_settles_an_acked_request(env, code):
+    row = b2b_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.b2b_result(Result=dict(FORGED, ResultCode=code), ref="MB2B-1")
+    assert row["status"] == "Initiated" and not row.get("result_code") and env.frappe.enqueued == []
+    assert env.frappe.errors  # logged as a mismatch
+
+    env.api.b2b_result(Result=b2b_result(), ref="MB2B-1")  # the real Result still lands
+    assert row["status"] == "Paid" and row["transaction_id"] == "QKA81LK5CY"
+
+
+def test_reversal_result_without_ids_never_settles_an_acked_request(env):
+    row = reversal_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.reversal_result(Result=FORGED, ref="MRV-1")
+    assert row["status"] == "Initiated" and not row.get("result_code")
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "Failed", "error_code": "400.002.02"},  # ack refused: nothing was processed
+        {"status": "Failed", "error_message": "Could not connect to M-Pesa; nothing was sent."},
+        {"status": "Not Initiated"},
+    ],
+)
+def test_b2b_result_by_ref_only_for_a_request_that_may_have_been_sent(env, state):
+    row = b2b_row(env, **state)
+    env.api.b2b_result(Result=b2b_result(conv="AG_made_up", occ="OCID_made_up"), ref="MB2B-1")
+    assert row["status"] == state["status"] and not row.get("result_code") and env.frappe.enqueued == []
+
+
+def test_b2b_result_by_ref_needs_ids(env):
+    row = b2b_row(env, status="Unknown")
+    env.api.b2b_result(Result=FORGED, ref="MB2B-1")  # Safaricom's Results always carry both IDs
+    assert row["status"] == "Unknown" and env.frappe.enqueued == []
+
+
+# Frappe reads a list filter value as [operator, value]: a forged ConversationID of
+# ["is", "set"] would match any acked request, with no ref and no token.
+OPERATOR_IDS = [["is", "set"], ["like", "%"], ["!=", ""]]
+
+
+@pytest.mark.parametrize("key", ["ConversationID", "OriginatorConversationID"])
+@pytest.mark.parametrize("value", OPERATOR_IDS)
+def test_b2b_result_with_an_operator_for_an_id_matches_nothing(env, key, value):
+    row = b2b_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.b2b_result(Result=dict(FORGED, **{key: value}))
+    assert row["status"] == "Initiated" and not row.get("result_code") and env.frappe.enqueued == []
+
+
+@pytest.mark.parametrize("value", OPERATOR_IDS)
+def test_reversal_result_with_an_operator_for_an_id_matches_nothing(env, value):
+    row = reversal_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.reversal_result(Result=dict(FORGED, ConversationID=value, OriginatorConversationID=value))
+    assert row["status"] == "Initiated" and not row.get("result_code")
+
+
+def test_b2b_result_by_ref_with_operator_ids_is_refused(env):
+    row = b2b_row(env, status="Unknown")
+    env.api.b2b_result(Result=dict(FORGED, ConversationID=["is", "set"], OriginatorConversationID=["like", "%"]),
+                       ref="MB2B-1")
+    assert row["status"] == "Unknown" and env.frappe.enqueued == []
+
+
+def test_b2b_result_with_real_safaricom_ids_still_matches(env):
+    conv, occ = "AG_20191219_00005797af5d7d75f652", "16740-34861180-1"
+    row = b2b_row(env, status="Initiated", conversation_id=conv, originator_conversation_id=occ)
+    env.api.b2b_result(Result=b2b_result(conv=conv, occ=occ))
+    assert row["status"] == "Paid" and row["transaction_id"] == "QKA81LK5CY"
+
+
+def _as_http(env, monkeypatch, **url_args):
+    """Run the endpoint as Frappe does for Safaricom's JSON POST: the query string (ref, t)
+    reaches the handler only through ``frappe.local.request.args``, never the kwargs."""
+    monkeypatch.setattr(env.api, "callback_token", lambda: "callback-token")
+    env.frappe.local.request = fake_frappe._dict(args=url_args)
+
+
+def test_result_ref_is_read_from_the_url_next_to_the_token(env, monkeypatch):
+    row = b2b_row(env, status="Unknown")
+    _as_http(env, monkeypatch, ref="MB2B-1", t="callback-token")
+    env.api.b2b_result(Result=b2b_result())
+    assert row["status"] == "Paid" and row["conversation_id"] == "AG_1"
+
+
+@pytest.mark.parametrize("url_args", [{"ref": "MB2B-1"}, {"ref": "MB2B-1", "t": "wrong"}, {}])
+def test_result_ref_without_the_token_is_ignored(env, monkeypatch, url_args):
+    row = b2b_row(env, status="Unknown")
+    _as_http(env, monkeypatch, **url_args)
+    env.api.b2b_result(Result=b2b_result(), ref="MB2B-1")  # a ref in the body counts for nothing
+    assert row["status"] == "Unknown" and env.frappe.enqueued == []
+
+
+def test_queue_timeout_ref_is_read_from_the_url(env, monkeypatch):
+    row = b2b_row(env, status="Initiated", conversation_id="AG_1")
+    _as_http(env, monkeypatch, ref="MB2B-1", t="callback-token")
+    env.api.b2b_queue_timeout(Result={"ResultCode": 1})
+    assert row["queue_timed_out"] == 1 and row["status"] == "Initiated"
+
+
 # ---------------------------------------------------------------- Reversal
 def reversal_row(env, **kw):
     env.frappe.db.table("Mpesa C2B Payment Register")["MPC2B-1"] = {
@@ -400,6 +505,49 @@ def test_status_queue_timeout(env):
     name = start(env)
     env.api.status_queue_timeout(ref=name)
     assert env.frappe.db.table("Mpesa B2C Status Query")[name]["status"] == "Timed Out"
+
+
+def test_status_result_without_ids_never_settles_a_payout(env):
+    row = payout(env)
+    name = start(env)
+    forged = status_result(state="Failed")  # "Failed" needs no amount match
+    forged.pop("ConversationID"), forged.pop("OriginatorConversationID")
+    env.api.b2c_status_result(Result=forged, ref=name)
+    assert row["status"] == "Initiated" and row["result_code"] is None and env.frappe.enqueued == []
+    assert env.frappe.db.table("Mpesa B2C Status Query")[name]["status"] == "Sent"
+
+
+@pytest.mark.parametrize("key", ["ConversationID", "OriginatorConversationID"])
+@pytest.mark.parametrize("value", OPERATOR_IDS)
+def test_status_result_with_an_operator_for_an_id_settles_nothing(env, key, value):
+    row = payout(env)
+    name = start(env)
+    forged = status_result(state="Failed")  # "Failed" needs no amount match
+    forged.pop("ConversationID"), forged.pop("OriginatorConversationID")
+    env.api.b2c_status_result(Result=dict(forged, **{key: value}))
+    assert row["status"] == "Initiated" and row["result_code"] is None and env.frappe.enqueued == []
+    assert env.frappe.db.table("Mpesa B2C Status Query")[name]["status"] == "Sent"
+
+
+def test_status_result_after_a_lost_ack_is_matched_by_ref(env):
+    row = payout(env)
+    env.responses.append(requests.ReadTimeout())  # the query may have reached Safaricom
+    name = env.status.start_query("B2C-26-10-000001")
+    assert env.frappe.db.table("Mpesa B2C Status Query")[name]["status"] == "Failed to Send"
+    env.api.b2c_status_result(Result=status_result(), ref=name)
+    assert row["status"] == "Paid" and row["transaction_id"] == "LKXXXX1234"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [requests.ConnectTimeout(), Resp({"errorCode": "500.001.1001", "errorMessage": "Unable to lock subscriber"}, 500)],
+)
+def test_status_result_by_ref_only_for_a_query_that_may_have_been_sent(env, answer):
+    row = payout(env)
+    env.responses.append(answer)  # never sent, or refused: Safaricom has nothing to answer
+    name = env.status.start_query("B2C-26-10-000001")
+    env.api.b2c_status_result(Result=status_result(), ref=name)
+    assert row["status"] == "Initiated" and row["result_code"] is None and env.frappe.enqueued == []
 
 
 # ---------------------------------------------------------------- role gates

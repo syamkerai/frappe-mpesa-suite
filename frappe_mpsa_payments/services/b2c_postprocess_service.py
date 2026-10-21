@@ -1,4 +1,5 @@
 import frappe
+from frappe.utils import flt
 
 from frappe_mpsa_payments.accounting.journal_service import create_journal_entry
 from frappe_mpsa_payments.accounting.payment_entry_service import (
@@ -25,6 +26,16 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> bo
         "B2C Payment Disbursement Reference", reference_name, "name", for_update=True
     )
     ref = frappe.get_doc("B2C Payment Disbursement Reference", reference_name)
+    if not payout_receipt(ref):
+        # The receipt is what tells this payout's entry apart from another row's for the
+        # same document; without it an entry could not be found again, so every retry
+        # would book once more. Recorded, and left to staff.
+        _record_booking_error(
+            ref.b2c_disbursement_request,
+            f"Paid payout has no M-Pesa receipt (Reference No on row {ref.name}); "
+            "not booked. Book it by hand.",
+        )
+        return False
     if not already_booked(disbursement_name, ref):
         frappe.db.savepoint("mpesa_b2c_booking")
         try:
@@ -143,28 +154,150 @@ def retry_unbooked_payouts(limit: int = 100) -> None:
             frappe.db.commit()
 
 
+def payout_receipt(ref) -> str:
+    """The payout's own M-Pesa receipt, copied to the row from its request when it is Paid."""
+    return (ref.reference_no or "").strip()
+
+
 def already_booked(disbursement_name: str, ref) -> bool:
     """True when a live (draft or submitted) entry already books this reference row."""
     return booked_docstatus(disbursement_name, ref) is not None
 
 
-def booked_docstatus(disbursement_name: str, ref) -> int | None:
-    """Highest docstatus of the live entry booking this row: 1 submitted, 0 draft, None none."""
+def booked_docstatus(disbursement_name: str, ref, for_update: bool = False) -> int | None:
+    """Highest docstatus of the live entry booking this row: 1 submitted, 0 draft, None none.
+
+    Keyed on the payout's receipt, which the entry carries (Payment Entry Reference No,
+    Journal Entry Cheque No): several rows of one disbursement may pay the same document
+    (an amount over the B2C limit split, one claim paid to many numbers), and each row is
+    its own payout with its own entry. Not on the disbursement link, so an entry made
+    before the suite or by hand for this receipt is found too.
+
+    ``for_update``: every read is a locking read, which sees what is committed now (and waits
+    for a cancel or submit still in flight) instead of this transaction's snapshot. The
+    retry guard passes it: an entry cancelled after the snapshot must not count as booked.
+    """
+    receipt = payout_receipt(ref)
+    if not receipt:
+        return None
     if ref.reference_doctype == "Salary Slip":
-        rows = frappe.db.sql(
-            """SELECT MAX(je.docstatus) FROM `tabJournal Entry Account` jea
-            JOIN `tabJournal Entry` je ON je.name = jea.parent
-            WHERE jea.b2c_payment_disbursement = %s AND jea.party = %s
-            AND je.docstatus < 2""",
-            (disbursement_name, ref.party),
+        # a Journal Entry names the employee, not the slip
+        entries = frappe._dict(
+            live="""FROM `tabJournal Entry` je
+            JOIN `tabJournal Entry Account` jea ON jea.parent = je.name
+            WHERE jea.party = %s AND je.docstatus < 2""",
+            key=(ref.party,),
+            alias="je",
+            ref_no="je.cheque_no",
+            amount="jea.debit_in_account_currency",
+            tag="jea.b2c_payment_disbursement",
+            rows={"reference_doctype": "Salary Slip", "party": ref.party},
         )
     else:
-        rows = frappe.db.sql(
-            """SELECT MAX(pe.docstatus) FROM `tabPayment Entry Reference` per
+        # The entry must also pay this document: one booked for the receipt but against
+        # another document (or none) leaves this one owing, so it must not count as booked.
+        # An advance on an order that ERPNext later allocated to an invoice (Get Advances,
+        # Payment Reconciliation) keeps the order only as the row's advance voucher.
+        on_document = "per.reference_doctype = %s AND per.reference_name = %s"
+        key = (ref.reference_doctype, ref.reference_name)
+        if frappe.db.has_column("Payment Entry Reference", "advance_voucher_no"):
+            on_document = f"(({on_document}) OR (per.advance_voucher_type = %s AND per.advance_voucher_no = %s))"
+            key = key * 2
+        entries = frappe._dict(
+            live=f"""FROM `tabPayment Entry Reference` per
             JOIN `tabPayment Entry` pe ON pe.name = per.parent
-            WHERE per.b2c_payment_disbursement = %s AND per.reference_doctype = %s
-            AND per.reference_name = %s AND pe.docstatus < 2""",
-            (disbursement_name, ref.reference_doctype, ref.reference_name),
+            WHERE {on_document} AND pe.docstatus < 2""",
+            key=key,
+            alias="pe",
+            ref_no="pe.reference_no",
+            amount="per.allocated_amount",
+            tag="per.b2c_payment_disbursement",
+            rows={"reference_doctype": ref.reference_doctype, "reference_name": ref.reference_name},
+            # payment_entry_service writes the payout's own receipt on every entry it makes
+            receipt_is_own=True,
         )
+    entries.locking = "FOR UPDATE" if for_update and frappe.db.db_type == "mariadb" else ""
+    entries.for_update = for_update
+    rows = frappe.db.sql(
+        f"SELECT MAX({entries.alias}.docstatus) {entries.live} AND {entries.ref_no} = %s {entries.locking}",
+        (*entries.key, receipt),
+    )
     value = rows[0][0] if rows else None
-    return None if value is None else int(value)
+    if value is not None:
+        return int(value)
+    return _spare_entry_docstatus(disbursement_name, ref, receipt, entries)
+
+
+def _disbursement_rows(filters: dict, fields: list, for_update: bool = False) -> list:
+    """Reference rows; ``for_update``: a locking read (committed now, not the snapshot)."""
+    if for_update:
+        return frappe.db.get_values(
+            "B2C Payment Disbursement Reference", filters, fields, as_dict=True, for_update=True
+        )
+    return frappe.get_all("B2C Payment Disbursement Reference", filters=filters, fields=fields)
+
+
+def _spare_entry_docstatus(disbursement_name: str, ref, receipt: str, entries) -> int | None:
+    """No entry carries the receipt, but one this flow made for the disbursement may still be
+    this payout's: a draft made without it (Journal Entries made before journal_service set
+    the receipt as Cheque No), or one staff submitted with another Reference No or as
+    another voucher type.
+
+    Such entries (tagged with the disbursement, for this document or employee and of this
+    payout's amount, and not another payout's by its receipt) are shared among the
+    disbursement's payouts of that amount with no entry by their receipt: none is booked
+    twice, and this payout is booked once there is one for each of them.
+
+    A Payment Entry that carries a receipt of one of the disbursement's payouts is that
+    payout's (a duplicate at most), never a spare: Payment Entries get their payout's receipt
+    when they are made, so only a Journal Entry may carry another payout's receipt (a legacy
+    stamp script that picks a receipt by amount). Counting such a duplicate for this payout
+    would mark it booked with no entry of its own, and cancelling the duplicate would then
+    leave the document owing what was paid.
+    """
+    amount = flt(ref.allocated_amount, 2)
+    paid = _disbursement_rows(
+        {"parent": disbursement_name, "payment_status": "Paid", **entries.rows},
+        ["reference_no", "allocated_amount"],
+        entries.for_update,
+    )
+    receipts = {_receipt_key(receipt)} | {
+        _receipt_key(r.reference_no) for r in paid if payout_receipt(r) and flt(r.allocated_amount, 2) == amount
+    }
+    with_entry = {
+        _receipt_key(no)
+        for (no,) in frappe.db.sql(
+            f"SELECT DISTINCT {entries.ref_no} {entries.live} AND {entries.ref_no} IN %s {entries.locking}",
+            (*entries.key, tuple(receipts)),
+        )
+    }
+    spare = sorted(
+        (
+            (int(docstatus), _receipt_key(no))
+            for _, docstatus, no, entry_amount in frappe.db.sql(
+                f"""SELECT DISTINCT {entries.alias}.name, {entries.alias}.docstatus, {entries.ref_no},
+                {entries.amount} {entries.live} AND {entries.tag} = %s {entries.locking}""",
+                (*entries.key, disbursement_name),
+            )
+            if flt(entry_amount, 2) == amount
+        ),
+        reverse=True,  # submitted first
+    )
+    if entries.receipt_is_own:
+        payouts = {
+            _receipt_key(r.reference_no)
+            for r in _disbursement_rows({"parent": disbursement_name}, ["reference_no"], entries.for_update)
+            if (r.reference_no or "").strip()
+        }
+        spare = [e for e in spare if e[1] not in payouts]
+    for no in with_entry:  # that payout's own entry, not a spare one
+        own = next((e for e in spare if e[1] == no), None)
+        if own:
+            spare.remove(own)
+    waiting = len(receipts - with_entry)  # this payout among them
+    # submitted only when each of them can have a submitted one
+    return spare[waiting - 1][0] if len(spare) >= waiting else None
+
+
+def _receipt_key(value) -> str:
+    return (value or "").strip().upper()

@@ -7,14 +7,18 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.query_builder import DocType
-from frappe.utils import flt, now
+from frappe.utils import cint, flt, now
 
+from ....daraja.guard import B2C_MIN_AMOUNT
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
 )
 from .. import app_logger
 from .config import DOCTYPE_CONFIGS, DoctypeConfig
+
+# Reference row fields only the payout jobs and Results write (never the form).
+SERVER_ROW_FIELDS = ("b2c_disbursement_request", "payment_status", "reference_no", "reference_date")
 
 
 class B2CPaymentDisbursement(Document):
@@ -74,6 +78,31 @@ class B2CPaymentDisbursement(Document):
 
         self.status = "Initiated"
 
+    def before_update_after_submit(self) -> None:
+        """A save after submit (form Update, API, scripts) writes every row back from memory.
+
+        The payout jobs and Results write the request link and result to the rows directly,
+        so the copy being saved may be older: keep what is in the database. Locking read, so
+        a value committed after this transaction's snapshot is seen too.
+        """
+        locking = "FOR UPDATE" if frappe.db.db_type == "mariadb" else ""
+        current = {
+            row.name: row
+            for row in frappe.db.sql(
+                f"""
+                SELECT name, {", ".join(SERVER_ROW_FIELDS)}
+                FROM `tabB2C Payment Disbursement Reference`
+                WHERE parent = %s AND parenttype = %s
+                {locking}
+                """,
+                (self.name, self.doctype),
+                as_dict=True,
+            )
+        }
+        for ref in self.references:
+            if ref.name in current:
+                ref.update({field: current[ref.name][field] for field in SERVER_ROW_FIELDS})
+
     def set_outstanding_from_documents(self) -> None:
         """Outstanding comes from the document, never from the (editable) row."""
         for ref in self.references:
@@ -94,6 +123,18 @@ class B2CPaymentDisbursement(Document):
             rows.append(ref)
         return rows
 
+    def _own_requests(self) -> list:
+        """Requests this disbursement's rows count as their own: sent by it, or by the cancelled
+        disbursement it amends (an amend copies the links). A link copied any other way (a
+        Duplicate made before the link was no_copy, the API) is not trusted: it would hide
+        another disbursement's live payout from the checks below."""
+        own = []
+        for request in sorted({r.b2c_disbursement_request for r in self.references if r.b2c_disbursement_request}):
+            sent_from = frappe.db.get_value(B2C_REQUEST_DOCTYPE, request, "b2c_payment_disbursement")
+            if sent_from and (sent_from == self.name or cint(frappe.db.get_value(self.doctype, sent_from, "docstatus")) == 2):
+                own.append(request)
+        return own
+
     def validate_no_double_payout(self) -> None:
         """Refuse to pay a document past what it owes, or while another payout for it is open.
 
@@ -101,9 +142,10 @@ class B2CPaymentDisbursement(Document):
         a locking read, so two disbursements submitted at the same moment cannot both pass.
         """
         from ....money_in.common import named_lock
+        from ..b2c_disbursement_request.b2c_disbursement_request import paid_without_entry
 
         rows = self._rows_to_send()
-        own_requests = [r.b2c_disbursement_request for r in self.references if r.b2c_disbursement_request]
+        own_requests = self._own_requests()
         totals = {}
         for ref in rows:
             key = (ref.reference_doctype, ref.reference_name)
@@ -113,7 +155,16 @@ class B2CPaymentDisbursement(Document):
             if not doctype or not name:
                 continue
             with named_lock(f"b2c-pay:{doctype}:{name}"):
-                others = open_payouts(doctype, name, exclude_parent=self.name, exclude_requests=own_requests)
+                others = list(open_payouts(doctype, name, exclude_parent=self.name, exclude_requests=own_requests))
+                # Paid payouts nothing books (entry cancelled, Cancel All, or older than the
+                # retry window) are not in what the document owes; the retry guard counts them
+                # too. A Salary Slip's owed already takes off every Paid payout.
+                if doctype != "Salary Slip":
+                    for paid in paid_without_entry(doctype, name):
+                        if paid.request in own_requests or self.name in (paid.parents or [paid.parent]):
+                            allocated += flt(paid.allocated_amount)  # this disbursement's own, not sent again
+                        else:
+                            others.append(paid)
                 if others:
                     frappe.throw(
                         _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(
@@ -121,7 +172,7 @@ class B2CPaymentDisbursement(Document):
                         ),
                         title=_("Duplicate Payout"),
                     )
-                owed = current_outstanding(doctype, name)
+                owed = current_outstanding(doctype, name, for_update=True)
                 if owed is not None and flt(allocated, 2) > flt(owed, 2):
                     frappe.throw(
                         _("{0} {1} owes {2}; this disbursement allocates {3}.").format(
@@ -230,15 +281,25 @@ class B2CPaymentDisbursement(Document):
     def update_disbursement_status(self) -> None:
         """
         Update the B2C Payment Disbursement status based on all its child reference payment statuses.
-        Called from a background job to avoid contention and db locks.
+        Called from the scheduler and the form button.
+
+        Never saves: ``self`` may be the form's copy from submit time, and a save writes every
+        row back, wiping the request links and results the payout jobs wrote since. The row
+        statuses are read from the database and only the status fields are written, with
+        db_set, so on_change (Value Change notifications, webhooks) and the Version still run.
         """
 
         try:
-            references = self.references
+            statuses = frappe.get_all(
+                "B2C Payment Disbursement Reference",
+                filters={"parent": self.name, "parenttype": self.doctype, "parentfield": "references"},
+                pluck="payment_status",
+                order_by="idx asc",
+            )
 
-            total = len(references)
-            paid = sum(1 for ref in references if ref.payment_status == "Paid")
-            failed = sum(1 for ref in references if ref.payment_status == "Failed")
+            total = len(statuses)
+            paid = statuses.count("Paid")
+            failed = statuses.count("Failed")
 
             new_status = "Not Initiated"
             if paid == total and total > 0:
@@ -250,24 +311,40 @@ class B2CPaymentDisbursement(Document):
             elif total > 0:
                 new_status = "Initiated"
 
-            self.retry_count += 1
-            self.last_status_check = now()
+            current = frappe.db.get_value(
+                self.doctype,
+                self.name,
+                ["status", "retry_count", "last_status_check", "modified"],
+                as_dict=True,
+                for_update=True,
+            )
+            old_status = current.status
+            retry_count = cint(current.retry_count) + 1
 
-            if new_status != self.status:
-                old_status = self.status
-                self.status = new_status
-                self.save(ignore_permissions=True)
+            # a plain read (no row locks), so the events below and the form see the database
+            self.reload()
+            # db_set loads the whole document for update unless it has a before-image, and
+            # that would lock the rows the payout jobs are writing to
+            before = frappe.get_doc(self.as_dict())
+            before.update(current)
+            self._doc_before_save = before
+            self.db_set(
+                {"status": new_status, "retry_count": retry_count, "last_status_check": now()},
+                notify=True,  # open forms reload instead of keeping their old rows
+            )
+            self.save_version()
+
+            if new_status != old_status:
                 return (
                     f"Status changed from '{old_status}' to '{new_status}'. "
                     f"References: {paid} Paid, {failed} Failed, {total} Total. "
-                    f"Retry #{self.retry_count}."
+                    f"Retry #{retry_count}."
                 )
             else:
-                self.save(ignore_permissions=True)
                 return (
-                    f"No status change (still '{self.status}'). "
+                    f"No status change (still '{new_status}'). "
                     f"References: {paid} Paid, {failed} Failed, {total} Total. "
-                    f"Retry #{self.retry_count}."
+                    f"Retry #{retry_count}."
                 )
 
         except Exception:
@@ -494,30 +571,33 @@ class B2CPaymentDisbursement(Document):
         journal_entries = journal_entries_query.run(as_dict=True)
         je_names = [je.name for je in journal_entries]
 
-        if not je_names:
-            return salary_slips
-
-        # 3: Fetch Journal Entry Accounts for these Journal Entries
-        je_accounts_query = (
-            frappe.qb.from_(JournalEntryAccount)
-            .select(
-                JournalEntryAccount.party, JournalEntryAccount.debit_in_account_currency
+        paid_employees = set()
+        if je_names:
+            # 3: Fetch Journal Entry Accounts for these Journal Entries
+            je_accounts_query = (
+                frappe.qb.from_(JournalEntryAccount)
+                .select(
+                    JournalEntryAccount.party, JournalEntryAccount.debit_in_account_currency
+                )
+                .where(JournalEntryAccount.parent.isin(je_names))
+                .where(JournalEntryAccount.party_type == "Employee")
+                .where(JournalEntryAccount.debit_in_account_currency > 0)
             )
-            .where(JournalEntryAccount.parent.isin(je_names))
-            .where(JournalEntryAccount.party_type == "Employee")
-            .where(JournalEntryAccount.debit_in_account_currency > 0)
-        )
-        je_accounts = je_accounts_query.run(as_dict=True)
+            je_accounts = je_accounts_query.run(as_dict=True)
 
-        paid_employees = {
-            (acc.party, acc.debit_in_account_currency) for acc in je_accounts
-        }
+            paid_employees = {
+                (acc.party, acc.debit_in_account_currency) for acc in je_accounts
+            }
 
-        # 4: Identify unpaid Salary Slips
+        # 4: Identify unpaid Salary Slips. A B2C payout's entry debits the rounded total, which
+        # never matches a net_pay with cents, so also ask what the slip still owes.
         unpaid_slips = []
         for slip in salary_slips:
-            if (slip.employee, slip.net_pay) not in paid_employees:
-                unpaid_slips.append(slip)
+            if (slip.employee, slip.net_pay) in paid_employees:
+                continue
+            if flt(current_outstanding(doctype, slip.name)) < B2C_MIN_AMOUNT:
+                continue
+            unpaid_slips.append(slip)
 
         if not unpaid_slips:
             frappe.msgprint(
@@ -835,6 +915,21 @@ class B2CPaymentDisbursement(Document):
 
 
 def create_b2c_request(ref, settings, b2c_disbursement):
+    from ..b2c_payment_disbursement_reference.b2c_payment_disbursement_reference import (
+        b2c_amount_problem,
+    )
+
+    if problem := b2c_amount_problem(ref.allocated_amount):
+        # Checked before anything is created or sent, so nothing went out. Failing the job
+        # instead would roll back and leave the row Initiated with no request: never paid,
+        # and counted as a live payout that refuses every later one for the document.
+        frappe.db.set_value(ref.doctype, ref.name, "payment_status", "Failed")
+        frappe.log_error(
+            title=f"B2C payout not sent: {b2c_disbursement.name} row {ref.idx}"[:140],
+            message=f"{ref.reference_doctype} {ref.reference_name}: {problem}",
+        )
+        return
+
     try:
         data = {
             "doctype": B2C_REQUEST_DOCTYPE,
@@ -865,18 +960,98 @@ def create_b2c_request(ref, settings, b2c_disbursement):
         frappe.throw(f"Failed to create B2C Request {e}")
 
 
-def current_outstanding(doctype: str | None, name: str | None) -> float | None:
-    """What ``doctype`` ``name`` still owes, read from the document (None: not tracked)."""
+def current_outstanding(doctype: str | None, name: str | None, for_update: bool = False) -> float | None:
+    """What ``doctype`` ``name`` still owes, read from the document (None: not tracked).
+
+    ``for_update``: see ``salary_slip_paid``; the double-payout check passes it. The
+    document's own totals are then a locking read too: a booking committed after this
+    transaction's snapshot drops its payout from ``open_payouts``, and the plain read would
+    still show the outstanding from before it.
+    """
     from ....utils.payouts import OWED_FIELDS, owed
 
     if not doctype or not name or doctype not in OWED_FIELDS:
         return None
     meta = frappe.get_meta(doctype)
-    fields = [f for f in OWED_FIELDS[doctype] if meta.has_field(f)]
-    values = frappe.db.get_value(doctype, name, ["docstatus", *fields], as_dict=True)
+    # a Salary Slip also needs who it pays and its Payroll Entry, to find what was paid
+    extra = ("employee", "payroll_entry") if doctype == "Salary Slip" else ()
+    fields = [f for f in (*OWED_FIELDS[doctype], *extra) if meta.has_field(f)]
+    values = frappe.db.get_value(doctype, name, ["docstatus", *fields], as_dict=True, for_update=for_update)
     if not values or values.docstatus != 1:
         return 0.0
-    return owed(doctype, values)
+    paid = 0.0
+    if doctype == "Salary Slip":
+        paid = salary_slip_paid(
+            name, values.get("employee"), values.get("payroll_entry"), for_update=for_update
+        )
+    return owed(doctype, values, paid)
+
+
+def salary_slip_paid(
+    name: str, employee: str | None = None, payroll_entry: str | None = None, for_update: bool = False
+) -> float:
+    """What was already paid against a Salary Slip, whose totals never go down when it is paid.
+
+    Every Paid B2C payout for the slip counts, booked or not and however old, from any
+    disbursement, also once its request is cancelled (as with Cancel All on a disbursement:
+    the money is still gone); payouts still in flight are refused by ``open_payouts``. So
+    does a submitted bank / cash Journal Entry that pays the employee against the slip's
+    Payroll Entry and was not made by the B2C flow (payroll banking).
+
+    ``for_update``: also read the Paid payouts through the disbursement rows with a locking
+    read, as ``open_payouts`` does. The plain read sees this transaction's snapshot, and
+    ``open_payouts`` stops listing a payout once it is Paid and booked, so a payout that got
+    there after the snapshot would otherwise be missed by both.
+    """
+    # request -> amount, so a request found by both reads (or by two rows) counts once
+    b2c = dict(
+        frappe.db.sql(
+            """
+            SELECT name, amount FROM `tabB2C Disbursement Request`
+            WHERE docstatus IN (1, 2) AND status = 'Paid'
+              AND reference_doctype = 'Salary Slip' AND reference_name = %s
+            """,
+            (name,),
+        )
+    )
+    if for_update:
+        # by the indexed reference_name on the rows; the request table has no index to lock by
+        locking = "FOR UPDATE" if frappe.db.db_type == "mariadb" else ""
+        b2c.update(
+            frappe.db.sql(
+                f"""
+                SELECT req.name, req.amount
+                FROM `tabB2C Payment Disbursement Reference` ref
+                JOIN `tabB2C Disbursement Request` req ON req.name = ref.b2c_disbursement_request
+                WHERE ref.reference_name = %s AND ref.reference_doctype = 'Salary Slip'
+                  AND req.docstatus IN (1, 2) AND req.status = 'Paid'
+                {locking}
+                """,
+                (name,),
+            )
+        )
+    bank = 0.0
+    if employee and payroll_entry:
+        # without the link field a B2C entry would count twice, which only refuses more
+        not_b2c = (
+            "AND COALESCE(jea.b2c_payment_disbursement, '') = ''"
+            if frappe.get_meta("Journal Entry Account").has_field("b2c_payment_disbursement")
+            else ""
+        )
+        bank = frappe.db.sql(
+            f"""
+            SELECT COALESCE(SUM(jea.debit_in_account_currency), 0)
+            FROM `tabJournal Entry Account` jea
+            JOIN `tabJournal Entry` je ON je.name = jea.parent
+            WHERE je.docstatus = 1 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
+              AND jea.reference_type = 'Payroll Entry' AND jea.reference_name = %s
+              AND jea.party_type = 'Employee' AND jea.party = %s
+              AND jea.debit_in_account_currency > 0
+              {not_b2c}
+            """,
+            (payroll_entry, employee),
+        )[0][0]
+    return round(sum(flt(amount) for amount in b2c.values()) + flt(bank), 2)
 
 
 def open_payouts(doctype: str, name: str, exclude_parent: str | None = None, exclude_requests=None) -> list:

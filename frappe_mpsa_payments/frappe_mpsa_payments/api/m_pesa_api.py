@@ -14,7 +14,7 @@ from frappe.utils import flt
 
 from ...daraja import apis
 from ...daraja.callbacks import KIND_C2B, KIND_PULL, KIND_RESULT, safaricom_callback
-from ...daraja.guard import daraja_timestamp, stk_amount, truncate_reference
+from ...daraja.guard import daraja_id, daraja_timestamp, names_id, stk_amount, truncate_reference
 from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
 
 from ...utils.doctype_names import MPESA_EXPRESS_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
@@ -98,19 +98,30 @@ def _handle_balance_result(**kwargs) -> None:
         )
         return
 
-    conversation_id = result_data.get("ConversationID")
+    conversation_id = daraja_id(result_data.get("ConversationID"))
     if not conversation_id:
         frappe.log_error(
-            "M-Pesa Balance Query Error", "ConversationID missing in callback response"
+            "M-Pesa Balance Query Error", "ConversationID missing or malformed in callback response"
         )
         return
 
-    integration_request = frappe.get_list(
-        "Integration Request",
-        filters=[["output", "like", f"%{conversation_id}%"]],
-        fields=["name", "output", "reference_docname"],
-        ignore_permissions=True,
-    )
+    # Unsigned guest callback: the LIKE only narrows the search; the request is ours only if
+    # it is a balance query whose stored ack has exactly this ConversationID.
+    integration_request = [
+        row
+        for row in frappe.get_all(
+            "Integration Request",
+            filters={
+                "request_description": "Mpesa Balance Query",
+                "reference_doctype": MPESA_SETTINGS_DOCTYPE,
+                "output": ["like", f"%{conversation_id}%"],
+            },
+            fields=["name", "output", "reference_docname"],
+            order_by="creation desc",
+            limit=20,
+        )
+        if names_id(row.output, "ConversationID", conversation_id)
+    ]
 
     if not integration_request:
         frappe.log_error(
@@ -132,10 +143,6 @@ def _handle_balance_result(**kwargs) -> None:
         )
         return
 
-    request_doc.output = json.dumps(result_data, indent=4)
-    request_doc.status = "Completed"
-    request_doc.save(ignore_permissions=True)
-
     account_balance = None
     result_params = _result_parameters(result_data)
     for param in result_params:
@@ -144,10 +151,15 @@ def _handle_balance_result(**kwargs) -> None:
             break
 
     if not account_balance:
+        # checked before saving: an incomplete (or forged) result never changes the request
         frappe.log_error(
             "M-Pesa Balance Query Error", "AccountBalance missing in callback response"
         )
         return
+
+    request_doc.output = json.dumps(result_data, indent=4)
+    request_doc.status = "Completed"
+    request_doc.save(ignore_permissions=True)
 
     settings_docname = integration_request[0].get("reference_docname")
     if not settings_docname:
@@ -340,6 +352,8 @@ def initiate_stk_push(**args) -> any:
         )
     if args.get("payment_gateway"):
         apis.require(args.payment_gateway[6:], apis.STK)  # outside the try: the caller must see it
+    if args.get("doctype") == MPESA_EXPRESS_REQUEST_DOCTYPE and args.get("document_name"):
+        _check_can_prompt_again(args.document_name)  # desk button and both retry_stkpush
 
     try:
         callback_url = build_callback_url(
@@ -384,7 +398,7 @@ def initiate_stk_push(**args) -> any:
             endpoint=endpoint,
             method="POST",
             payload=payload,
-            success_callback=stk_push_on_success,
+            success_callback=_stk_push_accepted,
             error_callback=stk_push_on_error,
             request_description="Mpesa STK Push",
             doctype=args.get("doctype", MPESA_SETTINGS_DOCTYPE),
@@ -396,6 +410,95 @@ def initiate_stk_push(**args) -> any:
     except Exception:
         frappe.log_error(frappe.get_traceback(), "STK Push Generation Error")
         frappe.log_error(_("Failed to generate STK push. Please check the error logs."))
+
+
+STK_RESEND_AFTER_SECONDS = 90  # as gateway.intents.RESEND_AFTER_SECONDS
+
+
+def _check_can_prompt_again(request_name: str) -> None:
+    """Refuse a prompt on a paid Mpesa Express Request, on one whose last callback is still
+    being settled or waits for a person (Pending / Mismatch / Unverified), or on one whose
+    last prompt may still be on the customer's phone."""
+    from frappe.utils import get_datetime, now_datetime
+
+    row = frappe.db.get_value(
+        MPESA_EXPRESS_REQUEST_DOCTYPE,
+        request_name,
+        ["status", "transaction_id", "verification_status", "checkout_request_id", "timestamp", "creation"],
+        as_dict=True,
+    )
+    if not row:
+        return
+    reason = _prompt_settled_or_undecided(request_name, row)
+    if reason:
+        frappe.throw(reason)
+    # Accepted moments ago and nothing back yet: it is still on the customer's phone, and a
+    # new prompt would replace its CheckoutRequestID before its callback arrives.
+    sent = (row.timestamp or row.creation) if row.checkout_request_id and not row.verification_status else None
+    if sent and (now_datetime() - get_datetime(sent)).total_seconds() < STK_RESEND_AFTER_SECONDS:
+        frappe.throw(
+            _("A prompt was just sent on {0}; wait for it to finish before sending another.").format(request_name)
+        )
+
+
+def _prompt_settled_or_undecided(request_name: str, row) -> str | None:
+    """Why the last prompt on ``row`` must be left as it is: paid, or its callback is still
+    being settled or waits for a person. None when another prompt may replace it."""
+    from ...daraja.verify import MISMATCH, PENDING
+
+    if row.status == "Completed" or row.transaction_id:
+        return _("{0} is already paid; it cannot be prompted again.").format(request_name)
+    if row.verification_status in (PENDING, MISMATCH, "Unverified"):
+        return _("The last prompt on {0} is {1}. Settle it before sending another prompt.").format(
+            request_name, row.verification_status
+        )
+    return None
+
+
+def _stk_push_accepted(response: dict, payload: dict, document_name: str, **kwargs) -> None:
+    """stk_push_on_success, then clear what an earlier prompt on the same request settled.
+
+    A re-sent prompt reuses the Mpesa Express Request with a new CheckoutRequestID; left as
+    Failed / Verified, the new prompt's callback was dropped and the poller skipped it.
+    The guard read the row a Safaricom round trip ago, so it is read again under the lock:
+    if the earlier prompt's callback was stored or settled meanwhile, the request keeps that
+    result untouched (never downgrade a paid prompt) and a person is told about the new one.
+    """
+    resets = kwargs.get("doctype") == MPESA_EXPRESS_REQUEST_DOCTYPE and (response or {}).get("CheckoutRequestID")
+    if resets:
+        row = frappe.db.get_value(
+            MPESA_EXPRESS_REQUEST_DOCTYPE,
+            document_name,
+            ["status", "transaction_id", "verification_status", "checkout_request_id"],
+            as_dict=True,
+            for_update=True,
+        )
+        reason = _prompt_settled_or_undecided(document_name, row) if row else None
+        if reason:
+            frappe.log_error(
+                title=f"M-Pesa STK prompt not tracked for {document_name}"[:140],
+                message=(
+                    f"Safaricom accepted a new prompt ({response.get('CheckoutRequestID')}) while the earlier one "
+                    f"({row.checkout_request_id}) was being settled: {reason}\n"
+                    f"{document_name} keeps the earlier prompt's result. If the customer pays the new prompt "
+                    "as well, its callback will not find this request: check it on the M-Pesa portal."
+                ),
+            )
+            return
+    stk_push_on_success(response=response, payload=payload, document_name=document_name, **kwargs)
+    if resets:
+        frappe.db.set_value(
+            MPESA_EXPRESS_REQUEST_DOCTYPE,
+            document_name,
+            {
+                "status": "In Progress",
+                "verification_status": None,
+                "callback_payload": None,
+                "result_code": None,
+                "result_desc": None,
+                "booking_attempts": 0,
+            },
+        )
 
 
 @frappe.whitelist(allow_guest=True)
@@ -426,7 +529,7 @@ def stk_push_callback(**kwargs) -> None:
         request_doc = frappe.get_doc(
             MPESA_EXPRESS_REQUEST_DOCTYPE, {"checkout_request_id": checkout_request_id}
         )
-        if request_doc.get("verification_status") == VERIFIED:
+        if request_doc.get("verification_status") == VERIFIED and _settled_prompt(request_doc, checkout_request_id):
             return  # Safaricom re-sent a callback we already settled
 
         update_mpesa_request_status(
@@ -458,6 +561,21 @@ def stk_push_callback(**kwargs) -> None:
 
     except Exception:
         log_and_throw_error("STK Push Callback Error", checkout_request_id)
+
+
+def _settled_prompt(request_doc, checkout_request_id: str) -> bool:
+    """True if a Verified request's settlement covers this callback's prompt.
+
+    A paid request is final. A failed one may have been prompted again on the same document
+    (new CheckoutRequestID); that prompt's callback must be settled, not dropped.
+    """
+    if request_doc.get("status") == "Completed" or request_doc.get("transaction_id"):
+        return True
+    try:
+        settled = (json.loads(request_doc.get("callback_payload") or "{}") or {}).get("CheckoutRequestID")
+    except (TypeError, ValueError, AttributeError):
+        return True
+    return not settled or settled == checkout_request_id
 
 
 def publish_stk_status(status: str, payment_request):
@@ -535,10 +653,26 @@ def confirmation(**kwargs):
 @frappe.whitelist(allow_guest=True)
 @safaricom_callback(KIND_RESULT)
 def c2b_verification_result(**kwargs):
-    """Transaction Status result for a held C2B confirmation (money_in.c2b_verify)."""
-    ir = kwargs.get("ir")
+    """Transaction Status result for a held C2B confirmation (money_in.c2b_verify).
+
+    The held IR is named in the ResultURL (``?ir=``), but Frappe builds the arguments of a
+    JSON POST (Safaricom's) from the body only, so it is read from the request itself, and
+    failing that found by the result's IDs. apply_result still checks those IDs.
+    """
+    from frappe_mpsa_payments.money_in.c2b_verify import SERVICE, find_held
+
     result = kwargs.get("Result") or {}
-    if not ir or not frappe.db.exists("Integration Request", ir) or not isinstance(result, dict):
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            result = None
+    if not isinstance(result, dict):
+        return {"ResultCode": 1, "ResultDesc": "Rejected"}
+    ir = _query_arg("ir") or kwargs.get("ir")
+    if not isinstance(ir, str) or not ir:
+        ir = find_held(result)
+    if not ir or not frappe.db.exists("Integration Request", {"name": ir, "integration_request_service": SERVICE}):
         return {"ResultCode": 1, "ResultDesc": "Rejected"}
     frappe.enqueue(
         "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.apply_c2b_verification",
@@ -549,6 +683,13 @@ def c2b_verification_result(**kwargs):
         result=result,
     )
     return {"ResultCode": 0, "ResultDesc": "Accepted"}
+
+
+def _query_arg(name: str) -> str | None:
+    """A query-string parameter of the current request (see callbacks._request_token)."""
+    request = getattr(frappe.local, "request", None)
+    args = getattr(request, "args", None)
+    return args.get(name) if args is not None else None
 
 
 def apply_c2b_verification(ir: str, result: dict) -> None:
@@ -657,29 +798,50 @@ def handle_transaction_status_result():
         return {"status": "error", "message": f"Webhook error: {str(e)}"}
 
 
-def _unsolicited_status_result(result_data: dict, receipt_no: str, credit_shortcode: str) -> str | None:
-    """Reason to reject a Transaction Status result that answers no query of ours, else None."""
+def _unsolicited_status_result(
+    result_data: dict, result_params: dict, receipt_no: str, credit_shortcode: str
+) -> str | None:
+    """Reason to reject a Transaction Status result that answers no query of ours, or does
+    not show completed money paid to us; None when it may be registered."""
     from ...money_in.c2b_verify import own_shortcodes
 
-    conversation_id = result_data.get("ConversationID")
+    conversation_id = daraja_id(result_data.get("ConversationID"))
     if not conversation_id or not receipt_no:
-        return "Result has no ConversationID or receipt"
-    sent = frappe.db.get_value(
-        "Integration Request",
-        {
-            "integration_request_service": "Mpesa Transaction Status",
-            "status": "Completed",
-            "output": ["like", f"%{conversation_id}%"],
-        },
-        "data",
+        return "Result has no valid ConversationID or no receipt"
+    # The LIKE only narrows the search: the query is ours only if its stored ack has exactly
+    # this ConversationID (an ID of "%" used to match the newest query).
+    sent = next(
+        (
+            row.data
+            for row in frappe.get_all(
+                "Integration Request",
+                filters={
+                    "integration_request_service": "Mpesa Transaction Status",
+                    "status": "Completed",
+                    "output": ["like", f"%{conversation_id}%"],
+                },
+                fields=["data", "output"],
+                order_by="creation desc",
+                limit=20,
+            )
+            if names_id(row.output, "ConversationID", conversation_id)
+        ),
+        None,
     )
     if not sent:
         return f"No Transaction Status query of ours has ConversationID {conversation_id}"
     asked = json.loads(sent)
     if str(asked.get("transaction_id") or "").strip().upper() != str(receipt_no).strip().upper():
         return f"Result is for {receipt_no}, but we asked about {asked.get('transaction_id')}"
-    if credit_shortcode and credit_shortcode not in own_shortcodes(asked.get("mpesa_settings")):
-        return f"Receipt {receipt_no} was paid to {credit_shortcode}, not to {asked.get('mpesa_settings')}"
+    # ResultCode 0 only means the query worked; the receipt itself may be Declined or Reversed
+    state = str(result_params.get("TransactionStatus") or "").strip()
+    if state.lower() != "completed":
+        return f"Receipt {receipt_no} has status {state or '(none)'}, not Completed"
+    if not credit_shortcode or credit_shortcode not in own_shortcodes(asked.get("mpesa_settings")):
+        return (
+            f"Receipt {receipt_no} was not paid to {asked.get('mpesa_settings')} "
+            f"(CreditPartyName {credit_shortcode or 'missing'})"
+        )
     return None
 
 
@@ -708,8 +870,10 @@ def process_mpesa_integration_request(integration_request_name):
             from ...money_in.receipts import INSERTED, insert_register
 
             # Unsigned guest callback: only accept the answer to a query we actually sent,
-            # for the receipt we asked about, paid to one of our shortcodes.
-            rejection = _unsolicited_status_result(result_data, receipt_no, business_shortcode[0].strip())
+            # for the receipt we asked about, Completed and paid to one of our shortcodes.
+            rejection = _unsolicited_status_result(
+                result_data, result_params, receipt_no, business_shortcode[0].strip()
+            )
             if rejection:
                 integration_request.status = "Failed"
                 integration_request.output = rejection

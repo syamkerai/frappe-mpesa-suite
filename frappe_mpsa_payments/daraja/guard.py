@@ -74,6 +74,35 @@ def callback_url_problems(url: str | None, sandbox=False) -> list:
     return problems
 
 
+# Safaricom's IDs: "AG_20191219_00005797af5d7d75f652", "16740-34861180-1", "ws_CO_1912...".
+_DARAJA_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def daraja_id(value) -> str:
+    """``value`` if it looks like a Safaricom ID (ConversationID, CheckoutRequestID...), else "".
+
+    Callback bodies are unauthenticated and these IDs end up in SQL LIKE patterns: an ID of
+    "%" would make ``output like '%%%'`` match every row. "%", "\\" and quotes never pass;
+    "_" does (real IDs contain it) and still matches any one character, so callers confirm
+    the exact ID afterwards (``names_id``).
+    """
+    text = str(value if value is not None else "").strip()
+    return text if _DARAJA_ID.fullmatch(text) else ""
+
+
+def names_id(stored, key: str, value: str) -> bool:
+    """True if a stored Daraja response has ``key`` exactly equal to ``value``.
+
+    ``stored`` is the JSON we saved, or the ``str(dict)`` the connector logs (single quotes),
+    possibly with more lines appended. The quote before ``key`` keeps "ConversationID" from
+    matching inside "OriginatorConversationID".
+    """
+    if not value:
+        return False
+    pattern = r"""["']""" + re.escape(key) + r"""["']\s*:\s*["']""" + re.escape(str(value)) + r"""["']"""
+    return re.search(pattern, str(stored or "")) is not None
+
+
 def token_matches(given: str | None, expected: str | None) -> bool:
     if not given or not expected:
         return False

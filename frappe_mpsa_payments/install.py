@@ -40,6 +40,9 @@ LOOKUP_INDEXES = (
     ("Payment Entry", "reference_no"),
     ("Integration Request", "request_id"),
 )
+# Fieldtypes Frappe refuses to index (DocType check_unique_and_text, v15 and v16). With a
+# search_index setter on one, every Custom Field / Customize Form save on the DocType fails.
+UNINDEXABLE = ("Text", "Long Text", "Small Text", "Code", "Text Editor")
 
 
 def ensure_lookup_indexes() -> None:
@@ -47,17 +50,26 @@ def ensure_lookup_indexes() -> None:
 
     A ``search_index`` Property Setter keeps schema sync from dropping the index when the
     owning app's DocType is re-synced; ``add_index`` (named like sync names it) builds it now.
+    Text columns (Bank Transaction's Reference Number is Small Text) get no setter, and one
+    left by an earlier release is removed on every run: this hook runs after the patches, so
+    a one-shot patch alone cannot keep it gone. Schema sync never adds or drops indexes on
+    text columns, and MariaDB builds a prefix index for them, so their index stays.
     """
     from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
     for doctype, fieldname in LOOKUP_INDEXES:
-        if not frappe.db.exists("DocType", doctype) or not frappe.get_meta(doctype).has_field(fieldname):
+        if not frappe.db.exists("DocType", doctype):
             continue
+        df = frappe.get_meta(doctype).get_field(fieldname)
+        if not df:
+            continue
+        setter = {"doc_type": doctype, "field_name": fieldname, "property": "search_index"}
         try:
-            if not frappe.db.exists(
-                "Property Setter",
-                {"doc_type": doctype, "field_name": fieldname, "property": "search_index"},
-            ):
+            if df.fieldtype in UNINDEXABLE:
+                if frappe.db.exists("Property Setter", setter):
+                    frappe.db.delete("Property Setter", setter)
+                    frappe.clear_cache(doctype=doctype)
+            elif not frappe.db.exists("Property Setter", setter):
                 make_property_setter(
                     doctype, fieldname, "search_index", 1, "Check", validate_fields_for_doctype=False
                 )

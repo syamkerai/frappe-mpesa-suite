@@ -63,6 +63,12 @@ class FakeDB:
     def table(self, doctype):
         return self.tables.setdefault(doctype, {})
 
+    # columns a test declares present, {(doctype, column)}; others count as missing
+    columns = set()
+
+    def has_column(self, doctype, column):
+        return (doctype, column) in self.columns
+
     def _rows(self, doctype, filters):
         rows = self.table(doctype)
         if isinstance(filters, str):

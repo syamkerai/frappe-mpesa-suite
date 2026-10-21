@@ -131,6 +131,18 @@ def test_c2b_paid_to_someone_else():
     assert c2b_verification(CONFIRMATION, status_result(credit="123456 - Other Ltd"), {"600966"})[0] == MISMATCH
 
 
+
+def test_c2b_without_credit_party_is_not_verified():
+    # fail closed: a result that does not name the shortcode paid proves nothing about it
+    outcome, reason = c2b_verification(CONFIRMATION, status_result(credit=None), {"600966"})
+    assert outcome == MISMATCH and "CreditPartyName" in reason
+    assert c2b_verification(CONFIRMATION, status_result(credit=""), {"600966"})[0] == MISMATCH
+    no_key = status_result()  # Daraja's own sample lists DebitPartyName twice, no CreditPartyName
+    params = no_key["ResultParameters"]["ResultParameter"]
+    params[1] = {"Key": "DebitPartyName", "Value": "600966 - Astral Ltd"}
+    assert c2b_verification(CONFIRMATION, no_key, {"600966"})[0] == MISMATCH
+
+
 def test_c2b_not_completed():
     assert c2b_verification(CONFIRMATION, status_result(status="Failed"), {"600966"})[0] == MISMATCH
 

@@ -71,10 +71,27 @@ def handle_result(result: dict, ref: str | None) -> None:
 
     if outcome in ("Reversed", "Already Reversed") and doc.c2b_register:
         register = frappe.get_doc(MPESA_C2B_PAYMENT_REGISTER_DOCTYPE, doc.c2b_register)
+        from ..money_in.common import erpnext_installed
+
+        # An STK prompt can book the receipt while its register stays a draft
+        booked = (erpnext_installed() and frappe.db.get_value(
+            "Payment Entry", {"reference_no": doc.transaction_id, "docstatus": 1}, "name"
+        )) or frappe.db.get_value(
+            "Mpesa Express Request", {"transaction_id": doc.transaction_id, "is_reconciled": 1}, "name"
+        )
+        if register.docstatus == 0 and not register.get("payment_entry") and not booked:
+            # money_in never books a register with a live reversal; say why it stays a draft
+            register.db_set("match_method", "Reversed", update_modified=False)
+            note = "It was not booked and will not be booked now."
+        else:
+            note = "Any Payment Entry booked from this receipt must be cancelled or reversed by hand."
+            invoice = register.get("pos_invoice") or register.get("sales_invoice")
+            if invoice and not register.get("payment_entry"):  # a cashier put it on an invoice
+                kind = "POS Invoice" if register.get("pos_invoice") else "Sales Invoice"
+                note += f" It was put on {kind} {invoice}: return or credit that invoice's M-Pesa payment by hand."
         register.add_comment(
             "Comment",
-            f"M-Pesa reversal {doc.name}: {outcome} ({result.get('ResultDesc') or ''}). "
-            "Any Payment Entry booked from this receipt must be cancelled or reversed by hand.",
+            f"M-Pesa reversal {doc.name}: {outcome} ({result.get('ResultDesc') or ''}). {note}",
         )
 
 

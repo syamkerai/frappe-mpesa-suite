@@ -20,7 +20,7 @@ from frappe import _
 from frappe.utils import add_to_date, cint, cstr, get_url, now_datetime
 
 from ..daraja import apis, verify
-from ..daraja.guard import is_zero_code
+from ..daraja.guard import daraja_id, is_zero_code
 from ..daraja.money_out import result_values, transaction_status_payload
 from .common import EXPRESS, REGISTER, named_lock, settings_for_shortcode
 
@@ -67,7 +67,8 @@ def hold(c2b_data: dict) -> str | None:
         return None
 
     with named_lock(f"c2b:{transid}"):
-        if frappe.db.get_value(REGISTER, {"transid": transid, "docstatus": ["<", 2]}, "name", for_update=True):
+        # any register, cancelled ones too: insert_register would refuse the receipt anyway
+        if frappe.db.get_value(REGISTER, {"transid": transid}, "name", for_update=True):
             return None  # already imported (Pull, an earlier confirmation, Transaction Status)
         if frappe.db.get_value(EXPRESS, {"transaction_id": transid}, "name"):
             return None  # an STK prompt carries this receipt and books it
@@ -159,6 +160,29 @@ def _fail(ir_name: str, reason: str) -> None:
 
 
 # ---------------------------------------------------------------- result -> register
+def find_held(result: dict) -> str | None:
+    """The held confirmation whose latest query ``result`` answers, matched by its exact IDs.
+
+    For a result whose ResultURL lost its ``?ir=``. The IDs come from an unauthenticated body:
+    only Daraja-shaped IDs reach the LIKE, and only an exact match in the stored state counts.
+    """
+    for key in ("ConversationID", "OriginatorConversationID"):
+        sent_id = daraja_id((result or {}).get(key))
+        if not sent_id:
+            continue
+        for row in frappe.get_all(
+            IR,
+            filters={"integration_request_service": SERVICE, "output": ["like", f"%{sent_id}%"]},
+            fields=["name", "output"],
+            order_by="creation desc",
+            limit=20,
+        ):
+            state = _state(row)
+            if sent_id in (state.get("conversation_id"), state.get("originator_conversation_id")):
+                return row.name
+    return None
+
+
 def apply_result(ir_name: str, result: dict) -> str:
     """Create the register if Safaricom confirms the confirmation. Returns the outcome."""
     from .receipts import insert_register
@@ -171,12 +195,13 @@ def apply_result(ir_name: str, result: dict) -> str:
     state = _state(ir)
     data = json.loads(ir.data)
 
-    values = result_values(result)
     sent_ids = {state.get("conversation_id"), state.get("originator_conversation_id")} - {None, ""}
-    got_ids = {result.get("ConversationID"), result.get("OriginatorConversationID")} - {None, ""}
+    # unauthenticated body: a list or dict "ID" must not raise (unhashable) in the job
+    got_ids = {daraja_id(result.get(k)) for k in ("ConversationID", "OriginatorConversationID")} - {""}
     if sent_ids and not (sent_ids & got_ids):
         return "ignored"  # not the answer to our latest query (an older one, or forged)
 
+    values = result_values(result)
     outcome, reason = verify.c2b_verification(data, result, own_shortcodes(state.get("settings")))
     _save(ir_name, result=result, outcome=outcome, reason=reason)
 
@@ -219,7 +244,7 @@ def sweep(limit: int = 50) -> None:
         try:
             ir = frappe.get_doc(IR, name)
             transid = ir.request_id
-            if frappe.db.get_value(REGISTER, {"transid": transid, "docstatus": ["<", 2]}, "name"):
+            if frappe.db.get_value(REGISTER, {"transid": transid}, "name"):  # cancelled ones too
                 _save(name, status=COMPLETED, insert="imported by another path")
             elif cint(_state(ir).get("attempts")) >= MAX_ATTEMPTS:
                 _fail(name, f"No Transaction Status result after {MAX_ATTEMPTS} queries.")

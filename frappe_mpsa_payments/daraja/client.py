@@ -34,6 +34,21 @@ def _token_key(consumer_key: str, url: str) -> str:
     return f"mpesa_suite:daraja_token:{digest}"
 
 
+def _cached_token(cache, key: str) -> str | None:
+    """The token Redis holds now, never a stale per-request copy.
+
+    ``get_value`` serves ``frappe.local.cache`` first and keeps what it read there (a miss
+    too) for the rest of the request or job, and v15's ``set_value`` with an expiry does not
+    update it. Without this, a token another worker stored (or that we just stored) stays
+    invisible, so the lock re-check and ``invalidate_token(rejected=)`` see the wrong one.
+    """
+    local = getattr(frappe.local, "cache", None)
+    make_key = getattr(cache, "make_key", None)
+    if isinstance(local, dict) and make_key:
+        local.pop(make_key(key), None)
+    return cache.get_value(key, expires=True)  # expires=True: read Redis, keep no local copy
+
+
 @contextmanager
 def _fetch_lock(cache, key: str):
     """Hold a Redis lock while fetching a token; carry on without one if Redis can't lock.
@@ -67,13 +82,13 @@ def fetch_token(consumer_key: str, consumer_secret: str, url: str, force: bool =
     cache = get_cache()
     key = _token_key(consumer_key, url)
     if not force:
-        cached = cache.get_value(key)
+        cached = _cached_token(cache, key)
         if cached:
             return cached
 
     with _fetch_lock(cache, key):
         if not force:
-            cached = cache.get_value(key)  # another worker fetched while we waited
+            cached = _cached_token(cache, key)  # another worker fetched while we waited
             if cached:
                 return cached
         return _request_token(cache, key, consumer_key, consumer_secret, url)
@@ -123,16 +138,16 @@ def get_access_token(settings, force: bool = False) -> str:
 
 def invalidate_token(settings, rejected: str | None = None) -> None:
     """Drop the cached token. With ``rejected`` (the token Safaricom refused), only drop it if
-    the cache still holds that token: another worker may already have cached a fresh one, and
-    fetching again would revoke it."""
+    the cache still holds exactly that token: another worker may already have cached a fresh
+    one, or dropped ours and be caching one now, and fetching again would revoke it."""
     if isinstance(settings, str):
         settings = frappe.get_doc("Mpesa Settings", settings)
     if not settings.consumer_key:
         return
     cache = get_cache()
     key = _token_key(settings.consumer_key, base_url(settings.sandbox))
-    if rejected and cache.get_value(key) not in (None, rejected):
-        return
+    if rejected and _cached_token(cache, key) != rejected:
+        return  # nothing cached is nothing to drop; a delete could hit a token stored meanwhile
     cache.delete_value(key)
 
 

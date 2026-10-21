@@ -4,7 +4,7 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import flt
+from frappe.utils import cstr, flt
 
 from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
     create_and_reconcile_payment_reconciliation,
@@ -12,8 +12,54 @@ from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
     get_outstanding_invoices,
 )
 
+# The receipt as Safaricom sent it, and the currency set on insert (it is the currency the
+# Payment Entry books the amount in). read_only only locks the form: over the API a user who
+# may edit a draft could change any of these and submit it into a Payment Entry.
+RECEIPT_FIELDS = (
+    "currency",
+    "transactiontype",
+    "transid",
+    "transtime",
+    "transamount",
+    "businessshortcode",
+    "billrefnumber",
+    "invoicenumber",
+    "orgaccountbalance",
+    "thirdpartytransid",
+    "msisdn",
+    "firstname",
+    "middlename",
+    "lastname",
+)
+
 
 class MpesaC2BPaymentRegister(Document):
+    def validate(self):
+        self.validate_receipt_unchanged()
+
+    def validate_receipt_unchanged(self):
+        # validate runs before before_submit, so a changed receipt never reaches a Payment Entry
+        before = self.get_doc_before_save()
+        if not before:
+            return
+        changed = [
+            f
+            for f in RECEIPT_FIELDS
+            if self.meta.has_field(f)  # currency is an ERPNext custom field
+            and (
+                flt(self.get(f)) != flt(before.get(f))
+                if f == "transamount"
+                else cstr(self.get(f)) != cstr(before.get(f))
+            )
+        ]
+        if changed:
+            frappe.throw(
+                _("M-Pesa receipt details cannot be changed: {0}").format(
+                    ", ".join(_(self.meta.get_label(f)) for f in changed)
+                ),
+                frappe.CannotChangeConstantError,
+            )
+
     def before_insert(self):
         if self.thirdpartytransid:
             er = frappe.db.get_value(
@@ -80,6 +126,12 @@ class MpesaC2BPaymentRegister(Document):
 
     def set_missing_values(self):
         self.currency = "KES"
+        # Store the text fields as text: a number (OrgAccountBalance 500.0) would be saved as
+        # '500' while this copy keeps 500.0, and after_insert's auto-submit would see a changed receipt.
+        for f in RECEIPT_FIELDS:
+            value = self.get(f)
+            if f != "transamount" and value is not None and not isinstance(value, str):
+                self.set(f, cstr(value))
         self.full_name = self.full_name = " ".join(
             filter(None, [self.firstname, self.middlename, self.lastname])
         )
@@ -124,6 +176,7 @@ class MpesaC2BPaymentRegister(Document):
     def before_submit(self):
         if not self.transamount:
             frappe.throw(_("Trans Amount is required"))
+        self.refuse_if_reversed()
         if "erpnext" not in frappe.get_installed_apps():
             return
         if not self.company:
@@ -191,10 +244,29 @@ class MpesaC2BPaymentRegister(Document):
 
             self.payment_entry = payment_entry.name
 
+    def refuse_if_reversed(self):
+        """One choke point for every way a receipt gets booked: by hand, the matcher, prepaid
+        orders, POS quick pay (which books it on the invoice even without submit_payment)."""
+        from frappe_mpsa_payments.money_in.common import reversal_holding
+
+        # locking read: a reversal submitted while this booking runs is waited for, not missed
+        reversal = reversal_holding(self.name, for_update=True, receipt=self.transid)
+        if reversal:
+            frappe.throw(
+                _(
+                    "M-Pesa receipt {0} cannot be booked: reversal {1} is {2}, so the money is "
+                    "(or may be) back with the payer. Only a Failed or cancelled reversal frees it."
+                ).format(self.transid, reversal.name, reversal.status)
+            )
+
     def on_submit(self):
         if self.transid:
-            exists = frappe.db.exists(
-                "Mpesa Express Request", {"transaction_id": self.transid}
+            # Locking read: it sees a receipt an STK prompt committed after this transaction's
+            # snapshot (a plain read misses it in a long matcher run, and both would book the
+            # receipt), and a prompt still writing it waits for this booking, whose register its
+            # own duplicate check then finds submitted and cancels.
+            exists = frappe.db.get_value(
+                "Mpesa Express Request", {"transaction_id": self.transid}, "name", for_update=True
             )
             if exists:
                 frappe.db.savepoint("before_c2b_submit")

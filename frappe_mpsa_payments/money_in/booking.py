@@ -7,7 +7,7 @@ as reference, transaction date, allocation capped at what is owed).
 
 import frappe
 
-from .common import EXPRESS, REGISTER, log_match
+from .common import EXPRESS, REGISTER, log_match, reversal_holding
 
 
 def stamp(register, match) -> None:
@@ -23,6 +23,8 @@ def apply_match(register, match) -> None:
     from . import sales_order
     from .common import enabled
 
+    if reversal_holding(register.name):
+        return  # the money went (or is going) back to the payer: never stamp or book it
     stamp(register, match)
     log_match(
         "Matched",
@@ -56,6 +58,8 @@ def book_register(name: str, method: str | None = None) -> str | None:
     register = frappe.get_doc(REGISTER, name)
     if register.docstatus != 0 or register.get("payment_entry"):
         return register.get("payment_entry")
+    if reversal_holding(name):
+        return None  # reversed: the register's before_submit would refuse it anyway
     register.submit_payment = 1
     register.flags.ignore_permissions = True
     register.submit()

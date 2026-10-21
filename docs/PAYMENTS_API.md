@@ -62,7 +62,14 @@ A `payment` object:
 - `paid`, `cancelled` and `expired` are final.
 
 The payment `id` is also the paybill **account number**. If the customer ignores the prompt
-and pays by paybill with that account number, the payment still completes.
+and pays by paybill with that account number, the payment still completes. The money must
+reach one of this company's paybills or tills and cover the amount; a part payment is booked
+to the customer (or the linked document) for staff to allocate, and a payment to another
+company's number is left for staff.
+
+If a payment that is already `paid` is paid again (a resent prompt paid as well, or a paybill
+payment after the prompt), the second payment is booked on account to the customer and staff
+are told to refund or allocate it. The payment stays `paid` with its first receipt.
 
 ## 3. Endpoints
 
@@ -71,7 +78,7 @@ and pays by paybill with that account number, the payment still completes.
 | `create_prompt` | POST | Create a payment and send the STK prompt now |
 | `create_payment_link` | POST | Create a payment the customer completes on the hosted page `/pay/<token>` |
 | `get_status` | GET/POST | Current status, checking Safaricom-side results first |
-| `resend_prompt` | POST | Send the prompt again (max 5 per payment), optionally to another phone |
+| `resend_prompt` | POST | Send the prompt again (max 5 per payment, at most every 90 seconds), optionally to another phone. Refused with 409 `prompt_pending` while an earlier prompt is known to be paid but not yet confirmed |
 | `verify_receipt` | POST | Check an M-Pesa code the customer typed and optionally apply it to a payment |
 | `cancel` | POST | Cancel an unpaid payment |
 | `list_payments` | GET/POST | Your payments, newest first (`since`, `status`, `limit` ≤ 200) |
@@ -112,11 +119,16 @@ curl -X POST "$BASE.verify_receipt" -H "X-Mpesa-Client-Key: $KEY" -H "X-Mpesa-Cl
   -d receipt=UJIB2AMYHE -d order_ref=WA-5521
 ```
 Returns `found`, `amount`, `paid_at`, `payer_name` and `claimed`.
-- Only receipts on this company's paybills and tills are found.
+- Only receipts on this company's paybills and tills are found, including STK receipts on any
+  of the company's M-Pesa shortcode records.
+- `claimed` is also `true` for a receipt that was reversed to the payer, and for one a cashier
+  already put on a POS or Sales Invoice.
 - When `intent_id` or `order_ref` is given, the payment becomes `paid` only if the receipt
-  - is not booked or claimed already,
+  - is not booked, claimed, reversed or on an invoice already (otherwise 409 `receipt_already_used`),
   - is from the last 72 hours and not older than the payment,
   - covers the amount.
+- A receipt a cashier put on an invoice never marks a payment `paid`, so no `payment.succeeded`
+  is sent for it.
 
 ## 4. Webhooks
 

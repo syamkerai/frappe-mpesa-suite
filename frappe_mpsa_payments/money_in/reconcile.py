@@ -45,7 +45,8 @@ def candidate_payment_entries(receipt: str) -> list:
     names += frappe.get_all(
         "Payment Entry", filters={"reference_no": receipt, "docstatus": 1}, pluck="name", order_by="creation asc"
     )
-    # STK paid through a Payment Request: ERPNext uses the request name as the PE reference
+    # STK paid through a Payment Request and booked before the receipt became the reference:
+    # ERPNext used the request name
     pr = frappe.db.get_value(
         EXPRESS, {"transaction_id": receipt, "reference_doctype": "Payment Request"}, "reference_name"
     )

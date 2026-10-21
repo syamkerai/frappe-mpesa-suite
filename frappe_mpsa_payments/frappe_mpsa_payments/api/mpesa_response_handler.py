@@ -329,10 +329,12 @@ def pull_transaction_on_success(response: dict, document_name: str, **kwargs) ->
                     "transactiontype": txn.get("transactiontype", ""),
                 }
             )
+            # background job: keep each receipt and release its lock now, skipped ones too
+            # (the hourly 47h window re-reads mostly receipts we already hold)
+            frappe.db.commit()
             if outcome != INSERTED:
-                skipped += 1
+                skipped += 1  # live, cancelled, deleted or STK-owned: never imported again
                 continue
-            frappe.db.commit()  # background job: keep each receipt and release its lock now
 
             created_records.append(
                 {

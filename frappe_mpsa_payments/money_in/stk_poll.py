@@ -7,7 +7,7 @@ confirmation, which the matching pipeline books.
 
 import frappe
 import requests
-from frappe.utils import add_to_date, cint, now_datetime
+from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from ..daraja.client import CONNECT_TIMEOUT, READ_TIMEOUT, base_url, bearer_headers
 from ..daraja.guard import daraja_timestamp
@@ -34,23 +34,47 @@ def run(limit: int = 20) -> None:
         "docstatus": 1,
         "status": ["in", ["In Progress", "Pending", "Initiated"]],
         "checkout_request_id": ["is", "set"],
-        "creation": ["between", [add_to_date(now, minutes=-60), add_to_date(now, minutes=-2)]],
     }
     if frappe.get_meta(EXPRESS).has_field("verification_status"):
         # a callback arrived: money_in.stk_verify settles it (and books it), not the poller
         filters["verification_status"] = ["is", "not set"]
-    names = frappe.get_all(
-        EXPRESS,
-        filters=filters,
-        pluck="name",
-        order_by="creation asc",
-        limit=limit,
-    )
+    names = prompted_between(filters, add_to_date(now, minutes=-60), add_to_date(now, minutes=-2), limit=limit)
     for name in names:
         try:
             poll(name)
         except Exception:
             frappe.log_error(frappe.get_traceback(), f"STK status poll failed for {name}")
+
+
+def prompted_between(filters: dict, after, before=None, limit: int = 20) -> list:
+    """Mpesa Express Requests matching ``filters`` whose latest prompt was sent in the window
+    (``before`` None: up to now), oldest prompt first.
+
+    A re-sent prompt reuses its request (m_pesa_api._stk_push_accepted), so the window keys on
+    ``timestamp``, which stk_push_on_success sets on every prompt Safaricom accepts; ``creation``
+    only for a request without one. Keyed on creation, a re-prompt on a request older than the
+    window was never polled, given up on at once, or never retried.
+    """
+    window = ["between", [after, before]] if before is not None else [">=", after]
+    rows = frappe.get_all(
+        EXPRESS,
+        filters={**filters, "timestamp": window},
+        fields=["name", "timestamp"],
+        order_by="timestamp asc",
+        limit=limit,
+    )
+    rows += [
+        frappe._dict(name=row.name, timestamp=row.creation)
+        for row in frappe.get_all(
+            EXPRESS,
+            filters={**filters, "timestamp": ["is", "not set"], "creation": window},
+            fields=["name", "creation"],
+            order_by="creation asc",
+            limit=limit,
+        )
+    ]
+    rows.sort(key=lambda row: get_datetime(row.timestamp))
+    return [row.name for row in rows[:limit]]
 
 
 def stk_query(req) -> dict | None:

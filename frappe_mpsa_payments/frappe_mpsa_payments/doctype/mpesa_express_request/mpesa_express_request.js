@@ -68,7 +68,9 @@ frappe.ui.form.on("Mpesa Express Request", {
 				},
 				__("Mpesa Actions"),
 			);
+		}
 
+		if (frm.doc.docstatus == 1 && can_prompt_again(frm)) {
 			frm.add_custom_button(
 				__("Initiate STK Push"),
 				function () {
@@ -136,6 +138,16 @@ frappe.ui.form.on("Mpesa Express Request", {
 		convertAmountToKES(frm);
 	},
 });
+
+// The server refuses these too (m_pesa_api._check_can_prompt_again): a paid request, or one
+// whose last callback is still being settled or waits for a person.
+function can_prompt_again(frm) {
+	return (
+		frm.doc.status !== "Completed" &&
+		!frm.doc.transaction_id &&
+		!["Pending", "Mismatch", "Unverified"].includes(frm.doc.verification_status)
+	);
+}
 
 function autofill_gateway_settings(frm) {
 	if (frm.doc.settings && !frm.doc.payment_gateway) {

@@ -7,6 +7,8 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import flt
 
+from ....daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
+
 
 class B2CPaymentDisbursementReference(Document):
     def validate(self) -> None:
@@ -21,6 +23,14 @@ class B2CPaymentDisbursementReference(Document):
         if self.allocated_amount is not None and flt(self.allocated_amount) < 10:
             frappe.throw(
                 "Allocated Amount cannot be less than Kshs. 10",
+                frappe.ValidationError,
+                title="Validation Error",
+            )
+
+        # The send job applies the same rule; refusing here says so before submit.
+        if self.allocated_amount is not None and (problem := b2c_amount_problem(self.allocated_amount)):
+            frappe.throw(
+                f"Row #{self.idx}: {problem}",
                 frappe.ValidationError,
                 title="Validation Error",
             )
@@ -46,6 +56,20 @@ class B2CPaymentDisbursementReference(Document):
                 )
 
             self.partyb = mobile_no
+
+
+def b2c_amount_problem(amount) -> str | None:
+    """Why Daraja B2C would refuse ``amount`` (whole shillings from 10 to 250,000), or None.
+
+    Same arithmetic as ``validate_b2c_amount_and_party``, so a row that passes is not
+    refused when its request is sent.
+    """
+    value = flt(amount)
+    if value != int(value):
+        return f"M-Pesa B2C pays whole shillings only; Allocated Amount is {amount}"
+    if not B2C_MIN_AMOUNT <= value <= B2C_MAX_AMOUNT:
+        return f"M-Pesa B2C pays Kshs. {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,} per payout; Allocated Amount is {amount}"
+    return None
 
 
 def sanitise_phone_number(phone_number: str) -> str:

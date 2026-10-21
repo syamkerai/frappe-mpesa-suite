@@ -126,7 +126,7 @@
    "fieldtype": "Float",
    "label": "Transaction Limit",
    "non_negative": 1,
-   "description": "Largest amount per STK prompt; bigger requests are split into several prompts. Safaricom allows up to KES 250,000 per transaction."
+   "description": "Largest amount per STK prompt, in KES (blank, or above 250,000, means Safaricom's maximum of 250,000). A Payment Request above it is refused when submitted: raise the limit, or ask for the amount in several Payment Requests, one after the other."
   },
   {
    "default": "0",
@@ -413,7 +413,7 @@
    "label": "Pull Transaction Nominated Number"
   },
   {
-   "description": "If checked, automatically pulls transactions for the last 2 hours once every hour.",
+   "description": "If checked, pulls transactions once every hour: the last 2 hours, then the last 47 hours (Safaricom keeps 48), so receipts whose confirmation was lost during an outage are recovered. Receipts that already have a register, cancelled or deleted ones included, are skipped.",
    "fieldname": "enable_hourly_pull_transactions",
    "fieldtype": "Check",
    "label": "Enable Hourly Pull Transactions"
@@ -473,7 +473,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-19 23:30:00.000000",
+ "modified": "2026-10-21 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "Mpesa Settings",

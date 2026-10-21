@@ -57,7 +57,7 @@ class TestMPesaAPI(FrappeTestCase):
         self.assertEqual(enqueue.call_args.kwargs["c2b_data"]["transamount"], 0)
 
     def test_validation(self):
-        # Test validation always returns accepted
+        # Validation always accepts, in Daraja's documented shape: ResultCode is the string "0".
         result = validation()
-        self.assertEqual(result["ResultCode"], 0)
+        self.assertEqual(result["ResultCode"], "0")
         self.assertEqual(result["ResultDesc"], "Accepted")

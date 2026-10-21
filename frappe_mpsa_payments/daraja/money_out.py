@@ -179,10 +179,13 @@ def result_ok(result: dict) -> bool:
 
 def result_items(result: dict) -> list:
     """``Result.ResultParameters.ResultParameter`` as a list of {Key, Value} dicts."""
-    params = ((result or {}).get("ResultParameters") or {}).get("ResultParameter") or []
+    holder = (result or {}).get("ResultParameters") if isinstance(result, dict) else None
+    params = (holder.get("ResultParameter") if isinstance(holder, dict) else None) or []
     if isinstance(params, dict):
         params = [params]
-    return [p for p in params if isinstance(p, dict) and p.get("Key")]
+    if not isinstance(params, list):
+        return []
+    return [p for p in params if isinstance(p, dict) and isinstance(p.get("Key"), str) and p["Key"]]
 
 
 def result_values(result: dict) -> dict:

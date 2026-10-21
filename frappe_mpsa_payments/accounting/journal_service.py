@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import nowdate
+from frappe.utils import getdate, nowdate
 
 
 def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
@@ -32,6 +32,13 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
         je.posting_date = nowdate()
         je.company = b2c_disbursement.company
         je.user_remark = f"B2C Payment for Salary Slip {salary_slip.name}"
+        receipt = (b2c_disbursement_ref.reference_no or "").strip()
+        if receipt:
+            # The payout's M-Pesa receipt is the entry's Reference No: ERPNext will not submit
+            # a Bank Entry without Reference No and Date (validate_cheque_info), and booking
+            # finds a salary payout's entry by it (b2c_postprocess_service.booked_docstatus).
+            je.cheque_no = receipt
+            je.cheque_date = getdate(b2c_disbursement_ref.reference_date or je.posting_date)
 
         # Credit the paid_from account
         je.append(

@@ -18,7 +18,7 @@ import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from ..daraja import verify
-from .common import EXPRESS, enabled, log_match, parse_transtime, tolerance
+from .common import EXPRESS, REGISTER, enabled, log_match, parse_transtime, receipt_reversal, tolerance
 
 MAX_BOOKING_ATTEMPTS = 3
 GIVE_UP_AFTER_HOURS = 6  # STK Query answers for a while only; then a person decides
@@ -38,7 +38,9 @@ def queue(request_name: str) -> None:
 
 def settle(request_name: str) -> str | None:
     """Verify and apply the stored callback; returns the outcome."""
-    frappe.db.get_value(EXPRESS, request_name, "name", for_update=True)
+    # locking read: the receipt as committed now (the matcher may have just adopted the prompt
+    # for a C2B receipt), which this transaction's snapshot could still miss
+    receipt_on_file = frappe.db.get_value(EXPRESS, request_name, "transaction_id", for_update=True)
     req = frappe.get_doc(EXPRESS, request_name)
     if req.get("verification_status") != verify.PENDING or not req.get("callback_payload"):
         return None
@@ -57,9 +59,11 @@ def settle(request_name: str) -> str | None:
         reason = "STK callback verification is off"
 
     if outcome == verify.PENDING:
-        if get_datetime(req.creation) < add_to_date(now_datetime(), hours=-GIVE_UP_AFTER_HOURS):
+        # from the latest prompt: a re-prompt reuses the request (stk_poll.prompted_between)
+        sent = get_datetime(req.get("timestamp") or req.creation)
+        if sent < add_to_date(now_datetime(), hours=-GIVE_UP_AFTER_HOURS):
             _set(req.name, {"verification_status": "Unverified", "result_desc": reason[:140]})
-            log_match("Error", "STK callback", express=req, once=True,
+            log_match("Error", "STK Callback", express=req, once=True,
                       details=f"Could not confirm the STK callback with Safaricom: {reason}. Check it by hand.")
         return outcome
 
@@ -69,8 +73,14 @@ def settle(request_name: str) -> str | None:
             title=f"M-Pesa STK callback rejected for {req.name}"[:140],
             message=f"{reason}\n\nCallback:\n{req.callback_payload}",
         )
-        log_match("Error", "STK callback", express=req, once=True, details=f"Not booked: {reason}")
+        log_match("Error", "STK Callback", express=req, once=True, details=f"Not booked: {reason}")
         return outcome
+
+    if receipt_on_file and not (outcome == verify.VERIFIED and _same_receipt(parsed["receipt"], receipt_on_file)):
+        return _already_matched(req, parsed, outcome, receipt_on_file)
+    adopted = outcome == verify.VERIFIED and not receipt_on_file and _adopted_receipt(req, parsed["receipt"])
+    if adopted:
+        return _already_matched(req, parsed, outcome, adopted)
 
     values = {
         "result_code": parsed["result_code"],
@@ -100,10 +110,26 @@ def book(request_name: str) -> bool:
     req = frappe.get_doc(EXPRESS, request_name)
     if req.status != "Completed" or not req.transaction_id or req.is_reconciled:
         return True
-    frappe.db.set_value(
-        EXPRESS, req.name, "booking_attempts", cint(req.get("booking_attempts")) + 1, update_modified=False
-    )
+    reversal = receipt_reversal(req.transaction_id)
+    if reversal:
+        # Not an attempt: sweep asks again while the prompt is recent, so a reversal that
+        # ends Failed (the money stayed with us) still gets the receipt booked.
+        _held_by_reversal(req, reversal)
+        return False
+    attempts = cint(req.get("booking_attempts"))
+    frappe.db.set_value(EXPRESS, req.name, "booking_attempts", attempts + 1, update_modified=False)
     frappe.db.commit()
+
+    # Again, with a locking read, in the transaction that books: a reversal being submitted
+    # right now holds its row until Safaricom answers and its transaction commits, unseen by
+    # the plain read above; this waits for it. A reversal submitted after this read waits for
+    # the booking to commit.
+    reversal = receipt_reversal(req.transaction_id, for_update=True)
+    if reversal:
+        frappe.db.set_value(EXPRESS, req.name, "booking_attempts", attempts, update_modified=False)
+        _held_by_reversal(req, reversal)
+        frappe.db.commit()
+        return False
 
     frappe.db.savepoint("mpesa_stk_booking")
     try:
@@ -115,6 +141,65 @@ def book(request_name: str) -> bool:
         return False
     frappe.db.commit()
     return True
+
+
+def _held_by_reversal(req, reversal) -> None:
+    """Log (once per reason) why a paid prompt is not booked: its receipt's money is, or may
+    be, back with the payer, and booking it would credit the customer with refunded money."""
+    log_match("Error", "STK Callback", express=req, on_change=True, receipt=req.transaction_id,
+              reference_doctype=EXPRESS, reference_name=req.name,
+              details=f"Not booked: M-Pesa receipt {req.transaction_id} has reversal {reversal.name} "
+                      f"({reversal.status}), so its money is, or may be, back with the payer. "
+                      "If the reversal ends Failed it is booked on the next sweep; otherwise settle it by hand.")
+
+
+def _same_receipt(a, b) -> bool:
+    return str(a or "").strip().upper() == str(b or "").strip().upper()
+
+
+def _adopted_receipt(req, receipt) -> str | None:
+    """Another C2B receipt the orphan matcher gave this prompt's document, which no prompt
+    carries: the matcher writes the receipt on the prompt only when it books the register at
+    once, not when the register waits for a draft order (booked when the order is released or
+    submitted). Booking the prompt as well would credit the order twice. Another prompt for the
+    same document is flagged too: the register does not say which prompt it was adopted for."""
+    from .matching import prompt_document
+
+    document = prompt_document(req.reference_doctype, req.reference_name)
+    if not document:
+        return None
+    # A plain read is enough: the matcher adopts only a prompt with no callback, under its lock,
+    # so the callback settled here was stored (and seen Pending above) after that commit.
+    for transid in frappe.get_all(
+        REGISTER,
+        filters={"docstatus": ["<", 2], "match_method": "Orphan STK Prompt",
+                 "matched_reference_doctype": document[0], "matched_reference_name": document[1]},
+        pluck="transid",
+        order_by="creation asc",
+    ):
+        if transid and not _same_receipt(transid, receipt) and not frappe.db.exists(EXPRESS, {"transaction_id": transid}):
+            return transid
+    return None
+
+
+def _already_matched(req, parsed: dict, outcome: str, receipt: str) -> str:
+    """The prompt already carries a receipt from C2B (orphan adoption, or its request settled
+    from a C2B receipt), or the orphan matcher matched one to its document, booked (or to be
+    booked) through that register. A callback for another receipt, or one saying the prompt
+    failed, means that money may not be this customer's: overwriting the receipt and booking
+    the prompt as well would credit the customer twice. Never booked here; a person decides."""
+    said = (
+        f"paid with receipt {parsed['receipt']}"
+        if outcome == verify.VERIFIED
+        else f"failed ({parsed['result_desc'] or parsed['result_code']})"
+    )
+    _set(req.name, {"verification_status": verify.MISMATCH,
+                    "result_desc": f"Callback {said}; already matched to C2B receipt {receipt}"[:140]})
+    log_match("Error", "STK Callback", express=req, once=True, receipt=receipt,
+              details=f"Safaricom says this prompt {said}, but it was already matched to C2B receipt {receipt}, "
+                      "which is booked (or waits to be booked) through its register. Not booked from the prompt: "
+                      "check both by hand.")
+    return verify.MISMATCH
 
 
 def sweep(limit: int = 50) -> None:
@@ -134,18 +219,17 @@ def sweep(limit: int = 50) -> None:
     for name in pending:
         _safely(settle, name)
 
-    unbooked = frappe.get_all(
-        EXPRESS,
-        filters={
+    from .stk_poll import prompted_between
+
+    unbooked = prompted_between(
+        {
             "verification_status": verify.VERIFIED,
             "status": "Completed",
             "is_reconciled": 0,
             "transaction_id": ["is", "set"],
             "booking_attempts": ["<", MAX_BOOKING_ATTEMPTS],
-            "creation": [">=", since],
         },
-        pluck="name",
-        order_by="modified asc",
+        since,
         limit=limit,
     )
     for name in unbooked:

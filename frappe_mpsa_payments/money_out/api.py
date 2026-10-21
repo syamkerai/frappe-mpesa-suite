@@ -7,7 +7,8 @@ URL; ``ref`` on the URL names our document. Desk actions are role-gated.
 
 import frappe
 
-from ..daraja.callbacks import KIND_RESULT, safaricom_callback
+from ..daraja.callbacks import KIND_RESULT, TOKEN_PARAM, callback_token, safaricom_callback
+from ..daraja.guard import token_matches
 from ..permissions import ADMIN_ROLES, PAYOUT_ROLES, require
 from . import b2b, b2c_status, reversal
 
@@ -22,9 +23,26 @@ def _result(kwargs) -> dict:
     return result if isinstance(result, dict) else {}
 
 
+def _ref(kwargs) -> str | None:
+    """The ``ref`` we put on the Result / QueueTimeOut URL, trusted only next to our token.
+
+    Safaricom posts JSON, and Frappe does not merge the query string into the arguments of
+    a JSON request, so ``ref`` is read from the URL itself. A ``ref`` without the callback
+    token (or one put in the body) is ignored, so with enforcement off a forger still cannot
+    point a result at a document by name.
+    """
+    request = getattr(frappe.local, "request", None)
+    if request is None:
+        return kwargs.get("ref")  # called in-process (tests), not over HTTP
+    args = getattr(request, "args", None) or {}
+    if not token_matches(args.get(TOKEN_PARAM), callback_token()):
+        return None
+    return args.get("ref") or None
+
+
 def _run(handler, kwargs, title: str):
     try:
-        handler(_result(kwargs), kwargs.get("ref"))
+        handler(_result(kwargs), _ref(kwargs))
     except Exception:
         frappe.log_error(frappe.get_traceback(), title)
         raise
@@ -34,7 +52,7 @@ def _run(handler, kwargs, title: str):
 def _timeout(handler, kwargs, title: str):
     payload = {k: v for k, v in kwargs.items() if k not in ("ref", "cmd", "t")}
     try:
-        handler(payload, kwargs.get("ref"))
+        handler(payload, _ref(kwargs))
     except Exception:
         frappe.log_error(frappe.get_traceback(), title)
         raise

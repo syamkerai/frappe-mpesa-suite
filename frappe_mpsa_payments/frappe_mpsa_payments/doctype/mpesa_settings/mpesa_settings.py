@@ -221,8 +221,32 @@ class MpesaSettings(Document):
         return _("Security credential regenerated.")
 
     def request_for_payment(self, **kwargs) -> None:
+        from frappe.utils import flt
+
+        from ....daraja.guard import STK_MAX_AMOUNT, stk_amount
+
         args = frappe._dict(kwargs)
-        request_amounts = self.split_request_amount_according_to_transaction_limit(args)
+        if args.get("reference_doctype") == "Payment Request":
+            # One prompt per Payment Request, never split: Safaricom refuses a second prompt to
+            # the same phone while the first is pending, so every part after the first went
+            # uncollected and the request stayed Partially Paid with nobody told.
+            cap = min(flt(self.transaction_limit) or STK_MAX_AMOUNT, STK_MAX_AMOUNT)
+            currency = args.get("currency") or "KES"
+            amount = flt(args.request_amount)
+            kes = amount if currency == "KES" else flt(convert_amount_to_kes(currency, amount) or amount)
+            if kes > cap:
+                frappe.throw(
+                    _(
+                        "Payment Request {0} is for KES {1}, above the M-Pesa Transaction Limit of KES {2} on {3}. "
+                        "A Payment Request is prompted once: raise the Transaction Limit (Safaricom allows at most "
+                        "KES 250,000 per prompt), or ask for the amount in several Payment Requests, one after the "
+                        "other, each within the limit."
+                    ).format(args.get("reference_docname"), f"{kes:,.2f}", f"{cap:,.2f}", self.name),
+                    title=_("M-Pesa Transaction Limit"),
+                )
+            request_amounts = [amount]
+        else:
+            request_amounts = self.split_request_amount_according_to_transaction_limit(args)
         phone_number = args.get("phone_number")
 
         if not validate_phone_number(phone_number):
@@ -238,54 +262,71 @@ class MpesaSettings(Document):
         else:
             phone_number = sanitize_mobile_number(phone_number)
 
-        for i, amount in enumerate(request_amounts):
-            args.request_amount = amount
-            if in_test():
+        def refuse_unsendable(amounts):
+            # Every part (in KES, as it will be asked) is checked before the first prompt goes
+            # out: one refused at its own submit, after an earlier part's push, rolled back the
+            # records of a prompt that was already on the customer's phone.
+            for value in amounts:
+                try:
+                    stk_amount(value)
+                except ValueError as e:
+                    frappe.throw(_("Cannot send an STK Push for {0}: {1}. No prompt was sent.").format(value, e))
+
+        if in_test():
+            refuse_unsendable(request_amounts)
+            for amount in request_amounts:
+                args.request_amount = amount
                 from .test_mpesa_settings import get_payment_request_response_payload
 
                 # Log the request as the live STK flow does, so the callback can find it.
                 self.handle_api_response(
                     "CheckoutRequestID", args, frappe._dict(get_payment_request_response_payload(amount))
                 )
-            else:
-                stk_request = frappe.new_doc(MPESA_EXPRESS_REQUEST_DOCTYPE)
-                stk_request.update(
-                    {
-                        "base_amount": args.get("request_amount", 0.0),
-                        "currency": args.get("currency", "KES"),
-                        "phone_number": phone_number,
-                        "timestamp": frappe.utils.now(),
-                        "settings": args.payment_gateway[6:],
-                        "payment_gateway": args.get("payment_gateway"),
-                        "reference_doctype": args.get("reference_doctype"),
-                        "reference_name": args.get("reference_docname"),
-                    }
-                )
-                stk_request.flags.ignore_permissions = True
-                stk_request.insert(ignore_permissions=True)
-                stk_request.submit()
+            return
+
+        parts = []
+        for amount in request_amounts:
+            stk_request = frappe.new_doc(MPESA_EXPRESS_REQUEST_DOCTYPE)
+            stk_request.update(
+                {
+                    "base_amount": amount,
+                    "currency": args.get("currency", "KES"),
+                    "phone_number": phone_number,
+                    "timestamp": frappe.utils.now(),
+                    "settings": args.payment_gateway[6:],
+                    "payment_gateway": args.get("payment_gateway"),
+                    "reference_doctype": args.get("reference_doctype"),
+                    "reference_name": args.get("reference_docname"),
+                }
+            )
+            stk_request.flags.ignore_permissions = True
+            stk_request.insert(ignore_permissions=True)  # a draft: nothing is sent yet
+            parts.append(stk_request)
+        refuse_unsendable([part.amount for part in parts])
+        for stk_request in parts:
+            stk_request.submit()  # sends its prompt
 
     def split_request_amount_according_to_transaction_limit(
         self, args: frappe._dict
     ) -> list:
-        request_amount = args.request_amount
-        # 0 / blank limit means "no limit"; dividing by it below would crash.
-        if self.transaction_limit and request_amount > self.transaction_limit:
-            # make multiple requests
-            request_amounts = []
-            requests_to_be_made = frappe.utils.ceil(
-                request_amount / self.transaction_limit
-            )  # 480/150 = ceil(3.2) = 4
-            for i in range(requests_to_be_made):
-                amount = self.transaction_limit
-                if i == requests_to_be_made - 1:
-                    amount = request_amount - (
-                        self.transaction_limit * i
-                    )  # for 4th request, 480 - (150 * 3) = 30
-                request_amounts.append(amount)
-        else:
-            request_amounts = [request_amount]
+        """Parts of at most the transaction limit (blank: Safaricom's 250,000), none under 1."""
+        from frappe.utils import flt
 
+        from ....daraja.guard import STK_MAX_AMOUNT, STK_MIN_AMOUNT
+
+        request_amount = flt(args.request_amount)
+        limit = min(flt(self.transaction_limit) or STK_MAX_AMOUNT, STK_MAX_AMOUNT)
+        if request_amount <= limit:
+            return [request_amount]
+        requests_to_be_made = frappe.utils.ceil(request_amount / limit)  # 480/150 = ceil(3.2) = 4
+        request_amounts = [limit] * (requests_to_be_made - 1)
+        # for the 4th request, 480 - (150 * 3) = 30
+        request_amounts.append(flt(request_amount - limit * (requests_to_be_made - 1), 2))
+        if request_amounts[-1] < STK_MIN_AMOUNT:
+            # e.g. 150,000.30 by 150,000: a 0.30 part cannot be prompted (STK asks whole shillings,
+            # at least 1), so it goes with the part before it, asked as 150,000
+            remainder = request_amounts.pop()
+            request_amounts[-1] = flt(request_amounts[-1] + remainder, 2)
         return request_amounts
 
     @frappe.whitelist()

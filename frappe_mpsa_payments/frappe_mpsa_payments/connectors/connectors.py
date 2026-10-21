@@ -80,6 +80,7 @@ class MpesaConnector(BaseMpesaConnector):
         self._error_callback: Callable | None = None
         self._request_description: str | None = None
         self._custom_headers: dict = {}
+        self._sent_headers: dict = {}  # headers of the last request sent, for the token-error retry
         self._base_url: str | None = None
         self._url: str | None = None
         self._timeout = (10, 30)  # (connect, read) seconds
@@ -181,9 +182,10 @@ class MpesaConnector(BaseMpesaConnector):
                 and str(data.get("errorCode") or "") in TOKEN_ERROR_CODES
             ):
                 # Token revoked/expired early on Safaricom's side: drop it and retry once.
-                from ...daraja.client import invalidate_token
+                # Drop only the token we sent; a fresher one another worker cached is used as is.
+                from ...daraja.client import bearer_token, invalidate_token
 
-                invalidate_token(self.settings_name)
+                invalidate_token(self.settings_name, rejected=bearer_token(self._sent_headers))
                 response = self._send_request()
                 data = _json_or_raw(response)
 
@@ -199,7 +201,7 @@ class MpesaConnector(BaseMpesaConnector):
             return None
 
     def _send_request(self) -> requests.Response:
-        headers = self._get_authenticated_headers()
+        headers = self._sent_headers = self._get_authenticated_headers()
         method_map = {
             "GET": lambda: requests.get(self._url, headers=headers, params=self._payload, timeout=self._timeout),
             "POST": lambda: requests.post(self._url, json=self._payload, headers=headers, timeout=self._timeout),

@@ -9,6 +9,16 @@ from frappe_mpsa_payments.money_out.b2b import validate_request
 
 
 class TestMpesaB2BPaymentRequest(IntegrationTestCase):
+    # These check the request's own rules on a one-off (typed) destination, which needs the
+    # one-off switch and a manager; approved Supplier M-Pesa Accounts have their own tests.
+    def setUp(self):
+        self._one_off = frappe.db.get_single_value("M-Pesa Suite Settings", "allow_one_off_b2b")
+        frappe.db.set_single_value("M-Pesa Suite Settings", "allow_one_off_b2b", 1)
+        frappe.set_user("Administrator")
+
+    def tearDown(self):
+        frappe.db.set_single_value("M-Pesa Suite Settings", "allow_one_off_b2b", self._one_off or 0)
+
     def _doc(self, **kw):
         values = {
             "doctype": "Mpesa B2B Payment Request",

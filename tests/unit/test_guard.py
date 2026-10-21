@@ -6,8 +6,10 @@ import pytest
 from frappe_mpsa_payments.daraja.guard import (
     DEFAULT_SAFARICOM_IPS,
     callback_url_problems,
+    daraja_id,
     ip_allowed,
     is_zero_code,
+    names_id,
     parse_allowlist,
     redact_headers,
     stk_amount,
@@ -108,6 +110,41 @@ def test_callback_url_problems(url, sandbox, expected):
         assert problems == []
     else:
         assert all(any(e in p for p in problems) for e in expected)
+
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["AG_20191219_00005797af5d7d75f652", "16740-34861180-1", "ws_CO_191220191020363925",
+     "c1a2b3d4-e5f6-7890-abcd-ef1234567890", " AG_1 "],
+)
+def test_daraja_id_accepts_safaricom_ids(value):
+    assert daraja_id(value) == value.strip()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["%", "%%", "AG_1%", "attempts%", "AG\\_1", "AG' OR '1'='1", 'AG"1', "_", "-1", "", None,
+     "A" * 65, "AG 1", {"$like": "%"}, ["AG_1"]],
+)
+def test_daraja_id_refuses_like_wildcards_and_junk(value):
+    # a ConversationID of "%" made ``output like '%%%'`` match every Integration Request
+    assert daraja_id(value) == ""
+
+
+def test_names_id_matches_exactly_in_json_and_logged_dict():
+    import json
+
+    ack = {"OriginatorConversationID": "OC_9", "ConversationID": "AG_1", "ResponseCode": "0"}
+    # JSON as we save it, and the str(dict) lines the connector appends to an IR's output
+    for stored in (json.dumps(ack), json.dumps(ack, indent=4), str(ack), "null\n" + str(ack)):
+        assert names_id(stored, "ConversationID", "AG_1")
+        assert not names_id(stored, "ConversationID", "AG_")  # a prefix is not the ID
+        assert not names_id(stored, "ConversationID", "OC_9")  # nor the other key's value
+        assert names_id(stored, "OriginatorConversationID", "OC_9")
+    assert not names_id('{"attempts": 0}', "ConversationID", "attempts")
+    assert not names_id(None, "ConversationID", "AG_1")
+    assert not names_id(json.dumps(ack), "ConversationID", "")
 
 
 # Upstream endpoint names the app no longer sends; kept so results for requests (or Pull

@@ -17,8 +17,12 @@ def _n(values: dict, field: str) -> float:
         return 0.0
 
 
-def owed(doctype: str, values: dict | None) -> float | None:
-    """Amount the document still owes, or None when we cannot tell (unknown doctype)."""
+def owed(doctype: str, values: dict | None, paid: float = 0.0) -> float | None:
+    """Amount the document still owes, or None when we cannot tell (unknown doctype).
+
+    ``paid``: what was already paid against a Salary Slip. A slip's totals never go down when
+    it is paid (the other doctypes' fields already do), so the caller must pass it.
+    """
     if doctype not in OWED_FIELDS:
         return None
     if not values:
@@ -33,5 +37,5 @@ def owed(doctype: str, values: dict | None) -> float | None:
         total = _n(values, "grand_total") or _n(values, "total_sanctioned_amount")
         amount = total - _n(values, "total_amount_reimbursed")
     else:  # Salary Slip
-        amount = _n(values, "rounded_total") or _n(values, "net_pay")
+        amount = (_n(values, "rounded_total") or _n(values, "net_pay")) - float(paid or 0)
     return round(max(amount, 0.0), 2)

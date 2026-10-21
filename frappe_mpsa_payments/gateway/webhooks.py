@@ -50,12 +50,17 @@ def queue(intent) -> str | None:
     delivery.insert()
     payload = {"id": delivery.name, "event": event, "created": int(now_datetime().timestamp()), "data": serialize(intent)}
     delivery.db_set("payload", json.dumps(payload, separators=(",", ":"), default=str), update_modified=False)
-    frappe.enqueue(
-        "frappe_mpsa_payments.gateway.webhooks.deliver",
-        queue="short",
-        delivery_name=delivery.name,
-        enqueue_after_commit=True,
-    )
+    try:
+        frappe.enqueue(
+            "frappe_mpsa_payments.gateway.webhooks.deliver",
+            queue="short",
+            delivery_name=delivery.name,
+            enqueue_after_commit=True,
+        )
+    except Exception:
+        # Redis down or the queue overloaded (v16 checks both before the commit): the delivery
+        # stays Pending, so retry_due sends it once next_attempt_at passes
+        frappe.log_error(frappe.get_traceback(), f"M-Pesa webhook job not enqueued for {delivery.name}"[:140])
     return delivery.name
 
 

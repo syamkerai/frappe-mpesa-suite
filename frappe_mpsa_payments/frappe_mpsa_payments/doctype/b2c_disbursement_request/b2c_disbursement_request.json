@@ -261,7 +261,8 @@
    "fieldtype": "Dynamic Link",
    "label": "Reference Name",
    "options": "reference_doctype",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "default": "SalaryPayment",
@@ -407,7 +408,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-10-19 10:00:00.000000",
+ "modified": "2026-10-21 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "B2C Disbursement Request",

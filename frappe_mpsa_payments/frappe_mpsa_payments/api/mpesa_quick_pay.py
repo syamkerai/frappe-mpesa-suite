@@ -90,6 +90,10 @@ def get_mpesa_payments():
         base_filters = {"docstatus": 0, "businessshortcode": shortcodes[0]}
     else:
         base_filters = {"docstatus": 0, "businessshortcode": ["in", shortcodes]}
+    base_filters["payment_entry"] = ["is", "not set"]
+    unavailable = _unavailable_registers(shortcodes)
+    if unavailable:
+        base_filters["name"] = ["not in", unavailable]
 
     total_count = frappe.db.count("Mpesa C2B Payment Register", base_filters)
 
@@ -170,6 +174,7 @@ def process_mpesa():
 
         if mpesa.docstatus != 0:
             continue
+        _refuse_if_unavailable(mpesa)
 
         meta = _get_mop_meta(mpesa.mode_of_payment)
 
@@ -314,6 +319,7 @@ def update_mpesa_after_invoice_submission():
 
             if mpesa.docstatus != 0:
                 continue
+            _refuse_if_unavailable(mpesa)
 
             mpesa.customer = customer
             mpesa.submit_payment = 0
@@ -340,6 +346,82 @@ def update_mpesa_after_invoice_submission():
         )
 
     return {"success": True, "total_amount": total_amount}
+
+
+def _unavailable_registers(shortcodes) -> list:
+    """Draft receipts on these shortcodes that a cashier may not take: refunded to the payer (a
+    live reversal), paid a payment intent (the gateway leaves the register a draft when the
+    intent has no customer, for staff to book with the intent in view), or booked already while
+    the register stays a draft (a Payment Entry carries the receipt, as when the payments
+    gateway books a prompted payment intent straight from it)."""
+    from frappe_mpsa_payments.money_in.common import erpnext_installed, reversed_registers
+
+    claimed = ["EXISTS (SELECT 1 FROM `tabMpesa Payment Intent` it WHERE it.receipt = reg.transid)"]
+    if erpnext_installed():
+        claimed.append(
+            "EXISTS (SELECT 1 FROM `tabPayment Entry` pe WHERE pe.reference_no = reg.transid AND pe.docstatus < 2)"
+        )
+    names = reversed_registers()
+    names += frappe.db.sql(
+        f"""
+        SELECT reg.name FROM `tabMpesa C2B Payment Register` reg
+        WHERE reg.docstatus = 0 AND reg.businessshortcode IN %(codes)s AND COALESCE(reg.transid, '') != ''
+          AND ({" OR ".join(claimed)})
+        """,
+        {"codes": tuple(shortcodes)},
+        pluck=True,
+    )
+    return list(dict.fromkeys(names))
+
+
+def _refuse_if_unavailable(mpesa) -> None:
+    """Never put a receipt on an invoice that paid a payment intent, is booked already or is
+    refunded to the payer; the list hides them, this covers a stale list and direct calls.
+
+    Locks in the order the STK booking and the payments gateway take them: the register row,
+    then the receipt lock (marking a payment intent paid), then the booking lock. A wait on
+    these named locks is invisible to deadlock detection, so the other order could leave an
+    STK booking timing out on its booking lock while this request waits on the register."""
+    from frappe_mpsa_payments.money_in.common import erpnext_installed, named_lock, reversal_holding
+
+    # locking read: a booking committed after this request loaded the register is seen
+    live = frappe.db.get_value(
+        "Mpesa C2B Payment Register", mpesa.name, ["docstatus", "payment_entry"], as_dict=True, for_update=True
+    )
+    if not live or live.docstatus != 0:
+        frappe.throw(_("M-Pesa receipt {0} (C2B register {1}) changed meanwhile; reload and try again.").format(
+            mpesa.transid, mpesa.name))
+    payment_entry = live.payment_entry or mpesa.get("payment_entry")
+    if payment_entry:
+        frappe.throw(
+            _("M-Pesa receipt {0} is already booked on Payment Entry {1}.").format(mpesa.transid, payment_entry)
+        )
+    if mpesa.transid:
+        # Locking reads under the locks (held until commit) that marking a payment intent paid and
+        # every booking of a receipt take: they see what another request committed meanwhile.
+        with named_lock(f"receipt:{mpesa.transid}"):
+            intent = frappe.db.get_value("Mpesa Payment Intent", {"receipt": mpesa.transid}, "name", for_update=True)
+        if intent:
+            frappe.throw(
+                _(
+                    "M-Pesa receipt {0} paid payment intent {1}. Book it from the C2B register with the intent in view, "
+                    "not on another sale."
+                ).format(mpesa.transid, intent)
+            )
+        if erpnext_installed():
+            with named_lock(f"book:{mpesa.transid}"):
+                pe = frappe.db.get_value(
+                    "Payment Entry", {"reference_no": mpesa.transid, "docstatus": ["<", 2]}, "name", for_update=True
+                )
+            if pe:
+                frappe.throw(_("M-Pesa receipt {0} is already booked on Payment Entry {1}.").format(mpesa.transid, pe))
+    reversal = reversal_holding(mpesa.name, receipt=mpesa.transid)
+    if reversal:
+        frappe.throw(
+            _(
+                "M-Pesa receipt {0} cannot be used: reversal {1} is {2}, so the money is (or may be) back with the payer."
+            ).format(mpesa.transid, reversal.name, reversal.status)
+        )
 
 
 def get_mpesa_shortcode_for_mop_and_company(mop, company):

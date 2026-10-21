@@ -534,3 +534,94 @@ is accepted but confirmations never arrive, because test shortcodes like 600584 
 Safaricom delivers to whoever registered URLs last. The sandbox sometimes completes an STK prompt
 by itself. Safaricom's firewall (Incapsula) blocks bursts of calls with a 403 page; a retry after a
 pause works. These flows get their proof in the KES 1-10 live checks at go-live.
+
+## Full code review: 28 confirmed fixes (2026-10-21, uncommitted)
+
+A multi-agent review of the whole app found 38 suspected defects. Independent verifiers refuted
+10 and confirmed 28. Each fix has tests and was checked by adversarial verifiers. A cross-check
+and two more rounds then closed the gaps found between areas. Unit tests: 301 before, 813 now;
+the full bench suites (255 tests) pass on v15 and v16, and a KES 10 STK prompt on a Payment
+Request was paid on a real phone through the Sandbox Lab and booked once. **Run `bench migrate`**: this adds a Match Log method,
+makes the webhook URL Small Text, changes the Mpesa Settings help text, adds an index on B2C
+Disbursement Request.reference_name, marks the payout row's result fields no_copy, and runs two
+patches (`drop_text_search_index_setters`, `relink_b2c_reference_rows`).
+
+**Money in**
+- **C2B confirmations register again with verification on (critical).** Safaricom posts the
+  Transaction Status result as JSON, so the `?ir=` on the Result URL never reached the handler and
+  every verified confirmation failed after three queries. The handler now reads `ir` from the URL,
+  or finds the held request by the result's exact ConversationID.
+- **Guest callbacks cannot use SQL wildcards.** A forged ConversationID of `%` used to match staff
+  "Fetch transaction" queries and held C2B confirmations. Callback IDs must now be Safaricom-shaped
+  (`guard.daraja_id`), and the stored ack must name them exactly (`guard.names_id`). Account
+  Balance results touch only balance queries. Check Transaction Status registers a receipt only
+  when TransactionStatus is Completed and the money reached one of our shortcodes.
+- **A receipt is booked once.** An STK receipt that also arrives as C2B is booked once, decided on
+  committed rows with locking reads on both sides. The orphan-STK matcher adopts only prompts
+  Safaricom never answered. A cancelled or deleted register is never re-imported by Pull,
+  Transaction Status or held confirmations (amend or restore it to re-book).
+- **Refunded money is never booked.** A receipt with a live reversal is refused by the register's
+  `before_submit` (every path: hand, matcher, prepaid orders, POS), by STK booking (with a locking
+  read, so a reversal being sent is waited for), by POS quick pay, and by the Payments API. The
+  reversal is found by its register or by the receipt.
+- **POS money is not counted twice.** POS quick pay no longer lists or accepts drafts that are
+  reversed, already booked, or a payment intent's receipt. An STK booking refuses, instead of
+  cancelling, a register a cashier put on an invoice.
+- **Payment Requests are prompted once.** A Payment Request above the Transaction Limit (at most
+  250,000) is refused before any prompt goes out. Before, it was split into prompts that Safaricom
+  refuses while the first is pending. **At go-live, raise 4134019's Transaction Limit from 150,000
+  to 250,000.** A paid prompt books what it collected. The cents a whole-shilling prompt cannot ask
+  go to Round Off, and a Sales Order billed in the meantime is booked against its invoices.
+- **Re-prompts.** Sending a prompt again is refused while the request is paid, its callback is
+  undecided, or the last prompt is under 90 seconds old. A re-prompt resets the old settlement under
+  a lock, and the status poller, give-up timer and booking retries count from the latest prompt.
+- **Hourly Pull recovers outages:** the last 2 hours, then 47 hours (Safaricom keeps 48).
+- **Prepaid orders** refused by ERPNext (for example the credit limit) stay drafts, are logged once
+  with a hint, and are retried with backoff. Real bugs get an Error Log with the traceback.
+- Register amount, receipt and shortcode cannot be edited once saved. The `search_index` Property
+  Setter on Bank Transaction's Small Text Reference Number, which made every Customize Form and
+  Custom Field save on Bank Transaction fail, is removed and no longer recreated on migrate; its
+  prefix index stays, so the duplicate check still uses it. Unconfirmed STK callbacks reach the
+  Match Log ("STK Callback").
+
+**Money out (B2C, B2B, Reversal)**
+- **"Check Latest Payment Status" no longer overwrites rows.** It used to save the browser's stale
+  copy over the payout jobs' request links, so paid payouts could never be booked. A patch relinks
+  rows whose link was wiped, and every Result rewrites it.
+- **Each payout is booked by its own M-Pesa receipt.** Two rows of one disbursement for the same
+  invoice each get an entry, where before the second was marked booked with none.
+- **No double payouts.** A Salary Slip's owed amount goes down by every B2C payout against it.
+  Retry and submit both take the per-document lock and refuse when the document was paid since,
+  when another payout is open, or when a Paid payout has no live entry (entry cancelled, Cancel All,
+  older than 30 days). Rows must be whole shillings, 10 to 250,000.
+- An advance paid against a Purchase Order still counts as booked after ERPNext moves it onto the
+  invoice made from the order (Get Advances, Payment Reconciliation), so the next advance on the
+  order is not refused. Desk **Duplicate** no longer copies a row's request link and result
+  (no_copy; amend still keeps them), and a link copied any other way never hides another
+  disbursement's live payout.
+- Salary Slip Journal Entries carry the receipt as Reference No, so ERPNext can submit the Bank
+  Entry. Failed results reach the row (queued after commit).
+- **Results:** a forged Result without IDs no longer settles an acked B2B, Reversal or status
+  request. `ref` is read from the URL and trusted only next to the callback token. A reversal of a
+  receipt an STK prompt booked says the entry must be cancelled by hand, and one on a POS or Sales
+  Invoice names the invoice whose M-Pesa payment must be returned.
+- **Daraja tokens:** reads always go to Redis, so a v15 cache miss no longer mints a token per call
+  and revokes other workers' tokens. A refused token is dropped only if Redis still holds it.
+
+**Payments API**
+- A `callback_url` over 140 characters no longer stops the payment from becoming paid. A webhook
+  that cannot be queued no longer blocks the status change.
+- A second payment on a paid intent is booked on account, and staff are told. A paybill receipt is
+  booked with the receiving shortcode's settings. Money paid to another company's number is left
+  for staff.
+- Reversed receipts and receipts already on a POS or Sales Invoice are `claimed` and refused.
+  See docs/PAYMENTS_API.md.
+
+**Go-live checks added by this review**
+- Before retiring the AIL Mpesa Feed Pull Sweep, run one manual Pull over a busy 47-hour window.
+  Imported plus skipped must equal Safaricom's TotalRecords; this proves OffSetValue is a page
+  number.
+- Watch the first C2B confirmations. Verification now fails closed when a Transaction Status result
+  has no CreditPartyName; such receipts arrive through Pull or a manager's release, with an Error Log.
+- Prepaid orders: the "Approve Paid Orders As" user needs Sales Creator, Sales Approver Primary,
+  Sales Approver Secondary and the Accounts Settings Credit Controller role.

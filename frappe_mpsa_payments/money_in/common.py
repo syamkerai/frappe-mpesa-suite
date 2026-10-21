@@ -2,11 +2,12 @@
 
 import datetime
 import hashlib
+import html
 import re
 from contextlib import contextmanager
 
 import frappe
-from frappe.utils import cint, cstr, flt, getdate
+from frappe.utils import cint, cstr, flt, getdate, now_datetime
 
 from ..daraja import apis
 
@@ -14,6 +15,13 @@ SUITE = "M-Pesa Suite Settings"
 REGISTER = "Mpesa C2B Payment Register"
 EXPRESS = "Mpesa Express Request"
 MATCH_LOG = "Mpesa Match Log"
+REVERSAL = "Mpesa Reversal Request"
+# A submitted reversal in one of these states means the money is, or may be, back with the
+# payer (money_out.reversal.LIVE). Failed or cancelled ones leave the receipt bookable.
+REVERSAL_HOLDS = ("Not Initiated", "Initiated", "Unknown", "Reversed", "Already Reversed")
+# frappe.flags key naming the M-Pesa receipt an STK booking is booking right now (set by
+# utils.handle_successful_transaction, read by gateway.intents)
+BOOKING_RECEIPT_FLAG = "mpesa_booking_receipt"
 
 
 # ---------------------------------------------------------------- settings
@@ -157,6 +165,80 @@ def mpesa_gl_accounts() -> set:
     return gls
 
 
+# ---------------------------------------------------------------- reversals
+# A reversal is raised on one register and carries its receipt (transaction_id). Both keys
+# count: a register cancelled and amended after its reversal is a new name for the same money,
+# and an STK receipt may have no live register at all (upstream cancels or deletes it).
+def _live(**filters) -> dict:
+    return {**filters, "docstatus": 1, "status": ["in", REVERSAL_HOLDS]}
+
+
+def _live_reversal(filters: dict, for_update: bool = False):
+    return frappe.db.get_value(
+        REVERSAL,
+        _live(**filters),
+        ["name", "status"],
+        as_dict=True,
+        order_by="creation asc",
+        for_update=for_update,
+    )
+
+
+def receipt_reversal(receipt, for_update: bool = False):
+    """The reversal that keeps this M-Pesa receipt (by its code) from being used (name, status), or None."""
+    receipt = cstr(receipt).strip()
+    return _live_reversal({"transaction_id": receipt}, for_update) if receipt else None
+
+
+def reversal_holding(register_name: str | None, for_update: bool = False, receipt: str | None = None):
+    """The reversal that keeps this receipt from being booked (name, status), or None.
+
+    Booking a receipt whose money went back to the payer would credit the customer (or pay
+    an order) with refunded money. Found by the register it was raised on or by the receipt
+    (``receipt``: the register's transid when the caller has it; otherwise it is read).
+    """
+    held = _live_reversal({"c2b_register": register_name}, for_update) if register_name else None
+    if held:
+        return held
+    if receipt is None and register_name:
+        receipt = frappe.db.get_value(REGISTER, register_name, "transid")
+    return receipt_reversal(receipt, for_update)
+
+
+def reversed_registers(names=None) -> list:
+    """Registers held back by a reversal: all of them, or those among ``names``. Held: the
+    register a reversal was raised on, and any register carrying its receipt.
+
+    Never contains None: callers filter with ``name not in``, and on v16 a NULL in that list
+    makes the condition match no row at all (the matcher would pick up nothing).
+    """
+    if names is None:
+        rows = frappe.get_all(REVERSAL, filters=_live(), fields=["c2b_register", "transaction_id"],
+                              order_by="creation asc")
+        held = [r.c2b_register for r in rows]
+        receipts = list(dict.fromkeys(cstr(r.transaction_id).strip() for r in rows if cstr(r.transaction_id).strip()))
+        if receipts:
+            held += frappe.get_all(REGISTER, filters={"transid": ["in", receipts]}, pluck="name", order_by="creation asc")
+        return list(dict.fromkeys(n for n in held if n))
+
+    names = list(dict.fromkeys(n for n in names if n))
+    if not names:
+        return []
+    by_register = set(frappe.get_all(REVERSAL, filters=_live(c2b_register=["in", names]),
+                                     pluck="c2b_register", order_by="creation asc"))
+    receipt_of = {
+        r.name: cstr(r.transid).strip()
+        for r in frappe.get_all(REGISTER, filters={"name": ["in", names]}, fields=["name", "transid"], order_by="creation asc")
+    }
+    receipts = sorted({c for c in receipt_of.values() if c})
+    by_receipt = {
+        cstr(c).strip()
+        for c in frappe.get_all(REVERSAL, filters=_live(transaction_id=["in", receipts]), pluck="transaction_id",
+                                order_by="creation asc")
+    } if receipts else set()
+    return [n for n in names if n in by_register or receipt_of.get(n) in by_receipt]
+
+
 # ---------------------------------------------------------------- time / text
 def parse_transtime(value) -> datetime.datetime | None:
     """Daraja TransTime / TransactionDate: 20261018143005 (also tolerates ISO strings)."""
@@ -238,21 +320,31 @@ def as_user(user: str | None):
 
 
 # ---------------------------------------------------------------- audit
-def log_match(result: str, method: str = None, register=None, express=None, once: bool = False, **fields) -> None:
+def log_match(
+    result: str, method: str = None, register=None, express=None, once: bool = False, on_change: bool = False, **fields
+) -> None:
     """Write a Mpesa Match Log row; never let logging break the money flow.
 
     ``once``: skip if this receipt already has a row with the same result (used by the
     2-minute matcher so an unplaced receipt is logged once, not every pass).
+    ``on_change``: skip only if the latest row with the same result says the same thing, and
+    mark that row as seen again (its ``modified``); a different reason still gets its row.
     """
     if not frappe.db.exists("DocType", MATCH_LOG):
         return
-    if once:
-        key = {"register": register.name} if register is not None else (
-            {"reference_name": fields.get("reference_name")} if fields.get("reference_name") else None
-        )
-        if key and frappe.db.exists(MATCH_LOG, {**key, "result": result}):
-            return
+    key = {"register": register.name} if register is not None else (
+        {"reference_name": fields.get("reference_name")} if fields.get("reference_name") else None
+    )
+    if once and key and frappe.db.exists(MATCH_LOG, {**key, "result": result}):
+        return
     try:
+        if on_change and key:
+            last = frappe.db.get_value(
+                MATCH_LOG, {**key, "result": result}, ["name", "details"], as_dict=True, order_by="creation desc"
+            )
+            if last and _plain(last.details) == _plain(fields.get("details")):
+                frappe.db.set_value(MATCH_LOG, last.name, "modified", now_datetime(), update_modified=False)
+                return
         row = frappe.new_doc(MATCH_LOG)
         row.result = result
         row.method = method
@@ -271,3 +363,10 @@ def log_match(result: str, method: str = None, register=None, express=None, once
         row.insert()
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Mpesa Match Log write failed")
+
+
+def _plain(text) -> str:
+    """Details as compared by ``on_change``: the stored copy may have had its HTML sanitised."""
+    from frappe.utils import strip_html
+
+    return " ".join(strip_html(html.unescape(cstr(text))).split())

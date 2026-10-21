@@ -48,6 +48,11 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
             },
             "Failed": {"payment_status": "Failed"},
         }[req.status]
+        if req.docstatus == 1 or _link_is_free(ref_name):
+            # Also (re)write the row's link to its request: an older full save of the
+            # disbursement could wipe it, and booking (_book, _mark_booked) reads the request
+            # through it. A cancelled request's late result never takes the row over.
+            update["b2c_disbursement_request"] = req.name
 
         frappe.db.set_value("B2C Payment Disbursement Reference", ref_name, update)
         frappe.db.commit()
@@ -58,3 +63,14 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
         )
 
         handle_successful_payment(req.b2c_payment_disbursement, ref_name)
+
+
+def _link_is_free(ref_name: str) -> bool:
+    """A cancelled request may still fill its row's empty link, so the guards that read a
+    payout through the row (open_payouts, the retry check, an amend's copy of the row) find
+    it: only while no request holds the row, and none submitted names it."""
+    return not frappe.db.get_value(
+        "B2C Payment Disbursement Reference", ref_name, "b2c_disbursement_request"
+    ) and not frappe.db.exists(
+        B2C_REQUEST_DOCTYPE, {"b2c_payment_disbursement_reference": ref_name, "docstatus": 1}
+    )

@@ -231,11 +231,14 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         update_integration_request(
             integration_request.name, status="Failed", output=str(data)
         )
-        # no commit: runs inside B2C Disbursement Request.on_submit; the job commits
+        # no commit: runs inside B2C Disbursement Request.on_submit; the job commits. Queued
+        # after that commit: a worker starting earlier would read the request as it was
+        # before Failed and leave the disbursement row Initiated for good.
         frappe.enqueue(
             "frappe_mpsa_payments.services.b2c_response_service.update_b2c_reference_status",
             queue="short",
             timeout=300,
+            enqueue_after_commit=True,
             b2c_request_name=document_name,
             enqueue_next=True,
         )
@@ -322,10 +325,14 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
         else:
             frappe.log_error(f"No integration_request on connector for {req.name}")
 
+        # After the callback's commit (create_request_log above committed the old status):
+        # a worker starting earlier would read Initiated, and a Failed result would never
+        # reach the disbursement row.
         frappe.enqueue(
             "frappe_mpsa_payments.services.b2c_response_service.update_b2c_reference_status",
             queue="short",
             timeout=300,
+            enqueue_after_commit=True,
             b2c_request_name=req.name,
             enqueue_next=True,
         )

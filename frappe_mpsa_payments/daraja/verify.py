@@ -104,8 +104,9 @@ def c2b_verification(confirmation: dict, result: dict, own_shortcodes, tolerance
     if _amount_differs(to_number(values.get("Amount")), confirmation.get("transamount") or 0, tolerance):
         return MISMATCH, f"Safaricom amount {values.get('Amount')} != confirmation {confirmation.get('transamount')}"
 
+    # fail closed: a result that does not name the shortcode credited proves nothing about it
     credited = credit_shortcode(values.get("CreditPartyName"))
-    if credited and credited not in own:
-        return MISMATCH, f"Receipt {receipt} was paid to {credited}, not {claimed}"
+    if not credited or credited not in own:
+        return MISMATCH, f"Receipt {receipt} was paid to {credited or '(no CreditPartyName)'}, not {claimed}"
 
     return VERIFIED, "Confirmed by Transaction Status"

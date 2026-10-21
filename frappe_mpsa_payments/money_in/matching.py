@@ -23,10 +23,12 @@ from ..utils.phone import looks_like_sha256, normalize_msisdn
 from .common import (
     EXPRESS,
     REGISTER,
+    REVERSAL_HOLDS,
     compact,
     enabled,
     log_match,
     parse_transtime,
+    reversed_registers,
     suite_int,
     tolerance,
 )
@@ -48,14 +50,19 @@ def run(limit: int = 100) -> None:
     if not enabled("enable_matching"):
         return
     since = add_days(nowdate(), -suite_int("matching_lookback_days", 45))
+    filters = {
+        "docstatus": 0,
+        "posting_date": [">=", since],
+        "payment_entry": ["is", "not set"],
+        "matched_reference_name": ["is", "not set"],
+    }
+    held = reversed_registers()
+    if held:
+        # refunded to the payer: never retried, so they would sit at the head of the queue
+        filters["name"] = ["not in", held]
     rows = frappe.get_all(
         REGISTER,
-        filters={
-            "docstatus": 0,
-            "posting_date": [">=", since],
-            "payment_entry": ["is", "not set"],
-            "matched_reference_name": ["is", "not set"],
-        },
+        filters=filters,
         fields=["name", "match_attempts", "last_match_attempt"],
         order_by="last_match_attempt asc, creation desc",
         limit=limit * 5,
@@ -108,9 +115,13 @@ def book_for_submitted_orders(limit: int = 100) -> None:
         WHERE reg.docstatus = 0 AND reg.matched_reference_doctype = 'Sales Order'
           AND (reg.payment_entry IS NULL OR reg.payment_entry = '')
           AND so.docstatus = 1 AND so.status NOT IN ('Closed', 'Completed')
+          AND NOT EXISTS (
+            SELECT 1 FROM `tabMpesa Reversal Request` rv
+            WHERE (rv.c2b_register = reg.name OR rv.transaction_id = reg.transid)
+              AND rv.docstatus = 1 AND rv.status IN %s)
         ORDER BY reg.creation ASC LIMIT %s
         """,
-        (limit,),
+        (REVERSAL_HOLDS, limit),
         pluck="name",
     )
     for name in rows:
@@ -196,7 +207,11 @@ def resolve_reference(register) -> Match | None:
         if frappe.db.exists("Mpesa Express Request", {"reference_doctype": "Mpesa Payment Intent", "reference_name": ref}):
             # prompted intents are booked by the gateway straight from the receipt; submitting this
             # register would be undone when the STK callback lands (upstream cancels duplicates)
-            return Match(method="Reference", hold=True, details=details + ": booked by the payment intent")
+            reason = _left_to_intent(register, ref)
+            if reason:
+                return Match(method="Reference", hold=True, details=f"{details}: {reason}")
+            # a part payment: the intent never takes it and no STK callback carries its receipt,
+            # so it is booked below against the intent's document or customer
         if it.reference_doctype in ("Sales Order", "Sales Invoice") and it.reference_name:
             customer = it.customer or frappe.db.get_value(it.reference_doctype, it.reference_name, "customer")
             return Match(method="Reference", doctype=it.reference_doctype, name=it.reference_name,
@@ -231,6 +246,34 @@ def resolve_reference(register) -> Match | None:
 
     if frappe.db.exists("Customer", ref):
         return Match(method="Reference", doctype="Customer", name=ref, customer=ref)
+    return None
+
+
+def _left_to_intent(register, intent_name: str) -> str | None:
+    """Why a receipt naming a prompted payment intent is left to the gateway, or None to book it.
+
+    The intent is brought up to date first: it takes a receipt that pays it in full however
+    late (its own sweep only looks back a day at closed intents) and books it straight from the
+    receipt. Money paid again on a paid intent is the gateway's to book as well. A part payment
+    it never takes, so holding one would leave it unbooked for good. Money paid to another
+    company's number is held whatever the amount: the gateway tells staff to book it by hand,
+    and booked here it would land on the intent's document from another company's books.
+    """
+    from ..gateway import intents
+
+    intents.refresh(intent_name)
+    owner = register.transid and frappe.db.get_value("Mpesa Payment Intent", {"receipt": register.transid}, "name")
+    if owner:
+        return f"booked by payment intent {owner}"
+    intent = frappe.db.get_value(
+        "Mpesa Payment Intent", intent_name, ["client", "status", "receipt", "amount"], as_dict=True
+    )
+    if not intents._paid_to(register.businessshortcode, intents._company_shortcodes(intent)):
+        return f"paid to {register.businessshortcode}, outside the client's company; left for staff"
+    if intent.status == "Paid":
+        return f"paid again after {intent.receipt}; booked by the payment intent as an extra payment"
+    if flt(register.transamount) + tolerance() >= flt(intent.amount):
+        return "covers the payment intent, which did not take it; left for staff"
     return None
 
 
@@ -347,32 +390,77 @@ def adopt_orphan_stk(register) -> Match | None:
     if not paid_at:
         return None
     window = suite_int("orphan_stk_window_seconds", 600)
+    since = add_to_date(paid_at, seconds=-window)
     tol = tolerance()
+    has_verification = frappe.get_meta(EXPRESS).has_field("verification_status")
+    filters = {
+        "docstatus": 1,
+        "transaction_id": ["is", "not set"],
+        "status": ["!=", "Failed"],  # answered: the customer did not pay this prompt
+        "creation": ["<=", paid_at],
+    }
+    if has_verification:
+        # every callback, paid or failed, is stored as Pending first: set means Safaricom answered
+        # (a paid one gets its receipt only once verified, and is booked from it then)
+        filters["verification_status"] = ["is", "not set"]
     prompts = frappe.get_all(
         EXPRESS,
-        filters={
-            "docstatus": 1,
-            "transaction_id": ["is", "not set"],
-            "creation": ["between", [add_to_date(paid_at, seconds=-window), paid_at]],
-        },
-        fields=["name", "amount", "reference_doctype", "reference_name", "creation"],
+        filters=filters,
+        # Sent within the window. A prompt staff send again keeps its row and creation (its
+        # status and callback cleared); timestamp is its last send.
+        or_filters={"creation": [">=", since], "timestamp": [">=", since]},
+        fields=["name", "amount", "reference_doctype", "reference_name", "creation", "timestamp"],
         order_by="creation asc",
     )
-    prompts = [p for p in prompts if abs(flt(p.amount) - flt(register.transamount)) <= tol and get_datetime(p.creation) <= paid_at]
+    prompts = [
+        p for p in prompts
+        if abs(flt(p.amount) - flt(register.transamount)) <= tol
+        and get_datetime(p.creation) <= paid_at and _last_sent(p) >= since
+    ]
     if len(prompts) > 1:
         return Match(method="Orphan STK Prompt", ambiguous=True, candidates=[p.name for p in prompts])
     if len(prompts) != 1:
         return None
 
     prompt = prompts[0]
-    target = Match(method="Orphan STK Prompt", details=f"STK prompt {prompt.name}", express=prompt.name)
-    if prompt.reference_doctype == "Payment Request":
-        pr = frappe.db.get_value("Payment Request", prompt.reference_name, ["reference_doctype", "reference_name"], as_dict=True)
-        if pr and pr.reference_doctype in ("Sales Order", "Sales Invoice"):
-            target.update(doctype=pr.reference_doctype, name=pr.reference_name)
-    elif prompt.reference_doctype in ("Sales Order", "Sales Invoice"):
-        target.update(doctype=prompt.reference_doctype, name=prompt.reference_name)
-    if not target.get("doctype"):
+    if _last_sent(prompt) > paid_at:
+        # sent again after the payment: whether an earlier send was paid or failed was cleared
+        # with it, so the money is never adopted for it (it still makes others ambiguous above)
+        return None
+    document = prompt_document(prompt.reference_doctype, prompt.reference_name)
+    if not document:
+        return None
+    target = Match(method="Orphan STK Prompt", doctype=document[0], name=document[1],
+                   details=f"STK prompt {prompt.name}", express=prompt.name)
+
+    # The list above is this transaction's snapshot, minutes old in a matcher batch. Re-read the
+    # prompt with a lock (the row as committed now; a callback stored meanwhile waits for this
+    # booking, and settling it then finds the adopted receipt) and adopt it only if unanswered
+    # and not sent again since the payment.
+    fields = ["docstatus", "transaction_id", "status", "creation", "timestamp"]
+    fields += ["verification_status"] if has_verification else []
+    live = frappe.db.get_value(EXPRESS, prompt.name, fields, as_dict=True, for_update=True)
+    if not live or live.docstatus != 1 or live.transaction_id or live.status == "Failed" or live.get("verification_status"):
+        return None
+    if _last_sent(live) > paid_at:
         return None
     target.customer = frappe.db.get_value(target.doctype, target.name, "customer")
     return target
+
+
+def _last_sent(prompt):
+    """When the customer last got this prompt: staff may send a prompt again (same request, new
+    CheckoutRequestID), and money paid before that cannot be for it."""
+    return get_datetime(prompt.timestamp or prompt.creation)
+
+
+def prompt_document(reference_doctype, reference_name) -> tuple | None:
+    """(doctype, name) of the Sales Order or Sales Invoice an STK prompt is for, directly or
+    through its Payment Request."""
+    if reference_doctype == "Payment Request":
+        pr = frappe.db.get_value("Payment Request", reference_name, ["reference_doctype", "reference_name"], as_dict=True)
+        if pr and pr.reference_doctype in ("Sales Order", "Sales Invoice"):
+            return pr.reference_doctype, pr.reference_name
+    elif reference_doctype in ("Sales Order", "Sales Invoice"):
+        return reference_doctype, reference_name
+    return None

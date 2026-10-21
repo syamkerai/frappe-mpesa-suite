@@ -7,11 +7,12 @@ Auth: X-Mpesa-Client-Key / X-Mpesa-Client-Secret headers (pay-page endpoints use
 import frappe
 from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, now_datetime
 
-from ..money_in.common import EXPRESS, REGISTER, parse_transtime, tolerance
+from ..money_in.common import EXPRESS, REGISTER, parse_transtime, reversal_holding, tolerance
 from . import intents
 from .auth import ApiError, endpoint, rate_limit, require
 
 INTENT = intents.INTENT
+REVERSED = "reversed"  # _claimed_by: the money went (or is going) back to the payer
 
 
 def _intent_for(client, intent_id=None, order_ref=None):
@@ -117,6 +118,8 @@ def verify_receipt(client, receipt=None, intent_id=None, order_ref=None, amount=
 
     intent = _intent_for(client, intent_id, order_ref)
     if intent.status != "Paid":
+        if claimed_by == REVERSED:
+            raise ApiError(409, "receipt_already_used", "This receipt was reversed to the payer and cannot be used.")
         if claimed_by and claimed_by != intent.name:
             raise ApiError(409, "receipt_already_used", "This receipt has already been used.")
         paid_at = found["paid_at"]
@@ -137,21 +140,8 @@ def verify_receipt(client, receipt=None, intent_id=None, order_ref=None, amount=
 RECEIPT_MAX_AGE_HOURS = 72
 
 
-def _client_shortcodes(client) -> dict:
-    """{shortcode or till: Mpesa Settings name} for the client's company (or its own settings)."""
-    company = intents.client_company(client)
-    filters = {"company": company} if company else {"name": client.mpesa_settings}
-    out = {}
-    for row in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "business_shortcode", "till_number"],
-                              order_by="creation asc"):
-        for code in (row.business_shortcode, row.till_number):
-            if cstr(code).strip():
-                out[cstr(code).strip()] = row.name
-    return out
-
-
 def _find_receipt(client, code):
-    shortcodes = _client_shortcodes(client)
+    shortcodes = intents.client_shortcodes(client)
     reg = frappe.db.get_value(
         REGISTER, {"transid": code, "docstatus": ["<", 2]},
         ["name", "transamount", "transtime", "full_name", "businessshortcode"], as_dict=True,
@@ -164,17 +154,21 @@ def _find_receipt(client, code):
         ["name", "amount", "transaction_date", "settings", "reference_doctype", "reference_name", "is_reconciled"],
         as_dict=True,
     )
-    if exp and exp.settings in set(shortcodes.values()):
+    # the prompt's own record, which need not be the one client_shortcodes keeps for its number
+    if exp and exp.settings in intents.client_settings(client):
         return {"express": exp, "amount": flt(exp.amount), "settings": exp.settings,
                 "paid_at": exp.transaction_date and get_datetime(exp.transaction_date)}
     return None
 
 
 def _claimed_by(code: str, found: dict) -> str | None:
-    """Who already owns this receipt: an intent name, or a marker for booked/reconciled money."""
+    """Who already owns this receipt: an intent name, or a marker for booked/reconciled money
+    or for money refunded to the payer (a live reversal of the receipt or of its register)."""
     owner = frappe.db.get_value(INTENT, {"receipt": code}, "name")
     if owner:
         return owner
+    if reversal_holding(found.get("register"), receipt=code):
+        return REVERSED
     if frappe.db.exists("Payment Entry", {"reference_no": code, "docstatus": 1}):
         return "booked"
     if found.get("register"):

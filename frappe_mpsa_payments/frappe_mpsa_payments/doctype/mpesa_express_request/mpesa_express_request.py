@@ -4,12 +4,15 @@
 
 import frappe
 from frappe.model.document import Document
+from frappe.utils import cint, flt
 from frappe_mpsa_payments.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 from frappe.exceptions import DoesNotExistError
 from ....daraja import apis
+from ....daraja.guard import stk_amount
 from ....permissions import ADMIN_ROLES, require
 from ....utils.utils import (
     handle_successful_transaction,
+    stk_books_part_payments,
     validate_phone_number,
     convert_amount_to_kes,
 )
@@ -70,7 +73,22 @@ class MpesaExpressRequest(Document):
     def validate_payment_request_amount(self):
         payment_request = frappe.get_doc("Payment Request", self.reference_name)
         self.currency = payment_request.currency
-        self.base_amount = payment_request.grand_total  # amount (KES) derived from it
+        # Keep the amount the caller asked for (a manual or gateway prompt for part of the
+        # request; MpesaSettings.request_for_payment prompts a Payment Request once, never in
+        # parts): overwriting it with the grand total asked the customer for the whole request
+        # again. Default to, and never ask more than, what the request still owes.
+        owed = payment_request_owed(payment_request)
+        asked = flt(self.base_amount)
+        if not asked or asked > owed:
+            self.base_amount = owed  # amount (KES) derived from it
+        elif owed - asked > 0.005 and not stk_books_part_payments(payment_request):
+            # Booked for its whole outstanding whatever was paid: a part, once paid, would be
+            # refused as short and its receipt booked nowhere. Refused before any prompt goes.
+            frappe.throw(
+                f"Payment Request {payment_request.name} can only be booked when paid in full "
+                f"({payment_request.currency} {owed}), so it cannot be prompted for {asked}. Prompt "
+                "the whole amount, or raise the M-Pesa Transaction Limit (at most 250,000)."
+            )
         # company = payment_request.company
         # company_currency = frappe.db.get_value("Company", company, "default_currency")
 
@@ -103,6 +121,10 @@ class MpesaExpressRequest(Document):
             apis.require(self.settings, apis.STK)
         if not self.amount or self.amount <= 0:
             frappe.throw("Amount must be greater than zero to initiate STK Push.")
+        try:
+            stk_amount(self.amount)  # initiate_stk_push only logs this, so no prompt went out silently
+        except ValueError as e:
+            frappe.throw(f"Cannot send an STK Push for {self.amount}: {e}.")
         if not self.phone_number:
             frappe.throw("Phone number is required to initiate STK Push.")
 
@@ -131,38 +153,66 @@ class MpesaExpressRequest(Document):
         self.validate_duplicate_c2b_records()
 
     def validate_duplicate_c2b_records(self):
-        """Ensure any duplicate C2B is neutralized in favour of this Express Request."""
+        """Ensure any duplicate C2B is neutralized in favour of this Express Request.
+
+        Decided on the register as committed, read with a lock: a C2B booking still in flight
+        is waited for, where this transaction's snapshot would show the register as a draft
+        (its delete then failed or removed a booked register, and the prompt booked the receipt
+        a second time). A register that cannot be cancelled is raised, never skipped, so the
+        caller rolls back and retries instead of booking over its Payment Entry.
+        """
         if not self.transaction_id:
             return
 
-        c2b_name = frappe.db.exists(
-            "Mpesa C2B Payment Register", {"transid": self.transaction_id}
+        from ....money_in.common import erpnext_installed
+
+        register = "Mpesa C2B Payment Register"
+        erpnext = erpnext_installed()  # the register's payment_entry and invoice fields come with ERPNext
+        live = frappe.db.get_value(
+            register,
+            {"transid": self.transaction_id, "docstatus": ["<", 2]},
+            ["name", "docstatus"] + (["payment_entry", "pos_invoice", "sales_invoice"] if erpnext else []),
+            as_dict=True,
+            for_update=True,
         )
-
-        if not c2b_name:
+        if not live:
             return
+        if erpnext and cint(live.docstatus) == 1 and not live.payment_entry and (live.pos_invoice or live.sales_invoice):
+            # A cashier put the receipt on an invoice (POS quick pay): the invoice's payment row
+            # holds the money, and cancelling the register would not take it back.
+            frappe.throw(
+                f"C2B register {live.name} for receipt {self.transaction_id} was put on "
+                f"{'POS Invoice ' + live.pos_invoice if live.pos_invoice else 'Sales Invoice ' + live.sales_invoice}; "
+                "not booked from the prompt, settle it by hand."
+            )
+        seen = frappe.db.get_value(register, live.name, "docstatus")  # this transaction's snapshot
+        if seen is None or cint(seen) != cint(live.docstatus):
+            # booked (or inserted) after the snapshot: the documents loaded below would be stale.
+            # The STK booking rolls back and its sweep retries in a fresh transaction.
+            frappe.throw(
+                f"C2B register {live.name} for receipt {self.transaction_id} changed while this "
+                "request was being booked; nothing was booked, try again.",
+                frappe.TimestampMismatchError,
+            )
 
-        frappe.db.savepoint("before_c2b_neutralize")
-        try:
-            c2b_doc = frappe.get_doc("Mpesa C2B Payment Register", c2b_name)
-            c2b_doc.flags.ignore_permissions = True  # system clean-up, also cancels its PE
-
-            if c2b_doc.docstatus == 1:
-                c2b_doc.cancel()
-            else:
+        c2b_doc = frappe.get_doc(register, live.name)
+        c2b_doc.flags.ignore_permissions = True  # system clean-up, also cancels its PE
+        if cint(live.docstatus) == 1:
+            c2b_doc.cancel()  # raises if its Payment Entry cannot be cancelled
+        else:
+            frappe.db.savepoint("before_c2b_neutralize")
+            try:
                 c2b_doc.delete()
+            except frappe.LinkExistsError:
+                # Mpesa Match Log rows link it. Left as a draft: its on_submit refuses a
+                # receipt an Express Request carries, so it can never be booked.
+                frappe.db.rollback(save_point="before_c2b_neutralize")
+                return
 
-            frappe.log_error(
-                message=f"Neutralised duplicate C2B {c2b_doc.name} in favour of Express Request {self.name}",
-                title="Mpesa Express vs C2B Duplicate",
-            )
-
-        except Exception:
-            frappe.db.rollback(save_point="before_c2b_neutralize")
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Error neutralising duplicate C2B {c2b_name} for Express Request {self.name}",
-            )
+        frappe.log_error(
+            message=f"Neutralised duplicate C2B {c2b_doc.name} in favour of Express Request {self.name}",
+            title="Mpesa Express vs C2B Duplicate",
+        )
 
     @frappe.whitelist()
     def reconcile_payment(self):
@@ -181,6 +231,32 @@ class MpesaExpressRequest(Document):
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, self.settings)
 
         if not self.is_reconciled:
+            from ....money_in.common import receipt_reversal
+
+            # locking read: waits for a reversal being sent right now (see stk_verify.book)
+            reversal = receipt_reversal(self.transaction_id, for_update=True)
+            if reversal:
+                frappe.throw(
+                    f"M-Pesa receipt {self.transaction_id} has reversal {reversal.name} ({reversal.status}): "
+                    "its money is, or may be, back with the payer, so it is not booked."
+                )
+            register = frappe.db.get_value(
+                "Mpesa C2B Payment Register", {"transid": self.transaction_id},
+                ["name", "transamount", "docstatus"], as_dict=True, order_by="docstatus asc",
+            )
+            # The prompt books its own amount. A receipt it was only given from C2B (no
+            # callback: sync_statuses, orphan adoption) can be for another amount, and
+            # replacing that register's booking would drop or invent the difference.
+            if register and abs(flt(register.transamount) - flt(self.amount)) > 0.005:
+                frappe.throw(
+                    f"M-Pesa receipt {self.transaction_id} was for KES {flt(register.transamount)} "
+                    f"(C2B register {register.name}), but this request is for KES {flt(self.amount)}. "
+                    "Not booked from the request and the register is left as it is; reconcile it by hand."
+                )
+            # A live C2B register for it goes first (stk_verify does this too), or its Payment
+            # Entry, which carries the receipt, reads as booked.
+            if register and register.docstatus < 2:
+                self.validate_duplicate_c2b_records()
             handle_successful_transaction(self, settings)
 
 
@@ -228,6 +304,22 @@ def create_new_request(
     doc.submit()
 
     return doc.name
+
+
+def payment_request_owed(payment_request) -> float:
+    """What a Payment Request still owes, in its own currency (grand total when unknown)."""
+    owed = flt(payment_request.grand_total)
+    if payment_request.docstatus != 1 or not frappe.get_meta("Payment Request").has_field(
+        "outstanding_amount"
+    ):
+        return owed  # a draft has no outstanding yet; older ERPNext does not track it
+    outstanding = flt(payment_request.outstanding_amount)
+    if outstanding <= 0:
+        frappe.throw(f"Payment Request {payment_request.name} is already paid.")
+    # ERPNext keeps the outstanding in the party account currency when that differs
+    if (payment_request.get("party_account_currency") or payment_request.currency) == payment_request.currency:
+        owed = min(owed, outstanding)
+    return owed
 
 
 def clean_digits(v):
