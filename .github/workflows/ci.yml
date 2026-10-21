@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
-      - run: pip install pytest
+      - run: pip install pytest requests
       - run: pytest -q tests/unit
 
   server:
