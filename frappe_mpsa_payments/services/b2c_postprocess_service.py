@@ -26,7 +26,11 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> bo
         "B2C Payment Disbursement Reference", reference_name, "name", for_update=True
     )
     ref = frappe.get_doc("B2C Payment Disbursement Reference", reference_name)
-    if not payout_receipt(ref):
+    receipt = payout_receipt(ref)
+    if receipt and not (ref.reference_no or "").strip():
+        # a row paid before the suite: give it its request's receipt, which the entry carries
+        ref.db_set("reference_no", receipt, update_modified=False)
+    if not receipt:
         # The receipt is what tells this payout's entry apart from another row's for the
         # same document; without it an entry could not be found again, so every retry
         # would book once more. Recorded, and left to staff.
@@ -37,6 +41,10 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> bo
         )
         return False
     if not already_booked(disbursement_name, ref):
+        elsewhere = entry_carrying_receipt(ref)
+        if elsewhere:
+            _mark_booked_elsewhere(ref, *elsewhere)
+            return False
         frappe.db.savepoint("mpesa_b2c_booking")
         try:
             _book(disbursement_name, ref)
@@ -100,7 +108,7 @@ def _record_booking_error(b2c_request: str | None, traceback: str) -> None:
         and frappe.db.get_value(B2C_REQUEST_DOCTYPE, b2c_request, "accounting_error")
     )
     if first_failure:  # the sweep retries every run; log the traceback once
-        frappe.log_error(traceback, f"B2C accounting failed for {b2c_request}"[:140])
+        frappe.log_error(title=f"B2C accounting failed for {b2c_request}"[:140], message=traceback)
     if b2c_request and _has_field("accounting_error"):
         frappe.db.set_value(
             B2C_REQUEST_DOCTYPE,
@@ -155,8 +163,77 @@ def retry_unbooked_payouts(limit: int = 100) -> None:
 
 
 def payout_receipt(ref) -> str:
-    """The payout's own M-Pesa receipt, copied to the row from its request when it is Paid."""
-    return (ref.reference_no or "").strip()
+    """The payout's own M-Pesa receipt, copied to the row from its request when it is Paid.
+    A row paid before the suite may lack the copy: then its Paid request's receipt."""
+    receipt = (getattr(ref, "reference_no", None) or "").strip()
+    request = getattr(ref, "b2c_disbursement_request", None)
+    if not receipt and request:
+        paid = frappe.db.get_value(B2C_REQUEST_DOCTYPE, request, ["status", "transaction_id"], as_dict=True)
+        if paid and paid.status == "Paid":
+            receipt = (paid.transaction_id or "").strip()
+    return receipt
+
+
+def entry_carrying_receipt(ref):
+    """A live entry that carries this payout's receipt though it does not book this row: made
+    before the suite as an unallocated advance, on another document (an order's payout booked
+    on the invoice made from it, not as its advance), or as a Journal Entry (Bank
+    Reconciliation's Create Voucher copies the receipt into Cheque No). ``(doctype, name,
+    docstatus)`` or None. The receipt is in the books then: nothing more may be booked for it."""
+    receipt = payout_receipt(ref)
+    if not receipt:
+        return None
+    stores = [("Payment Entry", "reference_no"), ("Journal Entry", "cheque_no")]
+    if ref.reference_doctype == "Salary Slip":
+        stores.reverse()  # a salary payout is booked by Journal Entry
+    for doctype, field in stores:
+        entry = frappe.db.get_value(doctype, {field: receipt, "docstatus": ["<", 2]}, ["name", "docstatus"],
+                                    as_dict=True, order_by="docstatus desc")
+        if entry:
+            return (doctype, entry.name, int(entry.docstatus))
+    return None
+
+
+def _entry_documents(doctype: str, name: str) -> list:
+    """What the entry is allocated to, as "<doctype> <name>" (empty: an unallocated advance)."""
+    if doctype == "Payment Entry":
+        rows = frappe.get_all("Payment Entry Reference", filters={"parent": name},
+                              fields=["reference_doctype", "reference_name"])
+        return [f"{r.reference_doctype} {r.reference_name}" for r in rows if r.reference_name]
+    rows = frappe.get_all("Journal Entry Account", filters={"parent": name}, fields=["reference_type", "reference_name"])
+    return [f"{r.reference_type} {r.reference_name}" for r in rows if r.reference_name]
+
+
+def _mark_booked_elsewhere(ref, doctype: str, name: str, docstatus: int) -> None:
+    """Book nothing for a payout whose receipt is already in the books, and tell staff once.
+
+    The payout stays unbooked (``accounting_booked`` 0): the sweep looks again each pass,
+    quietly, and books it once that entry no longer carries the receipt (cancelled or amended
+    because it was another payout's), or marks it booked once an entry for this document
+    carries it. Meanwhile the double-payout guard counts it, so the document cannot be paid
+    again."""
+    request = ref.b2c_disbursement_request
+    if not request or not _has_field("accounting_booked"):
+        return
+    target = f"{ref.reference_doctype} {ref.reference_name}"
+    on = _entry_documents(doctype, name)
+    if not on:
+        action = f"it is not allocated: allocate it to {target}"
+    else:
+        action = (
+            f"it is on {', '.join(on[:3])}: if that is what this payout paid, nothing more is needed (new payouts "
+            f"for {target} stay blocked); if the entry is another payout's, correct it and this payout is booked "
+            "on the next pass"
+        )
+    note = (
+        f"M-Pesa receipt {payout_receipt(ref)} is already on {doctype} {name}"
+        f"{' (a draft: submit it)' if docstatus == 0 else ''}; {action}."
+    )[:500]
+    if frappe.db.get_value(B2C_REQUEST_DOCTYPE, request, "accounting_error") != note:
+        frappe.log_error(title=f"B2C payout {request} booked elsewhere"[:140], message=note)
+    frappe.db.set_value(
+        B2C_REQUEST_DOCTYPE, request, {"accounting_booked": 0, "accounting_error": note}, update_modified=False
+    )
 
 
 def already_booked(disbursement_name: str, ref) -> bool:

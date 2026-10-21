@@ -535,7 +535,7 @@ Safaricom delivers to whoever registered URLs last. The sandbox sometimes comple
 by itself. Safaricom's firewall (Incapsula) blocks bursts of calls with a 403 page; a retry after a
 pause works. These flows get their proof in the KES 1-10 live checks at go-live.
 
-## Full code review: 28 confirmed fixes (2026-10-21, uncommitted)
+## Full code review: 28 confirmed fixes (2026-10-21, 50987de)
 
 A multi-agent review of the whole app found 38 suspected defects. Independent verifiers refuted
 10 and confirmed 28. Each fix has tests and was checked by adversarial verifiers. A cross-check
@@ -625,3 +625,38 @@ patches (`drop_text_search_index_setters`, `relink_b2c_reference_rows`).
   has no CreditPartyName; such receipts arrive through Pull or a manager's release, with an Error Log.
 - Prepaid orders: the "Approve Paid Orders As" user needs Sales Creator, Sales Approver Primary,
   Sales Approver Secondary and the Accounts Settings Credit Controller role.
+
+## Upgrade rehearsal 2 on the Astral copy (2026-10-21)
+
+`astral.local` (restored live copy, Frappe 15.121.3 / ERPNext 15.121.6, 17 apps, scheduler
+paused) moved from 8fb4b49 to 75de2f1. Backup `20261021_153208` was taken first. `migrate` took
+40s and lost no rows or columns. Payment Entries, GL, Journal Entries, Bank Transactions and every
+M-Pesa table are unchanged, and the Mpesa Settings switches are as before. The two new patches did
+exactly their job:
+- `drop_text_search_index_setters` removed the one setter on Bank Transaction's Small Text
+  Reference Number, and `ensure_lookup_indexes` did not put it back. Every index stayed. Customize
+  Form and Custom Field saves on Bank Transaction work again; before, they failed with
+  "Fieldtype Small Text ... cannot be indexed".
+- `relink_b2c_reference_rows` restored the one wiped row link (Expense Claim HR-EXP-2026-06055,
+  KES 2,344; its Payment Entry exists).
+
+The M-Pesa scheduled jobs then ran once each with outbound network blocked, rather than switching
+on the whole scheduler, which would also run the 16 other apps and Astral's server scripts. None
+failed. The accounting sweep matched 412 Paid payouts of the last 30 days to the Payment Entries
+Astral's current flow had made, and created no new entries. It also found these fixes:
+- **Nothing more is booked for a payout whose receipt is already on another entry.** Astral's
+  flow made some payout Payment Entries as unallocated advances, or on the invoice made from the
+  paid order; a Bank Reconciliation Journal Entry can also carry the receipt. The sweep tried to
+  book again every 15 minutes, and Payment Entry's duplicate-receipt guard refused each time.
+  Now the payout gets one Error Log and a note for its case: "not allocated: allocate it to
+  <document>", or "it is on <document>: if that is what this payout paid, nothing more is
+  needed". There were 7 such payouts on Astral. The payout stays unbooked and is re-checked
+  quietly each pass. It is booked once that entry stops carrying the receipt, for example after
+  it is cancelled as another payout's, or once an entry for the document carries it. The
+  double-payout guard keeps counting it meanwhile, so the document cannot be paid again.
+- **A row paid before the suite, without its receipt, takes its Paid request's receipt.** The
+  receipt is written to the row before any entry is made.
+- **Error logging works on v15.** v15 stores a single-line first argument of `frappe.log_error`
+  as the Error Log title (140 characters), so a long message, such as a whole C2B payload or an
+  exception text, made the log itself fail. Calls now pass `title=` and `message=`, and a unit test
+  checks every call.

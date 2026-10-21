@@ -648,7 +648,7 @@ def get_doctype_fields(doctype):
         ]
         return fields
     except Exception as e:
-        frappe.log_error(f"Error fetching fields for {doctype}: {str(e)}")
+        frappe.log_error(title="Mpesa Settings: field list failed", message=f"Error fetching fields for {doctype}: {e}\n\n{frappe.get_traceback()}")
         return []
 
 

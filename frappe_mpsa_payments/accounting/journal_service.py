@@ -15,8 +15,8 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
         salary_slip = frappe.get_doc("Salary Slip", b2c_disbursement_ref.reference_name)
         if not salary_slip:
             frappe.log_error(
-                f"Salary Slip {b2c_disbursement_ref.reference_name} not found",
-                "Journal Service",
+                title="Journal Service",
+                message=f"Salary Slip {b2c_disbursement_ref.reference_name} not found",
             )
 
         if not b2c_disbursement.paid_from:

@@ -336,8 +336,9 @@ class TestFixB2CRequests(IntegrationTestCase):
 
         sent.assert_called_once_with(retried)
         log_error.assert_called_once()
-        self.assertIn(refused, log_error.call_args.args[0])
-        self.assertIn("owes 0.0", log_error.call_args.args[0])
+        logged = log_error.call_args.kwargs["message"]
+        self.assertIn(refused, logged)
+        self.assertIn("owes 0.0", logged)
         self._assert_unchanged(refused)
 
     def test_retry_reads_the_status_a_concurrent_retry_committed(self):

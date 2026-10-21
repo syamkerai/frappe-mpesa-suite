@@ -233,15 +233,76 @@ def test_entry_made_before_the_suite_for_the_receipt_counts(book):
     assert _booked(book, "B2C-1") == [1]
 
 
-def test_entry_for_the_receipt_against_another_document_does_not_count(book):
+def test_entry_for_the_receipt_against_another_document_is_left_to_staff(book):
     book.add_entry(PE, PER, {"docstatus": 1, "reference_no": "SKT1AAAAAA"},
                    [{"reference_doctype": "Purchase Invoice", "reference_name": "PI-9", "allocated_amount": 100}])
     _paid_row(book, 1, "SKT1AAAAAA")
 
-    book.mod.handle_successful_payment("D-1", "R1")
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
 
+    # Payment Entry refuses a second entry with the same receipt: none is attempted. The
+    # double-payout guard still counts the payout (paid_without_entry re-checks the entry).
     booked_for = [r["reference_name"] for r in book.frappe.db.table(PER).values()]
-    assert sorted(booked_for) == ["PI-1", "PI-9"]  # PI-1 is not left owing
+    assert booked_for == ["PI-9"]
+    request = book.frappe.db.table(REQ)["B2C-1"]
+    assert request["accounting_booked"] == 0  # the sweep looks again, quietly, each pass
+    assert "already on Payment Entry" in request["accounting_error"]
+    assert "it is on Purchase Invoice PI-9" in request["accounting_error"]
+    assert "Purchase Invoice PI-1 stay blocked" in request["accounting_error"]
+
+
+def test_unallocated_entry_for_the_receipt_books_nothing_more(book):
+    book.add_entry(PE, PER, {"docstatus": 1, "reference_no": "SKT1AAAAAA"}, [])  # an advance, not allocated
+    _paid_row(book, 1, "SKT1AAAAAA")
+
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
+    assert book.mod.handle_successful_payment("D-1", "R1") is False  # the next pass: still nothing
+    assert len(book.frappe.db.table(PE)) == 1
+    request = book.frappe.db.table(REQ)["B2C-1"]
+    assert request["accounting_booked"] == 0
+    assert "not allocated: allocate it to Purchase Invoice PI-1" in request["accounting_error"]
+
+
+def test_journal_entry_carrying_the_receipt_books_nothing_more(book):
+    # Bank Reconciliation's Create Voucher copies the receipt into a Journal Entry's Cheque No
+    book.add_entry(JE, JEA, {"docstatus": 1, "cheque_no": "SKT1AAAAAA"}, [{"reference_type": None, "reference_name": None}])
+    _paid_row(book, 1, "SKT1AAAAAA")
+
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
+    assert book.frappe.db.table(PE) == {}
+    assert "already on Journal Entry" in book.frappe.db.table(REQ)["B2C-1"]["accounting_error"]
+
+
+def test_payout_is_booked_once_the_stray_entry_no_longer_carries_its_receipt(book):
+    stray = book.add_entry(PE, PER, {"docstatus": 1, "reference_no": "SKT1AAAAAA"},
+                           [{"reference_doctype": "Purchase Invoice", "reference_name": "PI-9", "allocated_amount": 100}])
+    _paid_row(book, 1, "SKT1AAAAAA")
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
+
+    book.frappe.db.table(PE)[stray]["docstatus"] = 2  # it was another payout's: staff cancel it
+
+    assert book.mod.handle_successful_payment("D-1", "R1") is True
+    assert book.frappe.db.table(REQ)["B2C-1"]["accounting_booked"] == 1
+
+
+def test_draft_entry_for_the_receipt_elsewhere_keeps_the_payout_unbooked(book):
+    book.add_entry(PE, PER, {"docstatus": 0, "reference_no": "SKT1AAAAAA"},
+                   [{"reference_doctype": "Purchase Invoice", "reference_name": "PI-9", "allocated_amount": 100}])
+    _paid_row(book, 1, "SKT1AAAAAA")
+
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
+    request = book.frappe.db.table(REQ)["B2C-1"]
+    assert request["accounting_booked"] == 0
+    assert "a draft: submit it" in request["accounting_error"]
+
+
+def test_row_without_its_receipt_takes_the_paid_requests(book):
+    _paid_row(book, 1, None)
+    book.frappe.db.table(REQ)["B2C-1"].update(status="Paid", transaction_id="SKT1AAAAAA")
+
+    assert book.mod.handle_successful_payment("D-1", "R1") is True
+    assert book.frappe.db.table(REF)["R1"]["reference_no"] == "SKT1AAAAAA"  # healed first
+    assert _receipts(book) == ["SKT1AAAAAA"]  # the entry carries it
 
 
 def test_cancelled_entry_does_not_count(book):

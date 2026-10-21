@@ -390,7 +390,7 @@ def create_and_reconcile_payment_reconciliation(
             reconcile_doc.append("invoices", invoice_data)
 
         except Exception as e:
-            frappe.log_error(f"Failed to process invoice {invoice_name}: {str(e)}")
+            frappe.log_error(title="Mpesa reconciliation: invoice failed", message=f"Failed to process invoice {invoice_name}: {e}\n\n{frappe.get_traceback()}")
             continue
 
     for payment_entry in payment_entries:
@@ -412,7 +412,7 @@ def create_and_reconcile_payment_reconciliation(
             reconcile_doc.append("payments", payment_data)
 
         except Exception as e:
-            frappe.log_error(f"Failed to process payment {payment_entry}: {str(e)}")
+            frappe.log_error(title="Mpesa reconciliation: payment failed", message=f"Failed to process payment {payment_entry}: {e}\n\n{frappe.get_traceback()}")
             continue
 
     # No commit: this also runs inside Mpesa C2B Payment Register.on_submit, whose savepoint
@@ -421,7 +421,7 @@ def create_and_reconcile_payment_reconciliation(
         reconcile_doc.allocate_entries(args)
         reconcile_doc.reconcile()
     except Exception as e:
-        frappe.log_error(f"Reconciliation failed: {str(e)}")
+        frappe.log_error(title="Mpesa reconciliation failed", message=f"Reconciliation failed: {e}\n\n{frappe.get_traceback()}")
         frappe.throw(_("Reconciliation failed: {0}").format(str(e)))
 
 

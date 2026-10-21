@@ -63,7 +63,7 @@ def hold(c2b_data: dict) -> str | None:
     """Keep a confirmation for verification and ask Safaricom about it. Returns the IR name."""
     transid = cstr(c2b_data.get("transid")).strip()
     if not transid:
-        frappe.log_error(f"C2B confirmation without TransID: {c2b_data}", "M-Pesa C2B confirmation ignored")
+        frappe.log_error(title="M-Pesa C2B confirmation ignored", message=f"C2B confirmation without TransID: {c2b_data}")
         return None
 
     with named_lock(f"c2b:{transid}"):

@@ -180,8 +180,8 @@ def process_mpesa():
 
         if str(mpesa.businessshortcode or "") != meta["shortcode"]:
             frappe.log_error(
-                f"Mpesa C2B entry {mpesa_name}: invalid shortcode {mpesa.businessshortcode} (expected {meta['shortcode']})",
-                "Mpesa C2B",
+                title="Mpesa C2B",
+                message=f"Mpesa C2B entry {mpesa_name}: invalid shortcode {mpesa.businessshortcode} (expected {meta['shortcode']})",
             )
             continue
 
@@ -341,8 +341,8 @@ def update_mpesa_after_invoice_submission():
 
     if submitted_count != len(mpesa_names):
         frappe.log_error(
-            f"Processed {submitted_count} out of {len(mpesa_names)} Mpesa payments for {doctype} {invoice_name}.",
-            "Mpesa C2B",
+            title="Mpesa C2B",
+            message=f"Processed {submitted_count} out of {len(mpesa_names)} Mpesa payments for {doctype} {invoice_name}.",
         )
 
     return {"success": True, "total_amount": total_amount}

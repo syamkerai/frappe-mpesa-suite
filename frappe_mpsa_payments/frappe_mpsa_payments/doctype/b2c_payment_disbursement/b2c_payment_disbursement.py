@@ -273,8 +273,8 @@ class B2CPaymentDisbursement(Document):
                         b2c_request.retry_failed_payment()
                 except Exception as e:
                     frappe.log_error(
-                        f"Retry error for B2C Request {ref.b2c_disbursement_request}: {str(e)}",
-                        "Retry Failed Payments Error",
+                        title="Retry Failed Payments Error",
+                        message=f"Retry error for B2C Request {ref.b2c_disbursement_request}: {str(e)}",
                     )
 
     @frappe.whitelist()
@@ -479,7 +479,7 @@ class B2CPaymentDisbursement(Document):
             )
         except Exception as e:
             frappe.log_error(
-                f"Error fetching {doctype}: {str(e)}", "Error Fetching Entries"
+                title="Error Fetching Entries", message=f"Error fetching {doctype}: {str(e)}"
             )
             frappe.msgprint(
                 _(f"Failed to fetch {doctype} references"),

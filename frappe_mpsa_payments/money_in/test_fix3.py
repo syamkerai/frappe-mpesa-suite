@@ -292,6 +292,34 @@ class TestFix3(IntegrationTestCase):
         with self.assertRaisesRegex(frappe.ValidationError, f"awaiting accounting: {d1}"):
             self._check(d2)
 
+    def test_receipt_already_on_an_unallocated_entry_is_not_booked_again(self):
+        """Astral's old flow made the payout's Payment Entry as an unallocated advance: nothing more
+        is booked (Payment Entry would refuse a second entry with the receipt anyway), staff are
+        told once, and the invoice cannot be paid again until that entry is allocated to it."""
+        from frappe_mpsa_payments.services import b2c_postprocess_service as post
+
+        pinv = self._invoice(32000)
+        old = self._disbursement("OLD")
+        receipt = "SKU" + self.tag.upper()[:7]
+        row = self._row(old, 1, pinv, 32000, request=self._paid_request(1), transaction_id=receipt)
+        pe = f"_T-PE-{self.tag}-ADV"
+        frappe.get_doc({"doctype": "Payment Entry", "name": pe, "docstatus": 1, "payment_type": "Pay",
+                        "posting_date": nowdate(), "reference_no": receipt, "reference_date": nowdate()}).db_insert()
+
+        self.assertFalse(post.handle_successful_payment(old, row))
+        self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": receipt}), 1)
+        booked, note = frappe.db.get_value(REQ, self._paid_request(1), ["accounting_booked", "accounting_error"])
+        self.assertEqual(booked, 0)  # looked at again each pass, quietly
+        self.assertIn(f"already on Payment Entry {pe}", note)
+        self.assertIn(f"not allocated: allocate it to Purchase Invoice {pinv}", note)
+        self.assertFalse(post.handle_successful_payment(old, row))  # the next pass books nothing either
+        self.assertEqual(frappe.db.count("Payment Entry", {"reference_no": receipt}), 1)
+
+        new = self._disbursement("NEW", docstatus=0)
+        self._row(new, 1, pinv, 32000)
+        with self.assertRaisesRegex(frappe.ValidationError, f"awaiting accounting: {old}"):
+            self._check(new)
+
     def test_order_advance_allocated_to_an_invoice_still_counts_as_booked(self):
         """ERPNext moves an order's advance onto the invoice made from it (Get Advances): the
         Payment Entry then names the order only as the row's advance voucher."""

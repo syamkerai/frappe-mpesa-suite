@@ -348,7 +348,8 @@ def initiate_stk_push(**args) -> any:
     missing_fields = [field for field in required_fields if not args.get(field)]
     if missing_fields:
         frappe.log_error(
-            _("Missing required fields: {0}").format(", ".join(missing_fields))
+            title="Mpesa STK request invalid",
+            message=_("Missing required fields: {0}").format(", ".join(missing_fields)),
         )
     if args.get("payment_gateway"):
         apis.require(args.payment_gateway[6:], apis.STK)  # outside the try: the caller must see it
@@ -730,8 +731,8 @@ def delayed_insert_c2b(c2b_data: dict) -> None:
         if not settings_for_shortcode(c2b_data.get("businessshortcode")):
             # Not one of our paybills/tills: forged, or a shortcode nobody configured.
             frappe.log_error(
-                f"C2B confirmation for unknown BusinessShortCode: {frappe.as_json(c2b_data)}",
-                "M-Pesa C2B confirmation ignored",
+                title="M-Pesa C2B confirmation ignored",
+                message=f"C2B confirmation for unknown BusinessShortCode: {frappe.as_json(c2b_data)}",
             )
             return
 
@@ -745,8 +746,8 @@ def delayed_insert_c2b(c2b_data: dict) -> None:
         outcome, _name = insert_register(c2b_data)
         if outcome == STK_OWNED:
             frappe.log_error(
-                f"C2B {c2b_data['transid']} blocked due to existing Express Request",
-                "C2B Insert Skipped",
+                title="C2B Insert Skipped",
+                message=f"C2B {c2b_data['transid']} blocked due to existing Express Request",
             )
         frappe.db.commit()
 
@@ -790,11 +791,11 @@ def handle_transaction_status_result():
 
     except json.JSONDecodeError as e:
         frappe.log_error(
-            f"Failed to decode JSON from Mpesa response: {str(e)}", "Mpesa API Error"
+            title="Mpesa API Error", message=f"Failed to decode JSON from Mpesa response: {str(e)}"
         )
         return {"status": "error", "message": "Invalid JSON data"}
     except Exception as e:
-        frappe.log_error(f"Error in Mpesa webhook: {str(e)}", "Mpesa API Error")
+        frappe.log_error(title="Mpesa API Error", message=f"Error in Mpesa webhook: {str(e)}")
         return {"status": "error", "message": f"Webhook error: {str(e)}"}
 
 
@@ -1194,12 +1195,12 @@ def _handle_pull_failure(mpesa_settings: str, error) -> None:
 
     if is_network:
         frappe.log_error(
-            f"Gave up after {PULL_MAX_ATTEMPTS} attempts: {error}",
-            f"Mpesa Pull Transaction Error [{mpesa_settings}]",
+            title=f"Mpesa Pull Transaction Error [{mpesa_settings}]"[:140],
+            message=f"Gave up after {PULL_MAX_ATTEMPTS} attempts: {error}",
         )
         detail = f"connection failed after {PULL_MAX_ATTEMPTS} attempts"
     else:
-        frappe.log_error(str(error), f"Mpesa Pull Transaction Error [{mpesa_settings}]")
+        frappe.log_error(title=f"Mpesa Pull Transaction Error [{mpesa_settings}]"[:140], message=str(error))
         detail = "Check Error Logs"
 
     record_pull_outcome(mpesa_settings, status="Error", message=str(error or detail))

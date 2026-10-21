@@ -323,7 +323,7 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
                 output=json.dumps(payload),
             )
         else:
-            frappe.log_error(f"No integration_request on connector for {req.name}")
+            frappe.log_error(title="B2C callback", message=f"No integration_request on connector for {req.name}")
 
         # After the callback's commit (create_request_log above committed the old status):
         # a worker starting earlier would read Initiated, and a Failed result would never
