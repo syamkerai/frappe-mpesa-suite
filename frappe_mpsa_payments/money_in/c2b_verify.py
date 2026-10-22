@@ -59,6 +59,39 @@ def _save(ir_name: str, status: str | None = None, error: str | None = None, **s
 
 
 # ---------------------------------------------------------------- confirmation -> held
+def can_verify(shortcode) -> bool:
+    """A Transaction Status query can be sent for this shortcode: its Mpesa Settings has an
+    Initiator and a Security Credential. Navari never verified confirmations, so a shortcode
+    upgraded without an initiator (Astral's 208911) keeps registering them as before rather
+    than holding every one until someone releases it by hand."""
+    settings_name = settings_for_shortcode(shortcode)
+    if not settings_name:
+        return False
+    values = frappe.db.get_value("Mpesa Settings", settings_name, ["initiator_name", "security_credential"], as_dict=True)
+    return bool(values and values.initiator_name and values.security_credential)
+
+
+def note_unverified(shortcode) -> None:
+    """Tell staff, at most once a day per shortcode, that its confirmations are not verified."""
+    key = f"mpesa_suite:c2b_unverified:{cstr(shortcode).strip()}"
+    cache = frappe.cache()
+    try:  # read Redis, not this request's copy (v15 keeps a stale miss there; see daraja.client)
+        frappe.local.cache.pop(cache.make_key(key), None)
+    except Exception:
+        pass
+    if cache.get_value(key, expires=True):
+        return
+    cache.set_value(key, 1, expires_in_sec=24 * 3600)
+    frappe.log_error(
+        title=f"M-Pesa C2B confirmations on {shortcode} are not verified"[:140],
+        message=(
+            f"Verify C2B Confirmations is on, but Mpesa Settings for shortcode {shortcode} has no Initiator and "
+            "Security Credential, so Transaction Status cannot be asked. Its confirmations are registered as they "
+            "arrive (as before the suite). Add an initiator allowed to query Transaction Status to verify them."
+        ),
+    )
+
+
 def hold(c2b_data: dict) -> str | None:
     """Keep a confirmation for verification and ask Safaricom about it. Returns the IR name."""
     transid = cstr(c2b_data.get("transid")).strip()

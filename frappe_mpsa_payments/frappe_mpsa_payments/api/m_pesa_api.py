@@ -737,10 +737,14 @@ def delayed_insert_c2b(c2b_data: dict) -> None:
             return
 
         if enabled("verify_c2b_confirmations"):
-            # Unsigned callback: the register is created only once Transaction Status
-            # confirms the receipt, amount and shortcode (money_in.c2b_verify).
-            c2b_verify.hold(c2b_data)
-            return
+            shortcode = c2b_data.get("businessshortcode")
+            if c2b_verify.can_verify(shortcode):
+                # Unsigned callback: the register is created only once Transaction Status
+                # confirms the receipt, amount and shortcode (money_in.c2b_verify).
+                c2b_verify.hold(c2b_data)
+                return
+            # No initiator to ask with: register it as it arrives, as before the suite.
+            c2b_verify.note_unverified(shortcode)
 
         # Safaricom re-sends confirmations; keep exactly one live register per receipt.
         outcome, _name = insert_register(c2b_data)

@@ -684,3 +684,16 @@ paybill 208911, account B2B-TEST, through an approved Supplier M-Pesa Account:
 - Map the **Bank Account** (Accounting Mapping) on every Mpesa Settings record that pays by B2B.
 - Approve each supplier's paybill or till as a Supplier M-Pesa Account (proof attached, approved by
   a second person), with the name M-Pesa shows as the expected name.
+
+## Upgrade safety: C2B verification needs an initiator (2026-10-22)
+
+"Verify C2B Confirmations" is on by default after the upgrade. It asks Safaricom's Transaction
+Status about each paybill confirmation, which needs an Initiator and Security Credential on that
+shortcode's Mpesa Settings. On Astral, 208911 (the main paybill) has no initiator, so every
+confirmation would have been held and then marked "Cannot verify". Paybill payments would have
+stopped appearing in the ERP until someone released them by hand. Now a shortcode without an
+initiator registers its confirmations as they arrive, as Navari always did, and an Error Log
+reminds staff (at most once a day) to add an initiator allowed to query Transaction Status.
+Shortcodes with an initiator are verified as before. The Security Credential is regenerated
+whenever someone types the initiator password on Mpesa Settings and saves, so a Safaricom-forced
+password change needs no developer.

@@ -84,6 +84,31 @@ class TestCallbackVerification(IntegrationTestCase):
         self.assertEqual(c2b_verify.apply_result(ir, forged), "ignored")
         self.assertFalse(frappe.db.exists(REGISTER, {"transid": payload["transid"]}))
 
+    def test_shortcode_without_initiator_registers_as_before(self):
+        """An upgraded paybill with no initiator (Astral's 208911) cannot be asked about: its
+        confirmations are registered as they arrive, as under Navari, and staff are told once."""
+        from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import delayed_insert_c2b
+
+        frappe.db.set_value("Mpesa Settings", t.SETTINGS, {"initiator_name": None, "security_credential": None})
+        frappe.cache().delete_value(f"mpesa_suite:c2b_unverified:{t.SHORTCODE}")
+        start = frappe.utils.now()
+        try:
+            first, second = t.confirmation_payload(300), t.confirmation_payload(200)
+            with patch("frappe_mpsa_payments.money_out.common.post") as post:
+                delayed_insert_c2b(first)
+                delayed_insert_c2b(second)
+            self.assertFalse(post.called, "no Transaction Status query without an initiator")
+            for payload in (first, second):
+                self.assertTrue(frappe.db.exists(REGISTER, {"transid": payload["transid"]}))
+                self.assertFalse(frappe.db.exists(
+                    "Integration Request", {"request_id": payload["transid"], "integration_request_service": c2b_verify.SERVICE}))
+            notes = frappe.get_all("Error Log", filters={"method": f"M-Pesa C2B confirmations on {t.SHORTCODE} are not verified",
+                                                         "creation": [">=", start]})
+            self.assertEqual(len(notes), 1, "one reminder, not one per confirmation")
+        finally:
+            frappe.db.set_value("Mpesa Settings", t.SETTINGS, {"initiator_name": "testapi", "security_credential": "dummy"})
+            frappe.cache().delete_value(f"mpesa_suite:c2b_unverified:{t.SHORTCODE}")
+
     def test_unknown_shortcode_confirmation_is_dropped(self):
         from frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api import delayed_insert_c2b
 
