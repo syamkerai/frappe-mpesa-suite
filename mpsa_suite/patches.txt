@@ -1,0 +1,16 @@
+[pre_model_sync]
+# Patches added in this section will be executed before doctypes are migrated
+# Read docs to understand patches: https://frappeframework.com/docs/v14/user/en/database-migrations
+
+# mpsa_suite.mpsa_suite.patches.sales_invoice_patch
+mpsa_suite.mpsa_suite.patches.create_suite_roles
+
+[post_model_sync]
+# Patches added in this section will be executed after doctypes are migrated
+mpsa_suite.mpsa_suite.patches.c2b_payment_register
+mpsa_suite.mpsa_suite.patches.payment_entry_custom_fields
+mpsa_suite.mpsa_suite.patches.remove_unused_upstream_features
+mpsa_suite.mpsa_suite.patches.mpesa_settings_api_switches
+mpsa_suite.mpsa_suite.patches.drop_text_search_index_setters
+mpsa_suite.mpsa_suite.patches.relink_b2c_reference_rows
+mpsa_suite.mpsa_suite.patches.payout_lines_from_upgrade_date

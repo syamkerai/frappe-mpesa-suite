@@ -28,10 +28,10 @@ REF = "B2C Payment Disbursement Reference"
 REQ = "B2C Disbursement Request"
 PE, PER = "Payment Entry", "Payment Entry Reference"
 JE, JEA = "Journal Entry", "Journal Entry Account"
-POST = "frappe_mpsa_payments.services.b2c_postprocess_service"
-REQ_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_disbursement_request.b2c_disbursement_request"
-DISB_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
-CONNECTOR = "frappe_mpsa_payments.connectors.mpesa.b2c_connector"
+POST = "mpsa_suite.services.b2c_postprocess_service"
+REQ_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+DISB_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
+CONNECTOR = "mpsa_suite.connectors.mpesa.b2c_connector"
 
 
 @contextlib.contextmanager
@@ -132,9 +132,9 @@ def book():
               "b2c_payment_disbursement": disb.name}],
         )
 
-    journal = types.ModuleType("frappe_mpsa_payments.accounting.journal_service")
+    journal = types.ModuleType("mpsa_suite.accounting.journal_service")
     journal.create_journal_entry = create_journal_entry
-    payment = types.ModuleType("frappe_mpsa_payments.accounting.payment_entry_service")
+    payment = types.ModuleType("mpsa_suite.accounting.payment_entry_service")
     payment.create_payment_entry_for_doc = create_payment_entry_for_doc
     try:
         with _stub_modules(**{journal.__name__: journal, payment.__name__: payment}):
@@ -482,7 +482,7 @@ def _salary_paid_sql(frappe):
 def retry(monkeypatch):
     frappe, saved = fake_frappe.install()
     sends = []
-    b2c_api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.b2c")
+    b2c_api = types.ModuleType("mpsa_suite.mpsa_suite.api.b2c")
     b2c_api.make_b2c_payment_request = lambda name: sends.append(
         (name, dict(frappe.db.table(REQ)[name]), list(frappe.locks_held))
     )
@@ -513,7 +513,7 @@ def retry(monkeypatch):
             frappe.db.get_value = get_value
             frappe.db.sql = _salary_paid_sql(frappe)
             mod = importlib.import_module(REQ_MODULE)
-            common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+            common = importlib.import_module("mpsa_suite.money_in.common")
             disb = importlib.import_module(DISB_MODULE)
 
             @contextlib.contextmanager

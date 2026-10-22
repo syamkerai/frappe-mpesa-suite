@@ -1,0 +1,199 @@
+{
+ "actions": [],
+ "creation": "2026-10-22 21:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "mpesa_settings",
+  "shortcode",
+  "sub_account",
+  "balance",
+  "taken_at",
+  "source",
+  "column_break_a",
+  "check_status",
+  "expected_balance",
+  "difference",
+  "anchor",
+  "checked_on",
+  "reference_doctype",
+  "reference_name",
+  "note"
+ ],
+ "fields": [
+  {
+   "fieldname": "mpesa_settings",
+   "fieldtype": "Link",
+   "label": "Mpesa Settings",
+   "options": "Mpesa Settings",
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "shortcode",
+   "fieldtype": "Data",
+   "label": "Short Code",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "sub_account",
+   "fieldtype": "Data",
+   "label": "Sub-Account",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "balance",
+   "fieldtype": "Currency",
+   "label": "Balance",
+   "options": "KES",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "taken_at",
+   "fieldtype": "Datetime",
+   "label": "As At",
+   "in_list_view": 1,
+   "search_index": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "Account Balance\nStatement",
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "check_status",
+   "fieldtype": "Select",
+   "label": "Check",
+   "options": "Not Checked\nAgrees\nGap\nExplained\nCannot Check",
+   "default": "Not Checked",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "expected_balance",
+   "fieldtype": "Currency",
+   "label": "Lines Say",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "difference",
+   "fieldtype": "Currency",
+   "label": "Difference",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "anchor",
+   "fieldtype": "Link",
+   "label": "Checked From",
+   "options": "Mpesa Balance Snapshot",
+   "read_only": 1
+  },
+  {
+   "fieldname": "checked_on",
+   "fieldtype": "Datetime",
+   "label": "Checked On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Link",
+   "label": "Reference Type",
+   "options": "DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Reference",
+   "options": "reference_doctype",
+   "read_only": 1
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Small Text",
+   "label": "Note",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-22 21:30:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "Mpesa Balance Snapshot",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "autoname": "hash",
+ "in_create": 1,
+ "title_field": "sub_account",
+ "description": "A sub-account balance Safaricom reported (Account Balance query, or the last row of an imported statement) and whether the ERP's lines agree with it.",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 0,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "write": 1,
+   "create": 0,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Viewer",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ]
+}

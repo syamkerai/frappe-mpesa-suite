@@ -6,7 +6,7 @@ Dynamic text (f-strings, str(e), .format) must therefore go in ``message=``, nev
 import ast
 from pathlib import Path
 
-APP = Path(__file__).resolve().parents[2] / "frappe_mpsa_payments"
+APP = Path(__file__).resolve().parents[2] / "mpsa_suite"
 NEWLINE = chr(10)
 
 

@@ -1,0 +1,297 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "MLAB-.#####",
+ "creation": "2026-10-19 13:00:00.000000",
+ "description": "Runs every M-Pesa flow against Daraja's sandbox and checks what the app did.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "status",
+  "column_break_head",
+  "passed",
+  "failed",
+  "waiting",
+  "skipped",
+  "last_checked",
+  "setup_section",
+  "c2b_settings",
+  "c2b_shortcode",
+  "c2b_type",
+  "test_msisdn",
+  "stk_settings",
+  "tester_phone",
+  "column_break_setup",
+  "b2c_settings",
+  "b2b_settings",
+  "amount",
+  "docs_section",
+  "company",
+  "test_sales_invoice",
+  "test_supplier",
+  "column_break_docs",
+  "test_purchase_invoice",
+  "test_b2c_disbursement",
+  "cases_section",
+  "cases_help",
+  "cases",
+  "health_section",
+  "health_html",
+  "health_report"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "reqd": 1,
+   "default": "Sandbox test run",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nRunning\nPartly Run\nPassed\nFailed",
+   "default": "Draft",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "passed",
+   "fieldtype": "Int",
+   "label": "Passed",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "failed",
+   "fieldtype": "Int",
+   "label": "Failed",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "waiting",
+   "fieldtype": "Int",
+   "label": "Waiting",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped",
+   "fieldtype": "Int",
+   "label": "Skipped",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_checked",
+   "fieldtype": "Datetime",
+   "label": "Last Checked",
+   "read_only": 1
+  },
+  {
+   "fieldname": "setup_section",
+   "fieldtype": "Section Break",
+   "label": "Sandbox Setup",
+   "description": "Every Mpesa Settings record here must have Sandbox ticked. Values come from Daraja's Test Credentials page."
+  },
+  {
+   "fieldname": "c2b_settings",
+   "fieldtype": "Link",
+   "label": "C2B Mpesa Settings",
+   "options": "Mpesa Settings",
+   "description": "Record for the C2B test shortcode (600xxx) with Initiator Name / Password from Test Credentials."
+  },
+  {
+   "fieldname": "c2b_shortcode",
+   "fieldtype": "Data",
+   "label": "C2B Shortcode",
+   "description": "The 600xxx shortcode customers 'pay'. Filled from the settings if empty."
+  },
+  {
+   "fieldname": "c2b_type",
+   "fieldtype": "Select",
+   "label": "C2B Type",
+   "options": "Pay Bill\nBuy Goods",
+   "default": "Pay Bill"
+  },
+  {
+   "fieldname": "test_msisdn",
+   "fieldtype": "Data",
+   "label": "Test MSISDN",
+   "default": "254708374149",
+   "description": "Daraja's test phone number used for simulated C2B payments."
+  },
+  {
+   "fieldname": "stk_settings",
+   "fieldtype": "Link",
+   "label": "STK Mpesa Settings",
+   "options": "Mpesa Settings",
+   "description": "Record for shortcode 174379 with its sandbox Passkey."
+  },
+  {
+   "fieldname": "tester_phone",
+   "fieldtype": "Data",
+   "label": "Your Phone (for STK prompts)",
+   "description": "Your own Safaricom number, 2547XXXXXXXX. Sandbox prompts move no money."
+  },
+  {
+   "fieldname": "column_break_setup",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "b2c_settings",
+   "fieldtype": "Link",
+   "label": "B2C Mpesa Settings",
+   "options": "Mpesa Settings"
+  },
+  {
+   "fieldname": "b2b_settings",
+   "fieldtype": "Link",
+   "label": "B2B Mpesa Settings",
+   "options": "Mpesa Settings"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Int",
+   "label": "Test Amount (KES)",
+   "default": "10",
+   "description": "Whole shillings used by every test."
+  },
+  {
+   "fieldname": "docs_section",
+   "fieldtype": "Section Break",
+   "label": "Test Documents",
+   "description": "Use a test company: tests post real Payment Entries and GL entries on this site."
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "test_sales_invoice",
+   "fieldtype": "Link",
+   "label": "Test Sales Invoice",
+   "options": "Sales Invoice",
+   "description": "Submitted, with at least 5 x Test Amount outstanding. C2B and STK payments are booked against it."
+  },
+  {
+   "fieldname": "test_supplier",
+   "fieldtype": "Link",
+   "label": "Test Supplier",
+   "options": "Supplier",
+   "description": "With an approved Supplier M-Pesa Account for Party B (600000). Set the account hold to 0 hours while testing."
+  },
+  {
+   "fieldname": "column_break_docs",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "test_purchase_invoice",
+   "fieldtype": "Link",
+   "label": "Test Purchase Invoice",
+   "options": "Purchase Invoice",
+   "description": "Optional: the B2B test pays it and books a Payment Entry."
+  },
+  {
+   "fieldname": "test_b2c_disbursement",
+   "fieldtype": "Link",
+   "label": "Test B2C Payment Disbursement",
+   "options": "B2C Payment Disbursement",
+   "description": "A disbursement to the Test MSISDN (a draft is fine: the lab submits it)."
+  },
+  {
+   "fieldname": "cases_section",
+   "fieldtype": "Section Break",
+   "label": "Tests"
+  },
+  {
+   "fieldname": "cases_help",
+   "fieldtype": "HTML",
+   "options": "<p class=\"text-muted small\">Run <b>Health Check</b> first. <b>Run Ready Tests</b> starts the automatic ones; start <b>Guided</b> tests one at a time with the row's Run button and follow the instruction on your phone. Results are checked every minute.</p>"
+  },
+  {
+   "fieldname": "cases",
+   "fieldtype": "Table",
+   "label": "Tests",
+   "options": "Mpesa Sandbox Test Case"
+  },
+  {
+   "fieldname": "health_section",
+   "fieldtype": "Section Break",
+   "label": "Health Check",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "health_html",
+   "fieldtype": "HTML",
+   "label": "Health"
+  },
+  {
+   "fieldname": "health_report",
+   "fieldtype": "Code",
+   "label": "Health Report (JSON)",
+   "read_only": 1,
+   "options": "JSON",
+   "hidden": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-19 13:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "Mpesa Sandbox Test Run",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "delete": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "delete": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

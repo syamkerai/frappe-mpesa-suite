@@ -20,9 +20,9 @@ def wallet():
     try:
         yield fake_frappe._dict(
             frappe=frappe,
-            accounts=importlib.import_module("frappe_mpsa_payments.wallet.accounts"),
-            balances=importlib.import_module("frappe_mpsa_payments.wallet.balances"),
-            importer=importlib.import_module("frappe_mpsa_payments.wallet.statement_import"),
+            accounts=importlib.import_module("mpsa_suite.wallet.accounts"),
+            balances=importlib.import_module("mpsa_suite.wallet.balances"),
+            importer=importlib.import_module("mpsa_suite.wallet.statement_import"),
         )
     finally:
         fake_frappe.uninstall(saved)
@@ -60,7 +60,7 @@ def test_receiving_sub_account_is_merchant_for_a_till(wallet):
 
 
 def test_statement_row_key_is_stable_and_tells_rows_apart(wallet):
-    from frappe_mpsa_payments.wallet.statement_file import Row
+    from mpsa_suite.wallet.statement_file import Row
 
     def row(details, withdrawn):
         return Row("UJMTM6331C", datetime.datetime(2026, 10, 22, 17, 34, 53), None, details, "Completed", 0.0,

@@ -19,8 +19,8 @@ def env(monkeypatch, request):
     frappe, saved = fake_frappe.install()
     try:
         frappe.local.cache = {}
-        client = importlib.import_module("frappe_mpsa_payments.daraja.client")
-        connectors = importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.connectors.connectors")
+        client = importlib.import_module("mpsa_suite.daraja.client")
+        connectors = importlib.import_module("mpsa_suite.mpsa_suite.connectors.connectors")
         cache = FakeCache(frappe, version=request.param)
         monkeypatch.setattr(client, "get_cache", lambda: cache)
         monkeypatch.setattr(connectors, "update_integration_request", lambda *a, **kw: None)

@@ -74,7 +74,7 @@ def install_env(frappe, monkeypatch):
     for name in ("frappe.custom", "frappe.custom.doctype", "frappe.custom.doctype.property_setter"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    calls.install = importlib.import_module("frappe_mpsa_payments.install")
+    calls.install = importlib.import_module("mpsa_suite.install")
     return calls
 
 
@@ -126,7 +126,7 @@ def test_index_hook_failure_on_one_field_does_not_stop_the_others(frappe, instal
 # ---------------------------------------------------------------- C2B verification result
 @pytest.fixture
 def c2b(frappe, monkeypatch):
-    stub = types.ModuleType("frappe_mpsa_payments.utils.encoding_initiator_password")
+    stub = types.ModuleType("mpsa_suite.utils.encoding_initiator_password")
     stub.generate_security_credential = lambda *a, **kw: ""
     monkeypatch.setitem(sys.modules, stub.__name__, stub)
     frappe.db.table("Mpesa Settings")[SETTINGS] = {"name": SETTINGS, "business_shortcode": SHORTCODE,
@@ -138,7 +138,7 @@ def c2b(frappe, monkeypatch):
         "data": json.dumps({"transid": "RKL51ZDR4F", "businessshortcode": SHORTCODE, "transamount": 300}),
         "output": json.dumps(state),
     }
-    return importlib.import_module("frappe_mpsa_payments.money_in.c2b_verify")
+    return importlib.import_module("mpsa_suite.money_in.c2b_verify")
 
 
 @pytest.mark.parametrize(
@@ -197,7 +197,7 @@ def orders(frappe, monkeypatch):
         setattr(workflow, name, type(name, (frappe.ValidationError,), {}))  # as in frappe.model.workflow
     monkeypatch.setitem(sys.modules, "frappe.model.workflow", workflow)
     frappe.MandatoryError = type("MandatoryError", (frappe.ValidationError,), {})
-    mod = importlib.import_module("frappe_mpsa_payments.money_in.sales_order")
+    mod = importlib.import_module("mpsa_suite.money_in.sales_order")
     logged = []
     monkeypatch.setattr(mod, "log_match", lambda *a, **kw: logged.append(kw["details"]))
     frappe.db.table("Sales Order")["SO-1"] = {"name": "SO-1", "docstatus": 0, "status": "Draft",

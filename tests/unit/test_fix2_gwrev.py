@@ -113,7 +113,7 @@ def env(monkeypatch):
                                                        "can_verify_receipts": 1}
 
         # the real _book_direct, with ERPNext's Payment Entry maker replaced
-        pe_module = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry")
+        pe_module = types.ModuleType("mpsa_suite.mpsa_suite.api.payment_entry")
 
         def create_payment_entry(company, customer, amount, currency, mop, party_type, posting_date, reference_no,
                                  reference_date, cost_center, submit, references=None):
@@ -127,9 +127,9 @@ def env(monkeypatch):
         pe_module.create_payment_entry = create_payment_entry
         sys.modules[pe_module.__name__] = pe_module  # dropped again by fake_frappe.uninstall
 
-        intents = importlib.import_module("frappe_mpsa_payments.gateway.intents")
-        webhooks = importlib.import_module("frappe_mpsa_payments.gateway.webhooks")
-        common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+        intents = importlib.import_module("mpsa_suite.gateway.intents")
+        webhooks = importlib.import_module("mpsa_suite.gateway.webhooks")
+        common = importlib.import_module("mpsa_suite.money_in.common")
         queued = []
         monkeypatch.setattr(webhooks, "queue", lambda intent: queued.append((intent.name, intent.status)))
         ns = fake_frappe._dict(frappe=frappe, intents=intents, common=common, queued=queued, fail_receipts=set(),
@@ -228,7 +228,7 @@ def test_reversal_holding_uses_the_receipt_the_caller_has(env):
 
 # ================================================================ item 1: the gateway refuses refunded money
 def v1(env):
-    return importlib.import_module("frappe_mpsa_payments.gateway.v1")
+    return importlib.import_module("mpsa_suite.gateway.v1")
 
 
 def verify_receipt(api, client, **kw):
@@ -241,7 +241,7 @@ def client(env):
 
 
 def test_reversed_draft_register_is_claimed_and_never_attached(env):
-    from frappe_mpsa_payments.gateway.auth import ApiError
+    from mpsa_suite.gateway.auth import ApiError
 
     intent(env, status="Prompted")
     prompt(env, "STK-1", status="Failed")  # prompted: Manual Attach would book straight from the receipt
@@ -304,7 +304,7 @@ def test_refresh_never_takes_a_reversed_stk_receipt(env):
 
 
 def test_mark_paid_refuses_a_receipt_reversed_meanwhile(env):
-    from frappe_mpsa_payments.gateway.auth import ApiError
+    from mpsa_suite.gateway.auth import ApiError
 
     doc = intent(env)
     register(env, "REG-1", "RCPT000001")
@@ -358,7 +358,7 @@ def test_extra_receipt_reversed_by_receipt_is_skipped(env):
 # ================================================================ item 4: C23 prompts left unreconciled
 def on_payment_authorized(env, name=MPI):
     module = importlib.import_module(
-        "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_payment_intent.mpesa_payment_intent"
+        "mpsa_suite.mpsa_suite.doctype.mpesa_payment_intent.mpesa_payment_intent"
     )
     doc = module.MpesaPaymentIntent()
     doc.name = name
@@ -479,7 +479,7 @@ def pos(env):
                                                       "company": "Astral", "default_account": "Mpesa - A"}
     f.db.table("POS Invoice")["POS-1"] = {"name": "POS-1", "docstatus": 0, "company": "Astral", "payments": []}
     f.session.user = "Administrator"
-    return importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_quick_pay")
+    return importlib.import_module("mpsa_suite.mpsa_suite.api.mpesa_quick_pay")
 
 
 def pos_registers(env):
@@ -612,7 +612,7 @@ def test_page_status_never_marks_paid_with_a_pos_register(env):
 
 def test_mark_paid_refuses_a_register_put_on_an_invoice_meanwhile(env):
     # refresh read REG-1 as a draft; the cashier's submit committed before the receipt lock
-    from frappe_mpsa_payments.gateway.auth import ApiError
+    from mpsa_suite.gateway.auth import ApiError
 
     doc = intent(env, status="Expired", customer=None)
     consumed_register(env)

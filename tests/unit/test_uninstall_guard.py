@@ -19,9 +19,9 @@ class FakeDB:
 def guard():
     frappe, saved = fake_frappe.install()
     try:
-        module = importlib.import_module("frappe_mpsa_payments.uninstall_guard")
+        module = importlib.import_module("mpsa_suite.uninstall_guard")
         frappe.conf = fake_frappe._dict()
-        frappe.get_installed_apps = lambda: ["frappe", "erpnext", "frappe_mpsa_payments"]
+        frappe.get_installed_apps = lambda: ["frappe", "erpnext", "mpsa_suite"]
         frappe.db = FakeDB()
         yield module, frappe
     finally:
@@ -36,7 +36,7 @@ def test_uninstall_is_refused_on_its_own(guard):
 
 def test_refused_when_mpsa_suite_is_installed_but_does_not_own_the_module(guard):
     module, frappe = guard
-    frappe.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments", "mpsa_suite"]
+    frappe.get_installed_apps = lambda: ["frappe", "mpsa_suite", "mpsa_suite"]
     with pytest.raises(Exception, match="would drop every M-Pesa table"):
         module.before_uninstall()
 
@@ -50,7 +50,7 @@ def test_refused_when_the_module_exists_but_mpsa_suite_is_not_installed(guard):
 
 def test_hand_over_is_allowed(guard):
     module, frappe = guard
-    frappe.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments", "mpsa_suite"]
+    frappe.get_installed_apps = lambda: ["frappe", "mpsa_suite", "mpsa_suite"]
     frappe.db = FakeDB(owner="mpsa_suite")
     module.before_uninstall()
 

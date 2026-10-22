@@ -18,7 +18,7 @@ ALL = {"use_c2b": 1, "use_stk": 1, "use_b2c": 1, "use_b2b": 1}
 def env():
     frappe, saved = fake_frappe.install()
     try:
-        yield fake_frappe._dict(frappe=frappe, common=importlib.import_module("frappe_mpsa_payments.money_in.common"))
+        yield fake_frappe._dict(frappe=frappe, common=importlib.import_module("mpsa_suite.money_in.common"))
     finally:
         fake_frappe.uninstall(saved)
 

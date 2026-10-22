@@ -26,12 +26,12 @@ HELD = "Mpesa C2B Verification"
 def env(monkeypatch):
     frappe, saved = fake_frappe.install()
     # m_pesa_api imports the security-credential helper, which needs `cryptography`
-    stub = types.ModuleType("frappe_mpsa_payments.utils.encoding_initiator_password")
+    stub = types.ModuleType("mpsa_suite.utils.encoding_initiator_password")
     stub.generate_security_credential = lambda *a, **kw: ""
     sys.modules[stub.__name__] = stub
     try:
-        api = importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api")
-        c2b_verify = importlib.import_module("frappe_mpsa_payments.money_in.c2b_verify")
+        api = importlib.import_module("mpsa_suite.mpsa_suite.api.m_pesa_api")
+        c2b_verify = importlib.import_module("mpsa_suite.money_in.c2b_verify")
         monkeypatch.setattr(fake_frappe.FakeDoc, "save", lambda self, **kw: None, raising=False)
         frappe.logger = lambda *a, **kw: types.SimpleNamespace(info=lambda *a, **kw: None)
         frappe.db.table("Mpesa Settings")[SETTINGS] = {

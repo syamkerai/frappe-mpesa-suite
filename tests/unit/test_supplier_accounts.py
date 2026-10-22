@@ -26,7 +26,7 @@ def env():
         frappe.db.table("Mpesa Settings")["Astral 600999"] = {
             "name": "Astral 600999", "business_shortcode": "600999", "till_number": "5123456",
         }
-        sa = importlib.import_module("frappe_mpsa_payments.money_out.supplier_accounts")
+        sa = importlib.import_module("mpsa_suite.money_out.supplier_accounts")
         yield fake_frappe._dict(frappe=frappe, sa=sa)
     finally:
         fake_frappe.uninstall(saved)

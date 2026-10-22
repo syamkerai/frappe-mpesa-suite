@@ -2,7 +2,7 @@
 
 import pytest
 
-from frappe_mpsa_payments.daraja import apis
+from mpsa_suite.daraja import apis
 
 EXPRESS, C2B, B2C = apis.LEGACY_EXPRESS, apis.LEGACY_C2B, apis.LEGACY_B2C
 

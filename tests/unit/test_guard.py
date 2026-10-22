@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from frappe_mpsa_payments.daraja.guard import (
+from mpsa_suite.daraja.guard import (
     DEFAULT_SAFARICOM_IPS,
     callback_url_problems,
     daraja_id,
@@ -17,7 +17,7 @@ from frappe_mpsa_payments.daraja.guard import (
     truncate_reference,
 )
 
-APP = Path(__file__).resolve().parents[2] / "frappe_mpsa_payments"
+APP = Path(__file__).resolve().parents[2] / "mpsa_suite"
 
 # The 12 IPs Daraja publishes (GettingStarted, "Callback and IP Whitelisting").
 PUBLISHED_IPS = [
@@ -95,7 +95,7 @@ def test_stk_amount_daraja_maximum():
 @pytest.mark.parametrize(
     "url,sandbox,expected",
     [
-        ("https://erp.example.com/api/method/frappe_mpsa_payments.money_out.api.b2b_result?ref=MB2B-1&t=ab12", False, []),
+        ("https://erp.example.com/api/method/mpsa_suite.money_out.api.b2b_result?ref=MB2B-1&t=ab12", False, []),
         ("http://erp.example.com/api/method/x.confirmation", True, []),  # sandbox may use HTTP
         ("http://erp.example.com/api/method/x.confirmation", False, ["production callback URLs must use HTTPS"]),
         ("https://erp.example.com/api/method/x.balance_query_callback", False, ["query"]),
@@ -149,9 +149,9 @@ def test_names_id_matches_exactly_in_json_and_logged_dict():
 
 # Upstream endpoint names the app no longer sends; kept so results for requests (or Pull
 # registrations) made with the old URL still land.
-_SETTINGS_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings"
+_SETTINGS_MODULE = "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings"
 LEGACY_CALLBACKS = {
-    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.balance_query_callback",
+    "mpsa_suite.mpsa_suite.api.m_pesa_api.balance_query_callback",
     f"{_SETTINGS_MODULE}.process_balance_info",
     f"{_SETTINGS_MODULE}.pull_transaction_callback",
 }

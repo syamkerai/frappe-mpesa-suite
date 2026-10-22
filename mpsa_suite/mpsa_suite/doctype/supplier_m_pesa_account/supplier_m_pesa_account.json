@@ -1,0 +1,295 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "MSA-.#####",
+ "creation": "2026-10-19 12:00:00.000000",
+ "description": "A supplier's paybill or till number, approved by a manager, that B2B payments may be sent to.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "supplier",
+  "supplier_name",
+  "account_type",
+  "shortcode",
+  "account_number",
+  "column_break_main",
+  "expected_name",
+  "is_default",
+  "proof",
+  "remarks",
+  "approval_section",
+  "approved_by",
+  "approved_on",
+  "column_break_appr",
+  "active_from",
+  "history_section",
+  "last_receiver_name",
+  "last_paid_on",
+  "column_break_hist",
+  "name_mismatch",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "label": "Supplier",
+   "options": "Supplier",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "supplier_name",
+   "fieldtype": "Data",
+   "label": "Supplier Name",
+   "fetch_from": "supplier.supplier_name",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "account_type",
+   "fieldtype": "Select",
+   "label": "Account Type",
+   "options": "Paybill\nTill (Buy Goods)",
+   "reqd": 1,
+   "default": "Paybill",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "shortcode",
+   "fieldtype": "Data",
+   "label": "Paybill / Till Number",
+   "reqd": 1,
+   "in_list_view": 1,
+   "search_index": 1,
+   "description": "Exactly as the supplier gave it in writing. Digits only."
+  },
+  {
+   "fieldname": "account_number",
+   "fieldtype": "Data",
+   "label": "Account Number",
+   "depends_on": "eval:doc.account_type==\"Paybill\"",
+   "mandatory_depends_on": "eval:doc.account_type==\"Paybill\"",
+   "description": "The account number the supplier told you to use with their paybill."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "expected_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Shows",
+   "reqd": 1,
+   "description": "The business name M-Pesa shows for this number (e.g. on the supplier's invoice or a test payment). Every payment is checked against it."
+  },
+  {
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "label": "Default for This Supplier",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "proof",
+   "fieldtype": "Attach",
+   "label": "Proof From Supplier",
+   "reqd": 1,
+   "description": "Supplier letter, invoice or statement showing these payment details."
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "approval_section",
+   "fieldtype": "Section Break",
+   "label": "Approval"
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_appr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "active_from",
+   "fieldtype": "Datetime",
+   "label": "Can Be Paid From",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Approval time plus the hold period in M-Pesa Suite Settings."
+  },
+  {
+   "fieldname": "history_section",
+   "fieldtype": "Section Break",
+   "label": "Last Payment",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "last_receiver_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Paid Last Time",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_paid_on",
+   "fieldtype": "Datetime",
+   "label": "Last Paid On",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_hist",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "name_mismatch",
+   "fieldtype": "Check",
+   "label": "Name Did Not Match",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "options": "Supplier M-Pesa Account",
+   "read_only": 1,
+   "no_copy": 1,
+   "print_hide": 1,
+   "search_index": 1
+  }
+ ],
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-10-19 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "Supplier M-Pesa Account",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "amend": 1
+  },
+  {
+   "role": "M-Pesa Payer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "amend": 1
+  },
+  {
+   "role": "Purchase Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "create": 1,
+   "write": 1,
+   "share": 1,
+   "email": 1,
+   "amend": 1
+  },
+  {
+   "role": "M-Pesa Viewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Purchase User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "search_fields": "supplier_name,shortcode,account_number",
+ "show_title_field_in_link": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "supplier_name",
+ "track_changes": 1
+}

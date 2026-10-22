@@ -39,14 +39,14 @@ PARENT = "B2C Payment Disbursement"
 REQ = "B2C Disbursement Request"
 CLIENT = "Shop"
 MPI = "MPI-26-10-000001"
-EXPRESS_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request"
-INTENT_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_payment_intent.mpesa_payment_intent"
+EXPRESS_MODULE = "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request"
+INTENT_MODULE = "mpsa_suite.mpsa_suite.doctype.mpesa_payment_intent.mpesa_payment_intent"
 REGISTER_MODULE = (
-    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_c2b_payment_register.mpesa_c2b_payment_register"
+    "mpsa_suite.mpsa_suite.doctype.mpesa_c2b_payment_register.mpesa_c2b_payment_register"
 )
-REQ_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_disbursement_request.b2c_disbursement_request"
-DISB_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
-PE_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry"
+REQ_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+DISB_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
+PE_MODULE = "mpsa_suite.mpsa_suite.api.payment_entry"
 # The register's fields that come with ERPNext (custom fields made by migrate.py)
 ERPNEXT_REGISTER_FIELDS = {"payment_entry", "pos_invoice", "sales_invoice"}
 
@@ -147,7 +147,7 @@ def express(monkeypatch):
         exceptions = types.ModuleType("frappe.exceptions")
         exceptions.DoesNotExistError = frappe.DoesNotExistError
         monkeypatch.setitem(sys.modules, "frappe.exceptions", exceptions)
-        api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api")
+        api = types.ModuleType("mpsa_suite.mpsa_suite.api.m_pesa_api")
         api.check_transaction_status = api.initiate_stk_push = lambda **kw: None
         sys.modules[api.__name__] = api  # dropped again by fake_frappe.uninstall
         mod = importlib.import_module(EXPRESS_MODULE)
@@ -182,7 +182,7 @@ def express(monkeypatch):
                                              "is_reconciled": 0, "booking_attempts": 0,
                                              "reference_doctype": "Sales Invoice", "reference_name": "SINV-1"}
         yield fake_frappe._dict(frappe=frappe, mod=mod, Express=Express, booked=booked, monkeypatch=monkeypatch,
-                                stk_verify=importlib.import_module("frappe_mpsa_payments.money_in.stk_verify"))
+                                stk_verify=importlib.import_module("mpsa_suite.money_in.stk_verify"))
     finally:
         fake_frappe.uninstall(saved)
 
@@ -244,7 +244,7 @@ def test_draft_register_is_still_deleted(express):
 
 
 def test_without_erpnext_the_prompt_still_deletes_its_receipts_draft_register(express):
-    express.frappe.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments"]
+    express.frappe.get_installed_apps = lambda: ["frappe", "mpsa_suite"]
     raw = express.frappe.db.get_value
 
     def get_value(doctype, filters, fieldname="name", *a, **kw):
@@ -264,7 +264,7 @@ def test_without_erpnext_the_prompt_still_deletes_its_receipts_draft_register(ex
 @pytest.fixture
 def payout(monkeypatch):
     frappe, saved = fake_frappe.install()
-    b2c_api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.b2c")
+    b2c_api = types.ModuleType("mpsa_suite.mpsa_suite.api.b2c")
     b2c_api.make_b2c_payment_request = lambda name: None
     query_builder = types.ModuleType("frappe.query_builder")
     query_builder.DocType = lambda name: None
@@ -275,7 +275,7 @@ def payout(monkeypatch):
             frappe.logger = lambda *a, **kw: types.SimpleNamespace(debug=print, info=print, error=print)
             frappe.get_meta = lambda doctype: types.SimpleNamespace(has_field=lambda field: True)
             req_mod = importlib.import_module(REQ_MODULE)
-            common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+            common = importlib.import_module("mpsa_suite.money_in.common")
             disb = importlib.import_module(DISB_MODULE)
             env = fake_frappe._dict(frappe=frappe, open=[], stale=[], owed=100000, calls=[], locks=[])
 
@@ -377,7 +377,7 @@ def reversal_env(monkeypatch):
         frappe.roles = {}
         frappe.get_roles = lambda user=None: []
         frappe.db.table(SUITE)[SUITE] = {"name": SUITE, "amount_tolerance": 1}
-        mod = importlib.import_module("frappe_mpsa_payments.money_out.reversal")
+        mod = importlib.import_module("mpsa_suite.money_out.reversal")
         frappe.db.table(REGISTER)["MPC2B-1"] = {"name": "MPC2B-1", "docstatus": 0, "transid": "RCPT000001",
                                                 "transamount": 5000.0, "payment_entry": None}
         frappe.db.table(REVERSAL)["MRV-1"] = {"name": "MRV-1", "docstatus": 1, "status": "Initiated",
@@ -427,7 +427,7 @@ def test_cancelled_entry_or_unreconciled_prompt_is_not_a_booking(reversal_env):
 
 def without_payment_entries(env):
     """No ERPNext: no Payment Entry table to read."""
-    env.frappe.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments"]
+    env.frappe.get_installed_apps = lambda: ["frappe", "mpsa_suite"]
     raw = env.frappe.db.get_value
 
     def get_value(doctype, *a, **kw):
@@ -453,7 +453,7 @@ def test_without_erpnext_and_no_prompt_the_draft_is_not_booked(reversal_env):
 
 # ================================================================ P10: malformed ResultParameters
 def daraja():
-    return importlib.import_module("frappe_mpsa_payments.daraja.money_out")
+    return importlib.import_module("mpsa_suite.daraja.money_out")
 
 
 @pytest.mark.parametrize("result", [
@@ -532,8 +532,8 @@ def orders(monkeypatch):
         _support_docs(frappe)
         frappe.db.sql = orders_sql(frappe)
         frappe.db.table(SUITE)[SUITE] = {"name": SUITE, "enable_matching": 1, "amount_tolerance": 1}
-        matching = importlib.import_module("frappe_mpsa_payments.money_in.matching")
-        booking = importlib.import_module("frappe_mpsa_payments.money_in.booking")
+        matching = importlib.import_module("mpsa_suite.money_in.matching")
+        booking = importlib.import_module("mpsa_suite.money_in.booking")
         booked = []
         monkeypatch.setattr(booking, "book_register", lambda name, method=None: booked.append(name))
         frappe.db.table("Sales Order")["SO-1"] = {"name": "SO-1", "docstatus": 1, "status": "To Deliver and Bill"}
@@ -607,9 +607,9 @@ def gateway(monkeypatch):
 
         pe_module.create_payment_entry = create_payment_entry
         sys.modules[pe_module.__name__] = pe_module  # dropped again by fake_frappe.uninstall
-        intents = importlib.import_module("frappe_mpsa_payments.gateway.intents")
-        webhooks = importlib.import_module("frappe_mpsa_payments.gateway.webhooks")
-        common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+        intents = importlib.import_module("mpsa_suite.gateway.intents")
+        webhooks = importlib.import_module("mpsa_suite.gateway.webhooks")
+        common = importlib.import_module("mpsa_suite.money_in.common")
         queued = []
         monkeypatch.setattr(webhooks, "queue", lambda intent: queued.append((intent.name, intent.status)))
         ns = fake_frappe._dict(frappe=frappe, intents=intents, common=common, queued=queued, fail_receipts=set(),
@@ -668,7 +668,7 @@ def match_logs(env, receipt):
 
 
 def utils(env):
-    return importlib.import_module("frappe_mpsa_payments.utils.utils")
+    return importlib.import_module("mpsa_suite.utils.utils")
 
 
 def stk_booking(env, prompt_name):
@@ -774,7 +774,7 @@ def test_mark_paid_takes_such_a_register_and_still_locks_its_rows(gateway):
 
 @pytest.mark.parametrize("invoice,where", ON_INVOICE, ids=["pos-invoice", "sales-invoice"])
 def test_register_on_an_invoice_still_never_pays_the_intent(gateway, invoice, where):
-    from frappe_mpsa_payments.gateway.auth import ApiError
+    from mpsa_suite.gateway.auth import ApiError
 
     doc = intent(gateway, status="Prompted")
     prompt(gateway, "STK-1", status="Completed", transaction_id="RCPT000001")
@@ -792,7 +792,7 @@ def test_register_on_an_invoice_still_never_pays_the_intent(gateway, invoice, wh
 def without_erpnext(env):
     """No ERPNext: the register has no payment_entry / pos_invoice / sales_invoice columns."""
     f = env.frappe
-    f.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments"]
+    f.get_installed_apps = lambda: ["frappe", "mpsa_suite"]
     f.db.table(SUITE)[SUITE]["enable_matching"] = 0  # matching books Payment Entries: ERPNext only
     env.register_queries = []
 

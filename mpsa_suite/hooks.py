@@ -1,0 +1,379 @@
+app_name = "mpsa_suite"
+app_title = "Mpsa Suite"
+app_publisher = "Astral Industries Limited"
+app_description = "M-Pesa C2B, STK, B2C, B2B, bank feeds and reconciliation (Frappe/ERPNext v15 + v16)"
+app_email = "finance@astralind.com"
+app_license = "agpl-3.0"
+# required_apps = ["erpnext", "hrms", "lending"]
+
+# Apps
+# ------------------
+
+# required_apps = []
+
+
+fixtures = [
+    {
+        "doctype": "Custom Field",
+        "filters": [
+            ["is_system_generated", "=", 0],
+            ["module", "=", "Mpsa Suite"],
+        ],
+    },
+]
+
+
+# Each item in the list will be shown as an app in the apps page
+add_to_apps_screen = [
+    {
+        "name": "mpsa_suite",
+        "logo": "/assets/mpsa_suite/m-pesa.png",
+        "title": "Mpsa Suite",
+        "route": "/app/m-pesa",
+    }
+]
+
+# Includes in <head>
+# ------------------
+
+# include js, css files in header of desk.html
+# app_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
+app_include_js = "/assets/mpsa_suite/js/utils.js"
+
+# include js, css files in header of web template
+# web_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
+# web_include_js = "/assets/mpsa_suite/js/mpsa_suite.js"
+
+# include custom scss in every website theme (without file extension ".scss")
+# website_theme_scss = "mpsa_suite/public/scss/website"
+
+# include js, css files in header of web form
+# webform_include_js = {"doctype": "public/js/doctype.js"}
+# webform_include_css = {"doctype": "public/css/doctype.css"}
+
+# include js in page
+# page_js = {"page" : "public/js/file.js"}
+
+# include js in doctype views
+# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+    "Sales Invoice": "public/js/sales_invoice.js",
+    "Payment Request": "public/js/payment_request.js",
+    "Payment Entry": "public/js/payment_entry.js",
+    "B2C Disbursement Request": "public/js/b2c_status_check.js",
+    "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
+    "Integration Request": "public/js/c2b_verification.js",
+    "Supplier": "public/js/supplier.js",
+}
+# doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+# doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
+# doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
+
+# Svg Icons
+# ------------------
+# include app icons in desk
+# app_include_icons = "mpsa_suite/public/icons.svg"
+
+# Prepare ERPNext test data the version-appropriate way (v15 setup wizard / v16 bootstrap)
+before_tests = "mpsa_suite.money_in.testing.before_tests"
+
+# Public pay page for Payment Intents: /pay/<token>
+website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
+
+# Home Pages
+# ----------
+
+# application home page (will override Website Settings)
+# home_page = "login"
+
+# website user home page (by Role)
+# role_home_page = {
+# 	"Role": "home_page"
+# }
+
+# Generators
+# ----------
+
+# automatically create page for each record of this doctype
+# website_generators = ["Web Page"]
+
+# Jinja
+# ----------
+
+# add methods and filters to jinja environment
+# jinja = {
+# 	"methods": "mpsa_suite.utils.jinja_methods",
+# 	"filters": "mpsa_suite.utils.jinja_filters"
+# }
+
+# Installation
+# ------------
+
+# before_install = "mpsa_suite.install.before_install"
+after_install = "mpsa_suite.install.after_install"
+
+# Uninstallation
+# ------------
+
+before_uninstall = "mpsa_suite.uninstall_guard.before_uninstall"
+# after_uninstall = "mpsa_suite.uninstall.after_uninstall"
+
+# Integration Setup
+# ------------------
+# To set up dependencies/integrations with other apps
+# Name of the app being installed is passed as an argument
+
+# before_app_install = "mpsa_suite.utils.before_app_install"
+# after_app_install = "mpsa_suite.utils.after_app_install"
+
+# Integration Cleanup
+# -------------------
+# To clean up dependencies/integrations with other apps
+# Name of the app being uninstalled is passed as an argument
+
+# before_app_uninstall = "mpsa_suite.utils.before_app_uninstall"
+# after_app_uninstall = "mpsa_suite.utils.after_app_uninstall"
+
+# Desk Notifications
+# ------------------
+# See frappe.core.notifications.get_notification_config
+
+# notification_config = "mpsa_suite.notifications.get_notification_config"
+
+# Permissions
+# -----------
+# Permissions evaluated in scripted ways
+
+# permission_query_conditions = {
+# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
+# }
+#
+# has_permission = {
+# 	"Event": "frappe.desk.doctype.event.event.has_permission",
+# }
+
+# DocType Class
+# ---------------
+# Override standard doctype classes
+
+# override_doctype_class = {
+# 	"ToDo": "custom_app.overrides.CustomToDo"
+# }
+
+# Document Events
+# ---------------
+# Hook on document methods and events
+
+# Money-in pipeline. Every handler checks its own switch in M-Pesa Suite Settings,
+# so nothing changes until a switch is turned on.
+doc_events = {
+    "Mpesa C2B Payment Register": {
+        "after_insert": "mpsa_suite.money_in.events.register_after_insert",
+    },
+    "Bank Transaction": {
+        "before_insert": "mpsa_suite.money_in.bank_transaction.guard_duplicate",
+        "on_submit": "mpsa_suite.money_in.bank_transaction.sync_voucher_clearance",
+        "on_update_after_submit": "mpsa_suite.money_in.bank_transaction.sync_voucher_clearance",
+    },
+    "Payment Entry": {
+        "before_insert": "mpsa_suite.money_in.payment_entry.before_insert",
+        "before_validate": "mpsa_suite.money_in.payment_entry.before_validate",
+    },
+    "Journal Entry": {
+        "before_insert": "mpsa_suite.money_in.payment_entry.journal_before_insert",
+    },
+    "Payment Request": {
+        "before_validate": "mpsa_suite.money_in.payment_request.before_validate",
+        "before_insert": "mpsa_suite.money_in.payment_request.before_insert",
+    },
+}
+
+# Scheduled Tasks
+# ---------------
+
+scheduler_events = {
+    "cron": {
+        "*/15 * * * *": [
+            "mpsa_suite.services.b2c_scheduler_service.update_b2c_disbursement_statuses",
+            "mpsa_suite.services.b2c_postprocess_service.retry_unbooked_payouts",
+            "mpsa_suite.services.b2c_scheduler_service.check_unsettled_payouts",
+        ],
+        "*/2 * * * *": ["mpsa_suite.money_in.events.every_two_minutes"],
+        "*/5 * * * *": [
+            "mpsa_suite.money_in.events.every_five_minutes",
+            "mpsa_suite.wallet.balances.run",
+        ],
+        "* * * * *": [
+            "mpsa_suite.gateway.jobs.every_minute",
+            "mpsa_suite.sandbox_lab.runner.check_waiting",
+        ],
+    },
+    "hourly": [
+        "mpsa_suite.services.b2c_pull_transaction_scheduler_service.run_hourly_pull_transactions"
+    ],
+}
+
+# Testing
+# -------
+
+# before_tests = "mpsa_suite.install.before_tests"
+
+# Overriding Methods
+# ------------------------------
+#
+# override_whitelisted_methods = {
+# 	"frappe.desk.doctype.event.event.get_events": "mpsa_suite.event.get_events"
+# }
+#
+# each overriding function accepts a `data` argument;
+# generated from the base implementation of the doctype dashboard,
+# along with any modifications made in other Frappe apps
+# override_doctype_dashboards = {
+# 	"Task": "mpsa_suite.task.get_dashboard_data"
+# }
+override_doctype_dashboards = {
+    "Supplier": "mpsa_suite.money_out.supplier_dashboard.get_data"
+}
+
+# exempt linked doctypes from being automatically cancelled
+#
+# auto_cancel_exempted_doctypes = ["Auto Repeat"]
+
+# Ignore links to specified DocTypes when deleting documents
+# -----------------------------------------------------------
+
+# ignore_links_on_delete = ["Communication", "ToDo"]
+
+# Request Events
+# ----------------
+# before_request = ["mpsa_suite.utils.before_request"]
+# after_request = ["mpsa_suite.utils.after_request"]
+
+# Job Events
+# ----------
+# before_job = ["mpsa_suite.utils.before_job"]
+# after_job = ["mpsa_suite.utils.after_job"]
+
+# User Data Protection
+# --------------------
+
+# user_data_fields = [
+# 	{
+# 		"doctype": "{doctype_1}",
+# 		"filter_by": "{filter_by}",
+# 		"redact_fields": ["{field_1}", "{field_2}"],
+# 		"partial": 1,
+# 	},
+# 	{
+# 		"doctype": "{doctype_2}",
+# 		"filter_by": "{filter_by}",
+# 		"partial": 1,
+# 	},
+# 	{
+# 		"doctype": "{doctype_3}",
+# 		"strict": False,
+# 	},
+# 	{
+# 		"doctype": "{doctype_4}"
+# 	}
+# ]
+
+# Authentication and authorization
+# --------------------------------
+
+# auth_hooks = [
+# 	"mpsa_suite.auth.validate"
+# ]
+
+# Automatically update python controller files with type annotations for this app.
+# export_python_type_annotations = True
+
+# default_log_clearing_doctypes = {
+# 	"Logging DocType Name": 30  # days to retain logs
+# }
+
+
+after_migrate = [
+    "mpsa_suite.mpsa_suite.migrate.after_migrate",
+    "mpsa_suite.handover.after_migrate",
+]
+
+# Hand-over from the old package name (see handover.py)
+# ------------------------------------------------------
+before_app_uninstall = "mpsa_suite.handover.before_app_uninstall"
+
+# Old /api/method/frappe_mpsa_payments.* paths keep working: Safaricom holds registered C2B and Pull
+# URLs and in-flight callback URLs, integrators and open pay pages call the old paths.
+# Guest (callback / pay page / Payments API) entries first.
+override_whitelisted_methods = {
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.b2c.b2c_results_callback": "mpsa_suite.mpsa_suite.api.b2c.b2c_results_callback",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.account_balance_result": "mpsa_suite.mpsa_suite.api.m_pesa_api.account_balance_result",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.balance_query_callback": "mpsa_suite.mpsa_suite.api.m_pesa_api.balance_query_callback",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.c2b_verification_result": "mpsa_suite.mpsa_suite.api.m_pesa_api.c2b_verification_result",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.confirmation": "mpsa_suite.mpsa_suite.api.m_pesa_api.confirmation",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_queue_timeout": "mpsa_suite.mpsa_suite.api.m_pesa_api.handle_queue_timeout",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.handle_transaction_status_result": "mpsa_suite.mpsa_suite.api.m_pesa_api.handle_transaction_status_result",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.pull_registration_result": "mpsa_suite.mpsa_suite.api.m_pesa_api.pull_registration_result",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.stk_push_callback": "mpsa_suite.mpsa_suite.api.m_pesa_api.stk_push_callback",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.validation": "mpsa_suite.mpsa_suite.api.m_pesa_api.validation",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.process_balance_info": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.process_balance_info",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.pull_transaction_callback": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.pull_transaction_callback",  # guest
+    "frappe_mpsa_payments.gateway.v1.cancel": "mpsa_suite.gateway.v1.cancel",  # guest
+    "frappe_mpsa_payments.gateway.v1.create_payment_link": "mpsa_suite.gateway.v1.create_payment_link",  # guest
+    "frappe_mpsa_payments.gateway.v1.create_prompt": "mpsa_suite.gateway.v1.create_prompt",  # guest
+    "frappe_mpsa_payments.gateway.v1.get_status": "mpsa_suite.gateway.v1.get_status",  # guest
+    "frappe_mpsa_payments.gateway.v1.list_payments": "mpsa_suite.gateway.v1.list_payments",  # guest
+    "frappe_mpsa_payments.gateway.v1.page_prompt": "mpsa_suite.gateway.v1.page_prompt",  # guest
+    "frappe_mpsa_payments.gateway.v1.page_status": "mpsa_suite.gateway.v1.page_status",  # guest
+    "frappe_mpsa_payments.gateway.v1.resend_prompt": "mpsa_suite.gateway.v1.resend_prompt",  # guest
+    "frappe_mpsa_payments.gateway.v1.verify_receipt": "mpsa_suite.gateway.v1.verify_receipt",  # guest
+    "frappe_mpsa_payments.money_out.api.b2b_queue_timeout": "mpsa_suite.money_out.api.b2b_queue_timeout",  # guest
+    "frappe_mpsa_payments.money_out.api.b2b_result": "mpsa_suite.money_out.api.b2b_result",  # guest
+    "frappe_mpsa_payments.money_out.api.b2c_status_result": "mpsa_suite.money_out.api.b2c_status_result",  # guest
+    "frappe_mpsa_payments.money_out.api.reversal_queue_timeout": "mpsa_suite.money_out.api.reversal_queue_timeout",  # guest
+    "frappe_mpsa_payments.money_out.api.reversal_result": "mpsa_suite.money_out.api.reversal_result",  # guest
+    "frappe_mpsa_payments.money_out.api.status_queue_timeout": "mpsa_suite.money_out.api.status_queue_timeout",  # guest
+    "frappe_mpsa_payments.sandbox_lab.api.ping": "mpsa_suite.sandbox_lab.api.ping",  # guest
+    "frappe_mpsa_payments.utils.utils.convert_amount_to_kes": "mpsa_suite.utils.utils.convert_amount_to_kes",  # guest
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.bulk_pull_transactions": "mpsa_suite.mpsa_suite.api.m_pesa_api.bulk_pull_transactions",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.check_transaction_status": "mpsa_suite.mpsa_suite.api.m_pesa_api.check_transaction_status",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.get_account_balance": "mpsa_suite.mpsa_suite.api.m_pesa_api.get_account_balance",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.initiate_stk_push": "mpsa_suite.mpsa_suite.api.m_pesa_api.initiate_stk_push",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.pull_transactions": "mpsa_suite.mpsa_suite.api.m_pesa_api.pull_transactions",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_quick_pay.get_mpesa_payments": "mpsa_suite.mpsa_suite.api.mpesa_quick_pay.get_mpesa_payments",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_quick_pay.get_mpesa_phone_mops_for_pos_profile": "mpsa_suite.mpsa_suite.api.mpesa_quick_pay.get_mpesa_phone_mops_for_pos_profile",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_quick_pay.process_mpesa": "mpsa_suite.mpsa_suite.api.mpesa_quick_pay.process_mpesa",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_quick_pay.update_mpesa_after_invoice_submission": "mpsa_suite.mpsa_suite.api.mpesa_quick_pay.update_mpesa_after_invoice_submission",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry.get_outstanding_invoices": "mpsa_suite.mpsa_suite.api.payment_entry.get_outstanding_invoices",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry.initiate_payment_entry_stk": "mpsa_suite.mpsa_suite.api.payment_entry.initiate_payment_entry_stk",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.get_mop_from_payment_gateway": "mpsa_suite.mpsa_suite.api.sales_invoice.get_mop_from_payment_gateway",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.get_payment_gateway_from_mop": "mpsa_suite.mpsa_suite.api.sales_invoice.get_payment_gateway_from_mop",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.get_stk_amount": "mpsa_suite.mpsa_suite.api.sales_invoice.get_stk_amount",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.initiate_invoice_stk_push": "mpsa_suite.mpsa_suite.api.sales_invoice.initiate_invoice_stk_push",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.initiate_row_stk_push": "mpsa_suite.mpsa_suite.api.sales_invoice.initiate_row_stk_push",
+    "frappe_mpsa_payments.frappe_mpsa_payments.api.sales_invoice.validate_stk_push_eligibility": "mpsa_suite.mpsa_suite.api.sales_invoice.validate_stk_push_eligibility",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request.create_new_request": "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request.create_new_request",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request.get_request_status": "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request.get_request_status",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request.get_stkpush_defaults": "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request.get_stkpush_defaults",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request.retry_stkpush": "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request.retry_stkpush",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.bulk_register_pull_transactions": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.bulk_register_pull_transactions",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.get_doctype_fields": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.get_doctype_fields",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.register_pull_transaction": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.register_pull_transaction",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings.trigger_transaction_status": "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.trigger_transaction_status",
+    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier": "mpsa_suite.mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier",
+    "frappe_mpsa_payments.money_in.c2b_verify.release": "mpsa_suite.money_in.c2b_verify.release",
+    "frappe_mpsa_payments.money_out.api.check_b2c_status": "mpsa_suite.money_out.api.check_b2c_status",
+    "frappe_mpsa_payments.money_out.api.make_reversal": "mpsa_suite.money_out.api.make_reversal",
+    "frappe_mpsa_payments.sandbox_lab.api.add_scenarios": "mpsa_suite.sandbox_lab.api.add_scenarios",
+    "frappe_mpsa_payments.sandbox_lab.api.check_now": "mpsa_suite.sandbox_lab.api.check_now",
+    "frappe_mpsa_payments.sandbox_lab.api.replay_callback": "mpsa_suite.sandbox_lab.api.replay_callback",
+    "frappe_mpsa_payments.sandbox_lab.api.reset_case": "mpsa_suite.sandbox_lab.api.reset_case",
+    "frappe_mpsa_payments.sandbox_lab.api.run_case": "mpsa_suite.sandbox_lab.api.run_case",
+    "frappe_mpsa_payments.sandbox_lab.api.run_health_check": "mpsa_suite.sandbox_lab.api.run_health_check",
+    "frappe_mpsa_payments.sandbox_lab.api.run_ready": "mpsa_suite.sandbox_lab.api.run_ready",
+    "frappe_mpsa_payments.sandbox_lab.api.simulate_c2b": "mpsa_suite.sandbox_lab.api.simulate_c2b",
+    "frappe_mpsa_payments.utils.utils.get_mode_of_payment_account": "mpsa_suite.utils.utils.get_mode_of_payment_account",
+    "frappe_mpsa_payments.www.mpesa.stkpush.check_payment_status": "mpsa_suite.www.mpesa.stkpush.check_payment_status",
+    "frappe_mpsa_payments.www.mpesa.stkpush.initiate_stk_push": "mpsa_suite.www.mpesa.stkpush.initiate_stk_push",
+    "frappe_mpsa_payments.www.mpesa.stkpush.retry_stkpush": "mpsa_suite.www.mpesa.stkpush.retry_stkpush",
+}

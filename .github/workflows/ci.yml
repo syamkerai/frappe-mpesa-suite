@@ -91,14 +91,14 @@ jobs:
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
-          bench get-app frappe_mpsa_payments $GITHUB_WORKSPACE
+          bench get-app mpsa_suite $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
           bench --site test_site install-app erpnext payments hrms
           if [ -d apps/lending ]; then bench --site test_site install-app lending; fi
-          bench --site test_site install-app frappe_mpsa_payments
+          bench --site test_site install-app mpsa_suite
           bench --site test_site migrate
-          bench build --app frappe_mpsa_payments
+          bench build --app mpsa_suite
         env:
           CI: 'Yes'
 
@@ -106,6 +106,6 @@ jobs:
         working-directory: /home/runner/frappe-bench
         run: |
           bench --site test_site set-config allow_tests true
-          bench --site test_site run-tests --app frappe_mpsa_payments
+          bench --site test_site run-tests --app mpsa_suite
         env:
           TYPE: server

@@ -269,7 +269,7 @@ def uninstall(saved):
             sys.modules.pop(key, None)
         else:
             sys.modules[key] = module
-    for key in [k for k in sys.modules if k.startswith("frappe_mpsa_payments.") and "daraja.guard" not in k
+    for key in [k for k in sys.modules if k.startswith("mpsa_suite.") and "daraja.guard" not in k
                 and "daraja.money_out" not in k and "utils.phone" not in k and "gateway.signing" not in k]:
         sys.modules.pop(key, None)
 

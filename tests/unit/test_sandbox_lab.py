@@ -12,7 +12,7 @@ import pytest
 import fake_frappe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RUN_JSON = os.path.join(ROOT, "frappe_mpsa_payments", "frappe_mpsa_payments", "doctype",
+RUN_JSON = os.path.join(ROOT, "mpsa_suite", "mpsa_suite", "doctype",
                         "mpesa_sandbox_test_run", "mpesa_sandbox_test_run.json")
 NOW = datetime.datetime(2026, 10, 18, 12, 0, 0)
 
@@ -26,11 +26,11 @@ def env():
         frappe.db.table("M-Pesa Suite Settings")["M-Pesa Suite Settings"] = {}
         mods = {
             "frappe": frappe,
-            "payloads": importlib.import_module("frappe_mpsa_payments.sandbox_lab.payloads"),
-            "guard": importlib.import_module("frappe_mpsa_payments.sandbox_lab.guard"),
-            "fw": importlib.import_module("frappe_mpsa_payments.sandbox_lab.framework"),
-            "sc": importlib.import_module("frappe_mpsa_payments.sandbox_lab.scenarios"),
-            "runner": importlib.import_module("frappe_mpsa_payments.sandbox_lab.runner"),
+            "payloads": importlib.import_module("mpsa_suite.sandbox_lab.payloads"),
+            "guard": importlib.import_module("mpsa_suite.sandbox_lab.guard"),
+            "fw": importlib.import_module("mpsa_suite.sandbox_lab.framework"),
+            "sc": importlib.import_module("mpsa_suite.sandbox_lab.scenarios"),
+            "runner": importlib.import_module("mpsa_suite.sandbox_lab.runner"),
         }
         yield fake_frappe._dict(mods)
     finally:
@@ -39,7 +39,7 @@ def env():
 
 # ---------------------------------------------------------------- payloads (pure)
 def test_simulate_paybill_and_buy_goods():
-    from frappe_mpsa_payments.sandbox_lab import payloads as p
+    from mpsa_suite.sandbox_lab import payloads as p
 
     body = p.c2b_simulate("600999", 10, bill_ref="SINV-1")
     assert body == {"ShortCode": "600999", "CommandID": "CustomerPayBillOnline", "Amount": 10,
@@ -51,7 +51,7 @@ def test_simulate_paybill_and_buy_goods():
 
 
 def test_fake_receipts_are_recognisable():
-    from frappe_mpsa_payments.sandbox_lab import payloads as p
+    from mpsa_suite.sandbox_lab import payloads as p
 
     r = p.fake_receipt(random.Random(1))
     assert len(r) == 10 and r.startswith("ZZ") and r.isalnum() and r.isupper()
@@ -59,14 +59,14 @@ def test_fake_receipts_are_recognisable():
 
 
 def test_typo_variant_is_what_the_matcher_repairs():
-    from frappe_mpsa_payments.sandbox_lab import payloads as p
+    from mpsa_suite.sandbox_lab import payloads as p
 
     assert p.typo_variant("ACC-SINV-2026-00012") == "accsinv202600012"
     assert p.typo_variant("abc123") == "ABC123"  # never returns the reference unchanged
 
 
 def test_stk_callbacks_paid_and_cancelled():
-    from frappe_mpsa_payments.sandbox_lab import payloads as p
+    from mpsa_suite.sandbox_lab import payloads as p
 
     paid = p.stk_callback("ws_CO_1", "M1", 0, 10, "ZZ12345678", "254712345678", NOW)["Body"]["stkCallback"]
     items = {i["Name"]: i["Value"] for i in paid["CallbackMetadata"]["Item"]}
@@ -79,7 +79,7 @@ def test_stk_callbacks_paid_and_cancelled():
 
 
 def test_confirmation_rebuilt_from_register():
-    from frappe_mpsa_payments.sandbox_lab import payloads as p
+    from mpsa_suite.sandbox_lab import payloads as p
 
     row = {"transid": "SBX1", "transamount": 10, "businessshortcode": "600999", "billrefnumber": "SINV-1",
            "msisdn": "254708374149", "transtime": "20261018120000", "firstname": "John"}

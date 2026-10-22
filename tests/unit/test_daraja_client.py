@@ -74,7 +74,7 @@ def client(monkeypatch, request):
     frappe, saved = fake_frappe.install()
     try:
         frappe.local.cache = {}
-        mod = importlib.import_module("frappe_mpsa_payments.daraja.client")
+        mod = importlib.import_module("mpsa_suite.daraja.client")
         cache = FakeCache(frappe, version=request.param)
         monkeypatch.setattr(mod, "get_cache", lambda: cache)
         calls = []
@@ -187,7 +187,7 @@ def test_invalidate_drops_only_the_refused_token():
     frappe, saved = fake_frappe.install()
     try:
         frappe.local.cache = {}
-        mod = importlib.import_module("frappe_mpsa_payments.daraja.client")
+        mod = importlib.import_module("mpsa_suite.daraja.client")
         cache = FakeCache(frappe)
         mod.get_cache = lambda: cache
         settings = fake_frappe._dict(consumer_key="key", sandbox=1)
@@ -214,7 +214,7 @@ def test_invalidate_drops_only_the_refused_token():
 def test_bearer_token(headers, expected):
     frappe, saved = fake_frappe.install()
     try:
-        mod = importlib.import_module("frappe_mpsa_payments.daraja.client")
+        mod = importlib.import_module("mpsa_suite.daraja.client")
         assert mod.bearer_token(headers) == expected
     finally:
         fake_frappe.uninstall(saved)

@@ -40,14 +40,14 @@ class Resp:
 def env(monkeypatch):
     frappe, saved = fake_frappe.install()
     try:
-        common = importlib.import_module("frappe_mpsa_payments.money_out.common")
+        common = importlib.import_module("mpsa_suite.money_out.common")
         mods = {
             "frappe": frappe,
             "common": common,
-            "b2b": importlib.import_module("frappe_mpsa_payments.money_out.b2b"),
-            "reversal": importlib.import_module("frappe_mpsa_payments.money_out.reversal"),
-            "status": importlib.import_module("frappe_mpsa_payments.money_out.b2c_status"),
-            "api": importlib.import_module("frappe_mpsa_payments.money_out.api"),
+            "b2b": importlib.import_module("mpsa_suite.money_out.b2b"),
+            "reversal": importlib.import_module("mpsa_suite.money_out.reversal"),
+            "status": importlib.import_module("mpsa_suite.money_out.b2c_status"),
+            "api": importlib.import_module("mpsa_suite.money_out.api"),
             "sent": [],
             "responses": [],
         }
