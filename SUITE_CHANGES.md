@@ -660,3 +660,27 @@ Astral's current flow had made, and created no new entries. It also found these 
   as the Error Log title (140 characters), so a long message, such as a whole C2B payload or an
   exception text, made the log itself fail. Calls now pass `title=` and `message=`, and a unit test
   checks every call.
+
+## First live B2B payment (2026-10-22)
+
+Safaricom approved B2B on all three shortcodes. From the Sandbox Lab with the production keys
+(entered by the user in a hidden form), KES 10 BusinessPayBill went from 4139683 to Astral's own
+paybill 208911, account B2B-TEST, through an approved Supplier M-Pesa Account:
+- First try: Failed, ResultCode 1 "The balance is insufficient". **B2B debits the Working (MMF)
+  account, which was KES 0; the B2C float sits in Utility.** The result was recorded as Failed with
+  the reason, and nothing was booked.
+- After the user moved funds into Working: **Paid**, receipt UJMTM632YM. Safaricom reported the
+  receiver as "208911 - ASTRAL INDUSTRIES LIMITED", which matches the expected name, so the account
+  stays unblocked. Charge KES 2 ("Business Pay Bill Charge"); Working balance after KES 1,488.
+  The Payment Entry carries the receipt and booking it again creates no duplicate. On the lab it
+  needed a Bank Account mapped on the Mpesa Settings record first.
+- To a bank: KES 10 to KCB paybill 522522 (the user's own account, entered and sent by the user)
+  was **Paid**, receipt UJMTM6331C. The receiver was reported as "522522 - KCB Paybill AC", which
+  matches the expected "KCB". Charge KES 2; Working balance after KES 1,476. The Payment Entry was
+  booked automatically.
+
+**Go-live checks for B2B**
+- Keep a float in each paying shortcode's **Working** account (B2C keeps using Utility).
+- Map the **Bank Account** (Accounting Mapping) on every Mpesa Settings record that pays by B2B.
+- Approve each supplier's paybill or till as a Supplier M-Pesa Account (proof attached, approved by
+  a second person), with the name M-Pesa shows as the expected name.
