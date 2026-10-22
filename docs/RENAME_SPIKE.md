@@ -207,7 +207,10 @@ That plan lives with the old-name branch, so these are recorded here:
   so `install-app` needs no `clear-cache` first. On a self-hosted bench a
   `bench --site <site> clear-cache` before `install-app` is harmless and can still be added.
 - **R3's flag (section 4.2, 7.1).** At `02d94a0` the old app's guard let the uninstall through
-  for any value of `mpsa_allow_old_uninstall` that was not empty, so `bench set-config
-  mpsa_allow_old_uninstall 0` (stored as the text "0" without `-p`) unlocked it. Fixed in
-  `088608d`, part of C: like R2's `mpsa_allow_uninstall`, it accepts only 1 or true. Removing
-  the key is still the clean way to lock it again.
+  for any truthy value of `mpsa_allow_old_uninstall`, the text "0" included. `bench set-config`
+  itself turns "0" and "1" into numbers (Frappe 15 and 16 `installer._update_config_file`), so
+  that route stored a 0 and stayed locked; a text "0" can still come from a hand edit of
+  site_config.json, or from Frappe Cloud's Site Config tab if it stores the value as text (not
+  checked). Fixed in `088608d`, part of C: like R2's `mpsa_allow_uninstall`, it accepts only 1 or
+  true. (088608d's commit message and the old guard's docstring blame `bench set-config`; that
+  is wrong, the fix is not.) Removing the key is still the clean way to lock it again.
