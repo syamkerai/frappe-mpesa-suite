@@ -55,7 +55,16 @@ def test_hand_over_is_allowed(guard):
     module.before_uninstall()
 
 
-def test_site_config_flag_allows_a_deliberate_uninstall(guard):
+@pytest.mark.parametrize("value", [1, True, "1", "true", "True", " 1 "])
+def test_site_config_flag_allows_a_deliberate_uninstall(guard, value):
     module, frappe = guard
-    frappe.conf = fake_frappe._dict(mpsa_allow_old_uninstall=1)
+    frappe.conf = fake_frappe._dict(mpsa_allow_old_uninstall=value)
     module.before_uninstall()
+
+
+@pytest.mark.parametrize("value", [0, False, "0", "false", "", "no", None])
+def test_a_flag_set_to_off_keeps_the_uninstall_refused(guard, value):
+    module, frappe = guard
+    frappe.conf = fake_frappe._dict(mpsa_allow_old_uninstall=value)
+    with pytest.raises(Exception, match="would drop every M-Pesa table"):
+        module.before_uninstall()

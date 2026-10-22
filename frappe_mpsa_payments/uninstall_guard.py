@@ -13,9 +13,14 @@ NEW_MODULE = "Mpsa Suite"
 FLAG = "mpsa_allow_old_uninstall"
 
 
+def allowed() -> bool:
+    """Only an explicit 1 / true unlocks: `bench set-config` stores "0" as text, which is truthy."""
+    return str(frappe.conf.get(FLAG)).strip().lower() in ("1", "true")
+
+
 def before_uninstall():
     """Frappe runs this app's own before_uninstall first, for a dry run too (it passes no flag)."""
-    if frappe.conf.get(FLAG):
+    if allowed():
         return
     if NEW_APP in frappe.get_installed_apps() and frappe.db.get_value("Module Def", NEW_MODULE, "app_name") == NEW_APP:
         return  # the rename hand-over: mpsa_suite owns the module and moves the rest before deletion
