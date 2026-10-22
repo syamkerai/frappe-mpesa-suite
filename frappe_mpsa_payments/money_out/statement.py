@@ -29,7 +29,6 @@ from ..money_in.bank_transaction import create_statement_line, find_existing
 from ..money_in.common import (
     REGISTER,
     as_user,
-    bank_account_for,
     enabled,
     erpnext_installed,
     log_match,
@@ -38,6 +37,7 @@ from ..money_in.common import (
     suite,
     suite_int,
 )
+from ..wallet import accounts
 
 B2C = "B2C Disbursement Request"
 B2B = "Mpesa B2B Payment Request"
@@ -76,6 +76,7 @@ OWN_FIELDS = {
         "receiver_public_name",
         "command_id",
         "debit_party_charges",
+        "debit_account_balance",
     ),
 }
 # Custom fields (migrate.create_custom_erpnext_fields): absent until the site is migrated.
@@ -210,6 +211,18 @@ def party(p) -> tuple:
     return ("Supplier", p.supplier) if p.supplier else (None, None)
 
 
+def sub_account(p) -> str:
+    """The wallet a payout left: B2C from Utility; B2B from the account its result names (Working)."""
+    if p.doctype == B2B:
+        return accounts.from_balance_text(p.get("debit_account_balance")) or accounts.WORKING
+    return accounts.UTILITY
+
+
+def payout_bank_account(p) -> str | None:
+    """That sub-account's Bank Account (the shortcode's own unless the sub-account is mapped)."""
+    return accounts.bank_account(p.mpesa_settings, sub_account(p))
+
+
 def charge_for(p) -> float | None:
     """The payout's Safaricom charge when it is certain, else None (left for staff, or for the
     sweep while a B2C's balances cannot show it yet)."""
@@ -312,7 +325,7 @@ def feed(doctype: str, name: str) -> str | None:
     start = lines_from()
     if start and p.date < start:
         return None
-    bank_account = bank_account_for(p.mpesa_settings)
+    bank_account = payout_bank_account(p)
     if not bank_account:
         log_match(
             "Error", "Bank Reconciliation", once=True, reference_doctype=doctype, reference_name=name,
@@ -376,6 +389,8 @@ def statement_line(p, bank_account, key, amount, text, transaction_type, party_t
         withdrawal=True,
         party_type=party_type,
         party=party_name,
+        sub_account=sub_account(p),
+        completed_at=p.completed,
     )
 
 
@@ -461,7 +476,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         je.posting_date = row.date
         je.cheque_no = key
         je.cheque_date = row.date
-        je.user_remark = f"Safaricom charge on M-Pesa {KIND[p.doctype]} {p.receipt} ({p.name})"
+        je.user_remark = f"Safaricom charge on M-Pesa {KIND.get(p.doctype, 'payout')} {p.receipt} ({p.name})"
         je.append(
             "accounts",
             {

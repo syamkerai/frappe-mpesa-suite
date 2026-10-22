@@ -28,9 +28,13 @@ def create_payment_entry(
     submit=0,
     party_account=None,
     references=None,
+    bank_gl=None,
 ):
     """
     Create a payment entry for a given customer and company.
+
+    ``bank_gl``: the bank/cash account to use instead of the Mode of Payment's (a B2C payout
+    from a till's Utility account mapped to a Bank Account of its own).
 
     Args:
             company (str): Company for which the payment entry is being created.
@@ -82,7 +86,8 @@ def create_payment_entry(
 
     payment_type = "Pay" if party_type in ["Employee", "Supplier"] else "Receive"
 
-    bank = get_bank_cash_account(company, mode_of_payment)
+    # a Mode of Payment wins over an account in ERPNext's lookup, so pass one or the other
+    bank = get_bank_cash_account(company, None if bank_gl else mode_of_payment, bank_account=bank_gl)
 
     company_currency = frappe.get_value("Company", company, "default_currency")
     conversion_rate = get_exchange_rate(

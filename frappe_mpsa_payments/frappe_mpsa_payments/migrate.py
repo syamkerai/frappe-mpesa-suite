@@ -130,6 +130,47 @@ def create_custom_erpnext_fields():
                 "description": "Expense account for Safaricom transaction charges (e.g. 'M-Pesa Charges').",
                 "module": MODULE,
             },
+            {
+                "fieldname": "sub_accounts_section",
+                "label": "Sub-Accounts",
+                "fieldtype": "Section Break",
+                "insert_after": "charges_account",
+                "collapsible": 1,
+                "module": MODULE,
+            },
+            {
+                "fieldname": "sub_accounts",
+                "label": "Sub-Accounts",
+                "fieldtype": "Table",
+                "options": "Mpesa Sub Account",
+                "insert_after": "sub_accounts_section",
+                "description": "Optional. A shortcode is several wallets: Utility (paybill money, B2C payouts), Working / "
+                "MMF (bank funding, B2B payouts), Merchant (till money), Charges Paid... Map one to a Bank Account "
+                "of its own (an existing one is fine) to keep its money and statement apart. A sub-account left out "
+                "uses the Bank Account above, as before. The one that receives customer payments (Utility, or "
+                "Merchant for a till) always stays on the Bank Account above.",
+                "module": MODULE,
+            },
+        ],
+        # wallet.balances: which wallet a line moved, and when Safaricom completed it
+        "Bank Transaction": [
+            {
+                "fieldname": "mpesa_sub_account",
+                "label": "M-Pesa Sub-Account",
+                "fieldtype": "Data",
+                "insert_after": "transaction_type",
+                "read_only": 1,
+                "module": MODULE,
+            },
+            {
+                "fieldname": "mpesa_completed_at",
+                "label": "M-Pesa Completion Time",
+                "fieldtype": "Datetime",
+                "insert_after": "mpesa_sub_account",
+                "read_only": 1,
+                "search_index": 1,
+                "module": MODULE,
+            },
         ],
         "Sales Invoice Payment": [
             {

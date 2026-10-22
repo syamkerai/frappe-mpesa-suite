@@ -60,11 +60,19 @@ def create_statement_line(
     withdrawal: bool = False,
     party_type: str | None = None,
     party: str | None = None,
+    sub_account: str | None = None,
+    completed_at=None,
 ) -> str:
-    """Create and submit one Bank Transaction per receipt; returns the existing one if present."""
+    """Create and submit one Bank Transaction per receipt; returns the existing one if present.
+
+    ``sub_account`` (Utility, Working...) and ``completed_at`` (Safaricom's completion time) go
+    on the line for the balance checks (wallet.balances); a line made earlier without them,
+    by the suite or Astral's scripts, gets them.
+    """
     with named_lock(f"bt:{bank_account}:{receipt}"):
         existing = find_existing(bank_account, receipt, withdrawal)
         if existing:
+            _stamp(existing, sub_account, completed_at)
             return existing
 
         gl = frappe.db.get_value("Bank Account", bank_account, "account")
@@ -83,11 +91,30 @@ def create_statement_line(
         if party_type and party:
             bt.party_type = party_type
             bt.party = party
+        if sub_account and bt.meta.has_field("mpesa_sub_account"):
+            bt.mpesa_sub_account = sub_account
+        if completed_at and bt.meta.has_field("mpesa_completed_at"):
+            bt.mpesa_completed_at = completed_at
         bt.flags.mpesa_suite = True  # our own insert: skip the duplicate guard below
         bt.flags.ignore_permissions = True
         bt.insert()
         bt.submit()
         return bt.name
+
+
+def _stamp(name: str, sub_account: str | None, completed_at) -> None:
+    meta = frappe.get_meta(BT)
+    wanted = {
+        field: value
+        for field, value in (("mpesa_sub_account", sub_account), ("mpesa_completed_at", completed_at))
+        if value and meta.has_field(field)
+    }
+    if not wanted:
+        return
+    current = frappe.db.get_value(BT, name, list(wanted), as_dict=True) or {}
+    missing = {field: value for field, value in wanted.items() if not current.get(field)}
+    if missing:
+        frappe.db.set_value(BT, name, missing, update_modified=False)
 
 
 def _link(doc, bank_transaction: str) -> None:
@@ -97,9 +124,12 @@ def _link(doc, bank_transaction: str) -> None:
 
 def for_register(register) -> str | None:
     """Statement line for a C2B confirmation / pulled transaction."""
+    from ..wallet.accounts import receiving
+
     if register.docstatus == 2 or not register.transid:
         return None
-    bank_account = bank_account_for(settings_for_shortcode(register.businessshortcode))
+    settings = settings_for_shortcode(register.businessshortcode)
+    bank_account = bank_account_for(settings)
     if not bank_account:
         log_match(
             "Error",
@@ -120,6 +150,8 @@ def for_register(register) -> str | None:
         transaction_type="Pay Bill",
         party_type="Customer" if register.get("customer") else None,
         party=register.get("customer"),
+        sub_account=receiving(settings),
+        completed_at=parse_transtime(register.get("transtime")),
     )
     _link(register, name)
     return name
@@ -127,6 +159,8 @@ def for_register(register) -> str | None:
 
 def for_express_request(request) -> str | None:
     """Statement line for an STK receipt that never produced a C2B confirmation."""
+    from ..wallet.accounts import receiving
+
     if request.docstatus != 1 or request.status != "Completed" or not request.transaction_id:
         return None
     owner = frappe.db.get_value(REGISTER, {"transid": request.transaction_id, "docstatus": ["<", 2]}, "name")
@@ -148,6 +182,8 @@ def for_express_request(request) -> str | None:
         date=(when.date() if when else nowdate()),
         description=f"STK {request.phone_number or ''} | Ref: {request.reference_name or '-'} | Express: {request.name}",
         transaction_type="STK Push",
+        sub_account=receiving(request.settings),
+        completed_at=when,
     )
     _link(request, name)
     return name

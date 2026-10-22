@@ -70,7 +70,11 @@ def handle_result(result: dict, ref: str | None) -> None:
             "trans_completed_time": daraja.parse_daraja_datetime(values.get("TransCompletedTime")),
             "receiver_public_name": values.get("ReceiverPartyPublicName"),
             "debit_party_charges": values.get("DebitPartyCharges"),
-            "debit_account_balance": values.get("DebitAccountBalance"),
+            # live results name the account ("Working Account|KES|1476.00|..."); Daraja's sample
+            # sends DebitAccountBalance instead
+            "debit_account_balance": values.get("DebitPartyAffectedAccountBalance")
+            or values.get("DebitAccountBalance")
+            or values.get("DebitAccountCurrentBalance"),
         },
         notify=True,
     )
@@ -228,9 +232,12 @@ def _book_payment_entry(name: str) -> str | None:
 def _build_payment_entry(doc):
     from erpnext.accounts.party import get_party_account
 
-    from ..money_in.common import bank_account_for, mode_of_payment_for
+    from ..money_in.common import mode_of_payment_for
+    from ..wallet import accounts
 
-    bank_account = bank_account_for(doc.mpesa_settings)
+    # B2B pays from the Working (MMF) account: its own Bank Account when mapped
+    sub_account = accounts.from_balance_text(doc.get("debit_account_balance")) or accounts.WORKING
+    bank_account = accounts.bank_account(doc.mpesa_settings, sub_account)
     if not bank_account:
         frappe.throw(f"Map a Bank Account on Mpesa Settings {doc.mpesa_settings} (Accounting Mapping)")
     bank = frappe.db.get_value("Bank Account", bank_account, ["account", "company"], as_dict=True)

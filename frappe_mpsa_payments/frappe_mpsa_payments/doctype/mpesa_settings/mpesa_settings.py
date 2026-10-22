@@ -148,6 +148,10 @@ class MpesaSettings(Document):
 
         self.validate_api_switches()
         self.warn_shared_shortcode()
+        if self.meta.has_field("sub_accounts"):
+            from ....wallet.accounts import validate_settings
+
+            validate_settings(self)
 
     def validate_api_switches(self) -> None:
         """At least one API; money-out APIs need an API operator (Initiator)."""

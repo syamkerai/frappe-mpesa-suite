@@ -199,7 +199,10 @@ scheduler_events = {
             "frappe_mpsa_payments.services.b2c_scheduler_service.check_unsettled_payouts",
         ],
         "*/2 * * * *": ["frappe_mpsa_payments.money_in.events.every_two_minutes"],
-        "*/5 * * * *": ["frappe_mpsa_payments.money_in.events.every_five_minutes"],
+        "*/5 * * * *": [
+            "frappe_mpsa_payments.money_in.events.every_five_minutes",
+            "frappe_mpsa_payments.wallet.balances.run",
+        ],
         "* * * * *": [
             "frappe_mpsa_payments.gateway.jobs.every_minute",
             "frappe_mpsa_payments.sandbox_lab.runner.check_waiting",

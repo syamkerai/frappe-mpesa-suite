@@ -4,6 +4,7 @@ from frappe.utils import nowdate
 from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
     create_payment_entry,
 )
+from frappe_mpsa_payments.wallet.accounts import b2c_utility_gl
 
 
 def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=False):
@@ -55,6 +56,7 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
             submit=submit,
             references=references,
             party_account=party_account,
+            bank_gl=b2c_utility_gl(b2c_disbursement_ref),
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Payment Entry Service Error")

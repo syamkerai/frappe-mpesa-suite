@@ -148,6 +148,9 @@ def mpesa_bank_accounts() -> set:
             order_by="creation asc",
         )
     )
+    from ..wallet.accounts import all_bank_accounts
+
+    accounts.update(all_bank_accounts())  # sub-accounts mapped to Bank Accounts of their own
     frappe.local.mpesa_suite_bank_accounts = accounts  # per request / job
     return accounts
 

@@ -20,7 +20,7 @@ SETTINGS = "TESTPAYOUT"
 SHORTCODE = "600999"
 B2C, B2B, BT, JE = statement.B2C, statement.B2B, "Bank Transaction", "Journal Entry"
 CHARGES = "_Test M-Pesa Charges"
-BANDS = "1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13"
+BANDS = "100 = 0\n1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13"
 SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, b2c_charge_bands=BANDS, payout_lines_from=None)
 
 

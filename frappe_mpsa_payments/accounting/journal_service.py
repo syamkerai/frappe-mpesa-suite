@@ -40,11 +40,13 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
             je.cheque_no = receipt
             je.cheque_date = getdate(b2c_disbursement_ref.reference_date or je.posting_date)
 
-        # Credit the paid_from account
+        # Credit the paid_from account (the Utility account's own GL when it has one)
+        from frappe_mpsa_payments.wallet.accounts import b2c_utility_gl
+
         je.append(
             "accounts",
             {
-                "account": b2c_disbursement.paid_from,
+                "account": b2c_utility_gl(b2c_disbursement_ref) or b2c_disbursement.paid_from,
                 "credit_in_account_currency": b2c_disbursement_ref.allocated_amount,
             },
         )

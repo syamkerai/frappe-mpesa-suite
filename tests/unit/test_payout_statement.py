@@ -19,7 +19,7 @@ import fake_frappe
 
 STATEMENT = "frappe_mpsa_payments.money_out.statement"
 B2C, B2B, BT = "B2C Disbursement Request", "Mpesa B2B Payment Request", "Bank Transaction"
-BANDS = "1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13"
+BANDS = "100 = 0\n1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13"
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def env(monkeypatch):
         monkeypatch.setattr(statement, "create_statement_line", create_statement_line)
         monkeypatch.setattr(statement, "find_existing", lambda ba, key, withdrawal=None: None)
         monkeypatch.setattr(statement, "line_elsewhere", lambda ba, key: None)
-        monkeypatch.setattr(statement, "bank_account_for", lambda settings_name: "Mpesa B2C 4139683")
+        monkeypatch.setattr(statement, "payout_bank_account", lambda p: "Mpesa B2C 4139683")
         monkeypatch.setattr(statement, "erpnext_installed", lambda: True)
         monkeypatch.setattr(statement, "balance_charge", lambda p: None)
         monkeypatch.setattr(statement, "charge_entry",
@@ -108,8 +108,8 @@ def test_b2b_charge_is_read_from_debit_party_charges(pure, value, charge):
 
 def test_charge_bands_follow_safaricoms_tariff(pure):
     bands = pure.parse_bands(BANDS + "\n\n# comments and blank lines are fine")
-    assert [pure.band_charge(bands, a) for a in (10, 1500, 1501, 5000, 5006, 20000, 21000, 250000)] == [
-        5, 5, 9, 9, 11, 11, 13, 13]
+    assert [pure.band_charge(bands, a) for a in (10, 100, 101, 1500, 1501, 5000, 5006, 20000, 21000, 250000)] == [
+        0, 0, 5, 5, 9, 9, 11, 11, 13, 13]
     assert pure.band_charge(bands, 250001) is None  # above the last band: unknown
     assert pure.parse_bands("1500: 5\n5,000 = 9") == [(1500, 5), (5000, 9)]
     assert pure.parse_bands("") == []
@@ -278,7 +278,7 @@ def test_payout_before_payout_lines_from_is_left_alone(env):
 
 def test_no_mapped_bank_account_is_logged_once(env, monkeypatch):
     b2c(env)
-    monkeypatch.setattr(env.statement, "bank_account_for", lambda settings_name: None)
+    monkeypatch.setattr(env.statement, "payout_bank_account", lambda p: None)
     env.statement.after_payout(B2C, "B2C-1")
     assert env.calls.lines == []
     (result, method), kw = env.calls.logs[0]

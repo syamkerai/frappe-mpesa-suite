@@ -732,7 +732,9 @@ Money in already became a Bank Transaction per receipt within seconds. Money out
   Ordering the restored copy's payouts by completion time (then balance, for payouts completing in
   the same second) and taking the fall since the payout just before gives a charge for 1,428 of
   1,473; every one equals Safaricom's banded tariff: up to 1,500 → 5, 5,000 → 9, 20,000 → 11,
-  above → 13. The other 45 follow a float top-up or a settlement sweep.
+  above → 13. The other 45 follow a float top-up or a settlement sweep. (The portal statements
+  imported later showed one more band: the 23 payouts of KES 100 or less carried no charge, so the
+  default bands now start `100 = 0`.)
 - So a B2C charge is the **B2C Charge Bands** setting (that tariff by default), checked against the
   balances: when no payout to that shortcode is still in flight, nothing else moved the wallet in
   between (no C2B receipt, no payout without a balance) and the fall is a whole-shilling amount
@@ -775,3 +777,138 @@ reconciliation rules, both result jobs, settings, patch), bench `money_out/test_
 (B2B through the real booking job, B2C Payment Entry and salary Journal Entry, balances agreeing and
 disputing the band, payouts in flight, Astral's own lines and entry reused, another M-Pesa account,
 switches, missing charges account, sweep and Payout Lines From, both directions of one receipt).
+
+## M-Pesa accounts: each wallet of a shortcode on its own statement (2026-10-22, uncommitted)
+
+A shortcode is several wallets. Astral's 4139683 portal statements (Aug–Oct 2026) show how money
+moves between them: the bank funds **MMF/Working** ("Deposit into MMF Control Account from
+M-PESA", 19 deposits, KES 7.56M), staff move it to **Utility** on the portal ("Business Transfer
+from MMF Account to Utility Account", 20 transfers), Utility pays B2C (1,999 salary payments, each
+with its own "B2C Payment Charge" row) and Working pays B2B (with "Business Pay Bill Charge").
+Daraja sends no callback for funding, transfers or sweeps to the bank; only the statement has them.
+
+**Sub-accounts on Mpesa Settings (optional)**
+- Accounting Mapping → Sub-Accounts maps Working (MMF), Merchant, Charges Paid, Organization
+  Settlement or Float to a Bank Account of its own (an existing Bank Account and GL is fine).
+- **Nothing changes until a row is added**: every sub-account left out posts to the shortcode's
+  Bank Account, exactly as before, so a site coming from Navari's app keeps working as it is.
+- The wallet that receives customer payments (Utility for a paybill, Merchant for a till) always
+  stays on the shortcode's Bank Account, because receipts are booked to the Mode of Payment's
+  account. A row that tries to move it is refused on save, as is a sub-account mapped twice or a
+  Bank Account of another company.
+- Routing: C2B and STK go to the receiving wallet; B2C payouts and their charges go to Utility;
+  B2B payouts and their charges go to the account their result names, which is Working on live
+  results. The B2B Payment Entry pays from that GL. A B2C entry from a till pays from Utility's GL
+  when Utility has its own.
+- Every line now records its wallet and Safaricom's completion time (new read-only Bank
+  Transaction fields "M-Pesa Sub-Account" and "M-Pesa Completion Time"). Lines made earlier get
+  them when an import finds them.
+
+**Statement import** (new **Mpesa Statement Import**, M-Pesa workspace → M-Pesa Accounts)
+- Attach the per-account export from the M-PESA Org Portal: `ORG_<shortcode>_<Account>_All_<date>.xls`,
+  or .xlsx / .csv in the same layout. Press Import Statement; it runs in the background.
+- The portal's combined export ("Statements for <shortcode> ...") has no account column, so it is
+  refused with a message to export each account separately.
+- Each row is handled by its kind:
+  - **Payout or receipt:** the live feed's line is found by its receipt (or made), then reconciled
+    as the live feed would.
+  - **Charge:** the line `CHG-<receipt>` carries the charge Safaricom actually took, with its
+    Journal Entry. The statement settles every charge exactly, including ones the tariff check
+    left out.
+  - **Transfer between two wallets:** a line on each side and one Internal Transfer Payment Entry,
+    both lines reconciled. If both wallets share a Bank Account, nothing is booked because nothing
+    left it.
+  - **Funding from a bank, or a withdrawal to one:** the line, then the entry for that money:
+    - First choice: the entry staff already booked. This is exactly one submitted Journal or
+      Payment Entry moving that amount into (or out of) the wallet's GL within "Match Bank Lines
+      Within (Days)" and not yet matched to a line on that account (Astral books funding as
+      "Dr Mpesa-4139683 / Cr KCB, Transfer to B2C").
+    - Otherwise: an Internal Transfer with the bank's own line, when exactly one unmatched bank
+      line of that amount lies in that window.
+    - Otherwise the note says why. For example: the entry of that amount is already matched to
+      another line, which is probably an older hand-made top-up line for the same money. Or it
+      went into the shortcode's main GL rather than the Working GL, and needs amending.
+  - **A payout Safaricom charged nothing for** (KES 100 or less) whose old `CHG-` line says
+    otherwise is left for staff to cancel, with the line and its entry named.
+- Anything less certain gets its line and is left for staff. Every row's outcome is an **Mpesa
+  Statement Row**: Line Made, Already There, Reconciled, Left for Staff (with the reason) or
+  Skipped.
+- Importing the same or an overlapping file again makes nothing twice and retries what was left,
+  for example once the bank's statement is in.
+- Tie-out on the import: the rows against the header totals, and the statement balance against
+  the books of that wallet's GL on that date.
+- Checked on Astral's real files (counts only, never committed):
+  - Utility: 3,996 rows. MMF: 44 rows.
+  - Every charge row has its payout row.
+  - All 21 transfers appear on both statements with opposite signs.
+  - The running balances have no breaks, and the totals match the headers.
+
+**Balance checks** (new **Mpesa Balance Snapshot**)
+- Every Account Balance result records each wallet's balance. The newest row of every imported
+  statement is the anchor.
+- A balance is compared with that anchor plus the wallet's lines since, by completion time. It is
+  checked 10 minutes after it was taken, once no payout on that shortcode is in flight.
+- Outcomes:
+  - Agrees: the balance matches.
+  - Gap: with the amount, meaning money moved that has no line yet.
+  - Cannot Check: no statement imported yet, or lines without a completion time in between.
+  - Explained: set when a later import closes a gap.
+- "Ask Safaricom for Balances Every (Minutes)" on the new M-Pesa Accounts tab sends the query on a
+  schedule. It is 0 (off) by default and needs an initiator with the Balance Query role.
+
+**Also fixed**: live B2B results send `DebitPartyAffectedAccountBalance` ("Working Account|KES|…")
+and `DebitAccountCurrentBalance`, not Daraja's documented `DebitAccountBalance`. Mpesa B2B Payment
+Request's Debit Account Balance was empty on the two live payments; it now stores the account name
+and balance.
+
+Settings (M-Pesa Suite Settings → new tab **M-Pesa Accounts**): "Submit Transfer and Funding Entries"
+(default on), "Match Bank Lines Within (Days)" (3), "Ask Safaricom for Balances Every (Minutes)" (0).
+
+**Dry run on the Astral copy (astral.local, data to 2 Oct 2026)**
+
+The real 4139683 MMF and Utility statements (31 Jul – 22 Oct) were imported in one transaction
+and rolled back; table counts were identical before and after.
+
+- As Astral is today (one Bank Account for 4139683, Working not mapped):
+  - Transfers: the 21 transfers between the wallets were skipped, since nothing left the account.
+  - Funding: 13 of the 19 fundings (KES 4.875M) were reconciled with the Journal Entries staff
+    already book ("Transfer to B2C", Dr Mpesa-4139683 / Cr KCB or M Oriental).
+  - Funding, 5 Aug: 2 fundings were left because their Journal Entries are already matched to the
+    old hand-made "M-Pesa Float Top-Up" lines (ACC-BTN-2026-08768/08769), which are the same money.
+  - Funding, after the copy: 4 fundings are later than the copy's data.
+  - Payouts: 1,471 were found reconciled; 526 are after the copy's data.
+  - Charges: 1,974 charges are right. 1,551 new charge lines and Journal Entries total KES 12,765
+    (Aug 1,323, Sep 6,396, Oct 5,046) that Astral's feed never booked.
+  - Wrong old charge lines, 4 left for staff: 48.02 and 219.02 on payouts Safaricom did not charge
+    (entries ACC-JV-2026-05158 and -05280), and 4 and 205.40 where Safaricom charged 5.
+- With Working on a Bank Account and GL of its own:
+  - Transfers: the 21 transfers book Internal Transfers between the two GLs.
+  - Funding: every funding is left, naming the Journal Entry that put the money into
+    Mpesa-4139683 instead of Working's GL.
+  - Importing those months as they stand would therefore move KES 7.55M into Working twice over:
+    Working's GL would end at −7.55M and Mpesa-4139683 at +7.55M too much.
+
+**To use it at Astral**
+1. Go live as today, with Working not mapped. Import each wallet's statement (MMF first, then
+   Utility), then cancel the duplicates and the four wrong charge lines the import lists.
+2. To give Working its own Bank Account and GL, pick a cut-over date and post Working's opening
+   balance with a Journal Entry. From that date book each funding Dr Working / Cr bank (the import
+   then matches it), and import statements from that date on, not earlier months.
+3. Optionally set the balance schedule (for example 60 minutes) once the initiator can query
+   balances.
+
+Tests:
+- Unit, `tests/unit/test_statement_file.py`: the parser on synthetic files in the real layout,
+  every kind rule, and refusal of the combined export.
+- Unit, `tests/unit/test_wallet_helpers.py`: balance texts, Account Balance parsing, the
+  receiving wallet and row keys.
+- Bench, `wallet/test_wallet.py`:
+  - mapping rules, and no change without a mapping;
+  - B2B on Working and B2C on Utility;
+  - a Working statement with funding paired to the bank's line and a transfer to Utility;
+  - the Utility side of that transfer imported again;
+  - exact charges and a payout made on the portal;
+  - a transfer inside one Bank Account;
+  - funding waiting for its bank line, and two candidate bank lines;
+  - the combined export refused;
+  - balance Gap closed by an import, Agrees, and Cannot Check.

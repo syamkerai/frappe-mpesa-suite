@@ -75,7 +75,15 @@
   "reconcile_payout_lines",
   "b2c_charge_bands",
   "column_break_payout_lines",
-  "payout_lines_from"
+  "payout_lines_from",
+  "accounts_tab",
+  "accounts_intro",
+  "statement_import_section",
+  "submit_statement_entries",
+  "column_break_statement_import",
+  "bank_match_days",
+  "balance_check_section",
+  "balance_check_minutes"
  ],
  "fields": [
   {
@@ -501,8 +509,8 @@
    "fieldname": "b2c_charge_bands",
    "fieldtype": "Small Text",
    "label": "B2C Charge Bands",
-   "default": "1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13",
-   "description": "Safaricom's B2C charge per payout, one band per line: '<payout up to KES> = <charge>'. The default is the tariff seen on every one of Astral's 1,428 payouts from 4139683 (Aug–Oct 2026). B2C results carry no charge, so the band is booked once the wallet balance on the result agrees or cannot tell; when it shows a different charge nothing is booked and Mpesa Match Log says why. Leave empty to book only the charge the balances show."
+   "default": "100 = 0\n1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13",
+   "description": "Safaricom's B2C charge per payout, one band per line: '<payout up to KES> = <charge>'. The default is the tariff on Astral's 4139683 statements (Aug–Oct 2026): every charge row matches it, and the 23 payouts of KES 100 or less carried no charge. B2C results carry no charge, so the band is booked once the wallet balance on the result agrees or cannot tell; when it shows a different charge nothing is booked and Mpesa Match Log says why. Leave empty to book only the charge the balances show."
   },
   {
    "fieldname": "column_break_payout_lines",
@@ -513,11 +521,56 @@
    "fieldtype": "Date",
    "label": "Payout Lines From",
    "description": "Payouts completed before this date get no lines or charge entries from the sweep (set to the upgrade date, so going live books nothing into past periods). Clear it, or move it back, to fill older payouts within Look Back (Days)."
+  },
+  {
+   "fieldname": "accounts_tab",
+   "fieldtype": "Tab Break",
+   "label": "M-Pesa Accounts"
+  },
+  {
+   "fieldname": "accounts_intro",
+   "fieldtype": "HTML",
+   "options": "<p class='text-muted small'>Each shortcode is several wallets (Utility, Working / MMF, Merchant...). Map any of them to a Bank Account of its own on Mpesa Settings → Accounting Mapping → Sub-Accounts; nothing changes until you do. Import each wallet's statement from the M-PESA Org Portal (M-Pesa Statement Import) to bring in funding, transfers between wallets and sweeps to the bank, which Safaricom sends no callback for.</p>"
+  },
+  {
+   "fieldname": "statement_import_section",
+   "fieldtype": "Section Break",
+   "label": "Statement Import"
+  },
+  {
+   "fieldname": "submit_statement_entries",
+   "fieldtype": "Check",
+   "label": "Submit Transfer and Funding Entries",
+   "default": "1",
+   "description": "The Internal Transfer Payment Entries a statement import books (between two wallets, or between a wallet and a bank) are submitted and reconciled. Untick to leave them as drafts for review."
+  },
+  {
+   "fieldname": "column_break_statement_import",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "bank_match_days",
+   "fieldtype": "Int",
+   "label": "Match Bank Lines Within (Days)",
+   "default": "3",
+   "description": "Funding from a bank, or a withdrawal to one, is matched with the bank's own line of exactly that amount from this many days before to one day after; only when there is exactly one."
+  },
+  {
+   "fieldname": "balance_check_section",
+   "fieldtype": "Section Break",
+   "label": "Balance Checks"
+  },
+  {
+   "fieldname": "balance_check_minutes",
+   "fieldtype": "Int",
+   "label": "Ask Safaricom for Balances Every (Minutes)",
+   "default": "0",
+   "description": "0: never (balances are still recorded whenever someone presses Get Account Balance). Needs an Initiator with the Balance Query role on Mpesa Settings. Each balance is checked against the last imported statement plus the lines since; a difference is listed as a Gap in M-Pesa Balance Snapshot."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-22 21:00:00.000000",
+ "modified": "2026-10-22 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa Suite Settings",

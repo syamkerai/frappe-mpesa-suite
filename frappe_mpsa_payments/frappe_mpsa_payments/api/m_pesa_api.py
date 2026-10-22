@@ -176,6 +176,13 @@ def _handle_balance_result(**kwargs) -> None:
         frappe.db.set_value(
             MPESA_SETTINGS_DOCTYPE, settings.name, "account_balance", account_balance
         )
+        # each sub-account's balance, checked against the lines (wallet.balances)
+        from ...wallet.balances import from_account_balance
+
+        completed = next(
+            (p.get("Value") for p in result_params if p.get("Key") == "BOCompletedTime"), None
+        )
+        from_account_balance(settings.name, account_balance, completed, request_doc.name)
 
     frappe.publish_realtime(
         event="refresh_form", doctype=MPESA_SETTINGS_DOCTYPE, docname=settings_docname
