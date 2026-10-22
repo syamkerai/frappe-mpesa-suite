@@ -115,11 +115,77 @@ without before_install failed with `Module Mpsa Suite not found`; with before_in
 (`t15suite.localhost`) and 292 on v16 (`t16suite.localhost`). Each run includes
 `mpsa_suite.tests.test_rename_lookup` (R4). Before the move, v15's runner skipped that test.
 
-**Not shown yet:** a full v15 run from the old app with before_install in place (its effect was
-shown on the site above), R6 on a real site (no default_app was set), the R8 restore route, an
-install without `--force`, a migrate or HTTP calls while both apps are installed, the Frappe
-Cloud dashboard flow, a site that came from Navari, HTTP posts to the other Safaricom paths, and
-live traffic during the switch. `docs/RENAME_PLAN.md` section 7 lists the rehearsals.
+**Frappe v15 hand-over at the branch tip** (2026-10-22, bench `~/mpesa15`, Frappe 15.123.1 /
+ERPNext 15.123.0, mpsa_suite code at `9927c16`, old app at C `02d94a0`, new throwaway sites
+`rename15.localhost` and `rename15b.localhost`, outbound network blocked, the sites' jobs on a
+redis queue no worker reads, scheduler paused). The site had the same records as the earlier
+v15 site, and the landing page of Administrator and of System Settings set to the old app.
+
+- R3 refused `uninstall-app frappe_mpsa_payments --dry-run`. The read-only danger list (plan
+  section 7.2 step 4) at that point: 25 tables to drop, 2 Singles, 45 custom fields, 2 property
+  setters, 5 reports (1 made on the site), the workspace, dashboard, 4 charts, 2 number cards, the
+  Server Script and the Client Script. With `mpsa_allow_old_uninstall: 1` set for one run, the dry
+  run listed the 27 DocTypes and changed nothing (every count equal); the flag was removed straight
+  after.
+- The site's cached module map was set to one without mpsa_suite (a cache warm from before
+  `get-app`), with no `clear-cache`. `install-app mpsa_suite --force` succeeded in 9.8 s:
+  before_install rebuilt the map; R1 moved the site-made DocType, custom field, report, Client
+  Script and Server Script, and R6 moved both landing pages to mpsa_suite. Nothing was left in the
+  old module (A2, A3 empty; A10 no rows); 27 DocTypes in "Mpsa Suite"; 9 new scheduled jobs and no
+  old ones; 8 + 8 Patch Log rows. R5 created the 6 Payment Entry fields under "Mpsa Suite": the old
+  app's install had recorded that patch as done without making them (custom fields 70 to 76).
+- Both apps installed: the 18 Safaricom paths, the Sandbox Lab ping and two logged-in paths,
+  called on the old and on the new path, answered the same (21 of 21 pairs), and the queued jobs
+  were all `mpsa_suite.*`. A migrate with both apps installed (38 s) left everything in
+  "Mpsa Suite", 9 new jobs and no old ones, and printed no orphan line.
+- `uninstall-app frappe_mpsa_payments --no-backup --yes --force` (what Frappe Cloud runs) took 3 s:
+  the hand-over hook found nothing left to move, and Frappe removed only the empty Module Def. The
+  migrate after it printed no orphan line. Rows, Singles, secrets (each still decrypts), the Bank
+  field's value and the custom DocType's row equal the baseline; the only differences are what the
+  test added (an API client, the 6 Payment Entry fields, one property setter, Integration Requests
+  from the HTTP calls).
+- Old paths over HTTP with the old app gone, each next to its new path: all 18 Safaricom paths
+  returned 200; the 7 Payments API paths answered with the gateway's own 401 without credentials and
+  200 with a client key (`list_payments`); the pay page paths answered the gateway's own 404 for an
+  unknown token; ping and `convert_amount_to_kes` 200; all 41 logged-in paths 403 to a guest (found
+  and whitelisted) and 200 with an Administrator token for the two read-only ones tried; the two C2B
+  paths through `/api/v2/method/` 200; an old path not in the table 417. 68 of 70 pairs answered the
+  same; the 2 that differ are the STK and B2C results, where the old path carried IDs that exist
+  (200) and the new path unknown ones. The queued jobs ran under the new names and made the C2B
+  registers; the STK request took the callback; the B2C request and its reference row turned
+  Failed (result 2001); both balance results were stored and their Integration Requests completed.
+- Not caused by the rename, the same on old and new paths: an STK or B2C result with an unknown
+  CheckoutRequestID or OriginatorConversationID gets HTTP 417, and `process_balance_info` with an
+  unknown ConversationID gets 403. "Every old path returns 200" holds for payloads that match a
+  record.
+- R2 refused `uninstall-app mpsa_suite --dry-run`, and refused `uninstall-app mpsa_suite --yes
+  --force --no-backup` after `remove-from-installed-apps mpsa_suite`; nothing changed.
+- R8: with mpsa_suite's Patch Log rows deleted and mpsa_suite put back in installed_apps without
+  install-app, the next migrate ran the 8 patches and each returned at once ("already ran as
+  frappe_mpsa_payments..."). The sentinels a patch would have changed (Mpesa Settings API switches,
+  a register with no currency) were untouched.
+- Scheduler: `pause_scheduler: 1` in site_config made the scheduler inactive; the RQ Job list's
+  "Enable Scheduler" call (`frappe.utils.scheduler.activate_scheduler`, as Administrator) set it to
+  0 and made it active again.
+- Orphan sweep on v15: a standard DocType filed under "Mpsa Suite" that mpsa_suite does not ship was
+  listed by A10, and the next migrate printed "Orphaned DocType(s) found" and deleted its DocType
+  record; its table and row stayed (plan section 3.2 G).
+- Install without `--force` (`rename15b.localhost`): the DocTypes and the standard reports,
+  workspace and number cards were re-imported into "Mpsa Suite" (the bumped `modified` dates), R1
+  moved the site-made DocType and report, the uninstall removed only the empty Module Def, and the
+  migrate after it printed no orphan line.
+
+**Bench tests at the branch tip** (new sites set up as CI does: new-site, ERPNext, payments,
+mpsa_suite, migrate, `run-tests --app mpsa_suite`): 292 tests passed on v15 (`t15suite.localhost`)
+and 292 on v16 (`t16suite.localhost`), each including `mpsa_suite.tests.test_rename_lookup`. On
+v16 the network guard refused 21 look-ups of `api.frankfurter.dev` (ERPNext's exchange rates) and
+nothing else; on v15 it refused none. Unit tests: 1046 passed (Python 3.13 and 3.10).
+
+**Not shown yet:** the Frappe Cloud dashboard flow (Install App, Uninstall, `pause_scheduler` in
+the Site Config tab), a real restore that drops mpsa_suite from installed_apps (R8 was shown with
+the app put back by hand), a site that came from Navari, v16 Desktop Icon and Workspace Sidebar
+rows pointing at the old app, and live traffic during the switch. `docs/RENAME_PLAN.md` section 7
+lists the rehearsals.
 
 ## Corrections to `docs/RENAME_PLAN.md`
 
@@ -135,3 +201,7 @@ That plan lives with the old-name branch, so these are recorded here:
 - **Sections 3.2 D and 7.2 step 6.** mpsa_suite's before_install now rebuilds a stale module map,
   so `install-app` needs no `clear-cache` first. On a self-hosted bench a
   `bench --site <site> clear-cache` before `install-app` is harmless and can still be added.
+- **R3's flag (section 4.2, 7.1).** The old app's guard at C lets the uninstall through for any
+  value of `mpsa_allow_old_uninstall` that is not empty, so `bench set-config
+  mpsa_allow_old_uninstall 0` (stored as the text "0" without `-p`) also unlocks it. To lock it
+  again, remove the key; never set it to 0. R2's `mpsa_allow_uninstall` accepts only 1 or true.
