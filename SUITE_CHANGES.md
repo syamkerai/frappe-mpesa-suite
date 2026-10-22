@@ -924,7 +924,8 @@ the v16 test evidence: [docs/RENAME_SPIKE.md](docs/RENAME_SPIKE.md). The heading
 old names as history.
 
 **Rename commit (generated)**
-- `scripts/do_rename.py` run on the last old-name release, `02d94a0`: folders and every code and
+- `scripts/do_rename.py` run on `02d94a0` (release C, `ee5b201`, adds only the R3 flag fix,
+  which this branch replaces with R2, and a CI line this branch already has): folders and every code and
   config mention renamed (165 files, 739 replacements), the `/assets/mpsa_suite/` paths, the
   dashboard folder `mpsa_suite_dashboard/`, and `pyproject.toml` name `mpsa_suite` so both
   packages can sit in one bench.
@@ -947,7 +948,8 @@ old names as history.
   `mpsa_allow_uninstall: 1`. Uninstalling it would drop every M-Pesa table, the settings and their
   secrets; it is never a rollback. The check runs even when mpsa_suite is missing from
   installed_apps.
-- R3 stays in the old app only (release `02d94a0`, flag `mpsa_allow_old_uninstall`).
+- R3 stays in the old app only (added in `02d94a0`; in release C `ee5b201` its flag
+  `mpsa_allow_old_uninstall` accepts only 1 or true).
 - R4: a unit test holds the lookup table to release C: every whitelisted function of C has an
   entry, and each target exists, is whitelisted and keeps C's guest setting. A bench test imports
   every target.
@@ -958,7 +960,8 @@ old names as history.
 - R8: a patch whose old-name twin already ran (Patch Log, `skipped = 0`) does nothing, so a site
   that gets mpsa_suite without install-app (a restore, a manual fix) does not re-run them; Mpesa
   Settings' API switches are not rewritten.
-- R9: CI and the linters run on pushes to `mpsa-suite`.
+- R9: CI runs on pushes to `mpsa-suite`. The linters stay on pull requests only, as on
+  `astral-suite`.
 
 **Review fixes**
 - `before_install` rebuilds Frappe's module map when it lacks mpsa_suite. On a Frappe 15 bench

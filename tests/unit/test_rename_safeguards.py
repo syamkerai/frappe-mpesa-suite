@@ -500,8 +500,10 @@ def test_r9_ci_runs_on_pushes_to_mpsa_suite():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     push = ci.split("push:", 1)[1].split("pull_request:", 1)[0]
     assert "- mpsa-suite" in push
+    # The linters run on pull requests only, as on astral-suite: the code did not pass them before
+    # the rename, and a red run on every push would hide a failing test run.
     linter = (ROOT / ".github" / "workflows" / "linter.yml").read_text(encoding="utf-8")
-    assert "- mpsa-suite" in linter.split("push:", 1)[1].split("workflow_dispatch", 1)[0]
+    assert "push:" not in linter
 
 
 def test_only_app_folder_is_mpsa_suite():

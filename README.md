@@ -54,7 +54,7 @@ so it is refused unless the site's config has `mpsa_allow_uninstall: 1`.
 
 ### Package name
 
-The Python package is `mpsa_suite` (module "Mpsa Suite"). Up to release `02d94a0` on branch
+The Python package is `mpsa_suite` (module "Mpsa Suite"). Up to release `ee5b201` on branch
 `astral-suite` it kept the upstream name `frappe_mpsa_payments`. DocType names, tables, roles and
 settings did not change.
 

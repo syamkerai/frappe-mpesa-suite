@@ -9,11 +9,16 @@ has been shown to work.
 
 ## How the branch was made
 
-1. **Release C.** The last old-name release is commit `02d94a0` on `astral-suite`. It carries the
-   old app's own uninstall guard (R3): it refuses to uninstall `frappe_mpsa_payments` unless
-   `mpsa_suite` is installed and owns the module "Mpsa Suite", or site_config has
-   `mpsa_allow_old_uninstall: 1`. Nothing may land on the old-name branch after C.
-2. **Rename commit.** `scripts/do_rename.py` run on a clean checkout of C:
+1. **Release C.** The last old-name release is commit `ee5b201` on `astral-suite`. It carries the
+   old app's own uninstall guard (R3, added in `02d94a0`): it refuses to uninstall
+   `frappe_mpsa_payments` unless `mpsa_suite` is installed and owns the module "Mpsa Suite", or
+   site_config has `mpsa_allow_old_uninstall` set to 1 or true (`088608d` stopped "0" unlocking
+   it; `ee5b201` installs openpyxl in CI's unit job). Nothing may land on the old-name branch
+   after C.
+2. **Rename commit.** `scripts/do_rename.py` run on a clean checkout of `02d94a0`. C differs from
+   it only in the old app's guard and its test (`088608d`), which this branch replaces with R2,
+   and in a CI line this branch already has (`ee5b201`). Both are merged into this branch
+   without changing its files, and the generated tree is unchanged:
 
    ```
    python3 scripts/do_rename.py --src <checkout of 02d94a0> --dst <new dir> \
@@ -23,7 +28,7 @@ has been shown to work.
    It copied 347 files, rewrote 165 of them (739 replacements), bumped `modified` in 14 record
    JSONs so a plain migrate re-imports them into the new module, wrote `mpsa_suite/handover.py`
    and built the lookup table: 70 old paths, 29 of them guest. The output was committed as is.
-   Running the same command on C reproduces that commit. Run it under Linux or WSL: on Windows,
+   Running the same command on `02d94a0` reproduces that commit. Run it under Linux or WSL: on Windows,
    deep paths exceed the 260-character limit.
 3. **Safeguards commit.** R1, R2 and R4 to R9 below, added by hand.
 4. **Review fixes.** `before_install` for Frappe 15's module map (below), the R4 bench test moved
@@ -35,13 +40,13 @@ has been shown to work.
 |---|---|---|
 | R1 | `after_sync` runs `rehome()` at the end of install-app, so nothing is left in the old module once mpsa_suite is installed (the check before uninstalling the old app can expect zero). | `mpsa_suite/hooks.py` `after_sync`; `handover.after_sync` |
 | R2 | mpsa_suite's own `before_uninstall` refuses every uninstall of mpsa_suite, whatever the row counts, unless site_config has `mpsa_allow_uninstall: 1`. It runs even when mpsa_suite is missing from installed_apps. `handover.before_app_uninstall("mpsa_suite")` repeats the check. | `mpsa_suite/uninstall_guard.py`; `handover.before_app_uninstall` |
-| R3 | Old app only (release C), see above. Not shipped under the new name. | `frappe_mpsa_payments/uninstall_guard.py` at `02d94a0` |
+| R3 | Old app only (release C), see above. Not shipped under the new name. | `frappe_mpsa_payments/uninstall_guard.py` at C (`ee5b201`) |
 | R4 | Unit test: each of the 70 whitelisted functions of C has an entry, each target exists, is whitelisted and keeps C's guest setting. A bench test imports every target as Frappe's handler does. | `tests/unit/test_rename_safeguards.py`, `tests/unit/rename_whitelist_at_c.json` (made by `scripts/gen_whitelist_snapshot.py` from git); bench test `mpsa_suite/tests/test_rename_lookup.py` |
 | R5 | The 6 Payment Entry STK fields are made on every migrate and at install, filed under `MODULE`; the patch now calls the same function. | `mpsa_suite/mpsa_suite/migrate.py` `create_payment_entry_mpesa_fields` |
 | R6 | `rehome()` also moves `User.default_app` and System Settings `default_app` from the old app to mpsa_suite. | `handover.APP_FIELDS`, `SINGLE_APP_FIELDS` |
 | R7 | The rename script and this note are kept in the repository. | `scripts/do_rename.py`, `docs/RENAME_SPIKE.md` |
 | R8 | Each of the 8 registered patches returns at once when its twin `frappe_mpsa_payments.frappe_mpsa_payments.patches.*` is in Patch Log with `skipped = 0` (what Frappe itself counts as done). No patch was added. | `handover.ran_under_old_name`; first lines of each `execute()` in `mpsa_suite/mpsa_suite/patches/` |
-| R9 | CI runs on pushes to `mpsa-suite`; the linters too. | `.github/workflows/ci.yml`, `.github/workflows/linter.yml` |
+| R9 | CI runs on pushes to `mpsa-suite`. The linters stay on pull requests only, as on `astral-suite`: the code did not pass them before the rename, and a red run on every push would hide a failing test run. | `.github/workflows/ci.yml` |
 
 The lookup table (`override_whitelisted_methods` in `hooks.py`) stays for good: Safaricom holds
 the registered C2B and Pull URLs under the old paths until they are re-registered.
@@ -201,7 +206,8 @@ That plan lives with the old-name branch, so these are recorded here:
 - **Sections 3.2 D and 7.2 step 6.** mpsa_suite's before_install now rebuilds a stale module map,
   so `install-app` needs no `clear-cache` first. On a self-hosted bench a
   `bench --site <site> clear-cache` before `install-app` is harmless and can still be added.
-- **R3's flag (section 4.2, 7.1).** The old app's guard at C lets the uninstall through for any
-  value of `mpsa_allow_old_uninstall` that is not empty, so `bench set-config
-  mpsa_allow_old_uninstall 0` (stored as the text "0" without `-p`) also unlocks it. To lock it
-  again, remove the key; never set it to 0. R2's `mpsa_allow_uninstall` accepts only 1 or true.
+- **R3's flag (section 4.2, 7.1).** At `02d94a0` the old app's guard let the uninstall through
+  for any value of `mpsa_allow_old_uninstall` that was not empty, so `bench set-config
+  mpsa_allow_old_uninstall 0` (stored as the text "0" without `-p`) unlocked it. Fixed in
+  `088608d`, part of C: like R2's `mpsa_allow_uninstall`, it accepts only 1 or true. Removing
+  the key is still the clean way to lock it again.
