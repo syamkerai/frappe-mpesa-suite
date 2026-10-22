@@ -21,10 +21,17 @@ from .common import (
 BT = "Bank Transaction"
 
 
-def find_existing(bank_account: str, receipt: str) -> str | None:
-    """Live (draft or submitted) statement line for this receipt on this account."""
+def find_existing(bank_account: str, receipt: str, withdrawal: bool | None = None) -> str | None:
+    """Live (draft or submitted) statement line for this receipt on this account.
+
+    ``withdrawal``: only a line moving money that way (True out, False in). A B2B payment
+    between two shortcodes mapped to one Bank Account puts its receipt on both lines.
+    """
     if not receipt:
         return None
+    filters = {"bank_account": bank_account, "docstatus": ["<", 2]}
+    if withdrawal is not None:
+        filters["withdrawal" if withdrawal else "deposit"] = [">", 0]
     # Both columns are indexed (install.ensure_lookup_indexes), so the locking read only
     # locks this receipt's rows instead of scanning (and locking) the whole table. It must
     # stay a locking read: a plain read sees our transaction's snapshot and can miss a line
@@ -32,7 +39,7 @@ def find_existing(bank_account: str, receipt: str) -> str | None:
     for field in ("reference_number", "transaction_id"):
         name = frappe.db.get_value(
             BT,
-            {field: receipt, "bank_account": bank_account, "docstatus": ["<", 2]},
+            {field: receipt, **filters},
             "name",
             order_by="creation asc",
             for_update=True,
@@ -56,7 +63,7 @@ def create_statement_line(
 ) -> str:
     """Create and submit one Bank Transaction per receipt; returns the existing one if present."""
     with named_lock(f"bt:{bank_account}:{receipt}"):
-        existing = find_existing(bank_account, receipt)
+        existing = find_existing(bank_account, receipt, withdrawal)
         if existing:
             return existing
 
@@ -180,8 +187,9 @@ def guard_duplicate(doc, method=None) -> None:
         return
     if doc.bank_account not in mpesa_bank_accounts():
         return
+    direction = True if flt(doc.withdrawal) > 0 else False if flt(doc.deposit) > 0 else None
     for receipt in {cstr(doc.reference_number).strip(), cstr(doc.transaction_id).strip()} - {""}:
-        existing = find_existing(doc.bank_account, receipt)
+        existing = find_existing(doc.bank_account, receipt, direction)
         if existing:
             frappe.throw(
                 _("Duplicate M-Pesa receipt {0}: already on {1}.").format(receipt, existing),

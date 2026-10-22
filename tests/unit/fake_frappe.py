@@ -223,6 +223,7 @@ def build():
     utils.nowdate = lambda: datetime.date.today().isoformat()
     utils.now_datetime = lambda: datetime.datetime(2026, 10, 18, 12, 0, 0)
     utils.add_to_date = lambda dt, minutes=0, hours=0, **kw: dt + datetime.timedelta(minutes=minutes, hours=hours)
+    utils.add_days = lambda date, days: (datetime.date.fromisoformat(str(date)[:10]) + datetime.timedelta(days=days))
     utils.get_url = lambda *a, **kw: "https://erp.example.com"
     utils.get_datetime = lambda v: v
     frappe.utils = utils

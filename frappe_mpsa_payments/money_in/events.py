@@ -4,6 +4,7 @@ import frappe
 
 from . import bank_transaction, c2b_verify, matching, payment_request, reconcile, sales_order, stk_poll, stk_verify
 from ..compat import in_test
+from ..money_out import statement as payout_statement
 from .common import enabled, erpnext_installed
 
 
@@ -59,4 +60,6 @@ def every_five_minutes() -> None:
         return
     _run("statement lines", bank_transaction.sweep_missing)
     _run("bank reconciliation", reconcile.run)
+    _run("payout statement lines", payout_statement.sweep_missing)
+    _run("payout reconciliation", payout_statement.reconcile_run)
     _run("C2B confirmation verification", c2b_verify.sweep)

@@ -58,11 +58,14 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
         frappe.db.commit()
 
     if enqueue_next and req.status == "Paid":
+        from frappe_mpsa_payments.money_out.statement import after_payout
         from frappe_mpsa_payments.services.b2c_postprocess_service import (
             handle_successful_payment,
         )
 
         handle_successful_payment(req.b2c_payment_disbursement, ref_name)
+        # the payout's statement lines, reconciled with the entry just booked
+        after_payout(B2C_REQUEST_DOCTYPE, req.name)
 
 
 def _link_is_free(ref_name: str) -> bool:

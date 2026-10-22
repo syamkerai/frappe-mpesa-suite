@@ -67,7 +67,15 @@
   "supersede_unpaid_prompts",
   "column_break_stk",
   "poll_stk_status",
-  "sync_payment_request_status"
+  "sync_payment_request_status",
+  "money_out_tab",
+  "money_out_intro",
+  "payout_lines_section",
+  "book_payout_charges",
+  "reconcile_payout_lines",
+  "b2c_charge_bands",
+  "column_break_payout_lines",
+  "payout_lines_from"
  ],
  "fields": [
   {
@@ -256,8 +264,8 @@
   {
    "fieldname": "create_bank_transactions",
    "fieldtype": "Check",
-   "label": "Create Bank Transaction for Every Receipt",
-   "description": "C2B and STK receipts become submitted Bank Transactions on the shortcode's Bank Account (replaces 'Register To Bank Transaction', 'Auto Reconcile' pass 0, 'BT Duplicate Guard', 'Duplicate BT Sweeper')."
+   "label": "Create Bank Transaction for Every Receipt and Payout",
+   "description": "C2B and STK receipts, and Paid B2C / B2B payouts with their Safaricom charges, become submitted Bank Transactions on the shortcode's Bank Account (replaces 'Register To Bank Transaction', 'Auto Reconcile' pass 0, 'BT Duplicate Guard', 'Duplicate BT Sweeper', 'B2C Payout To Bank' and the charge pass of 'B2C Voucher Complete'). See the Money Out tab."
   },
   {
    "fieldname": "block_duplicate_bank_transactions",
@@ -279,7 +287,7 @@
    "fieldname": "auto_reconcile_bank_transactions",
    "fieldtype": "Check",
    "label": "Auto-Reconcile M-Pesa Bank Transactions",
-   "description": "Links each receipt line to its Payment Entry when amounts agree (replaces 'Auto Reconcile' passes 1–2)."
+   "description": "Links each receipt line to its Payment Entry, each payout line to its Payment Entry (salary: Journal Entry) and each charge line to its charge Journal Entry, when amounts agree (replaces 'Auto Reconcile' passes 1–2 and 'B2C Voucher Complete')."
   },
   {
    "fieldname": "pe_section",
@@ -459,11 +467,57 @@
    "fieldtype": "Check",
    "label": "Mark Payment Requests Paid When Settled",
    "description": "Replaces 'Status Sync'."
+  },
+  {
+   "fieldname": "money_out_tab",
+   "fieldtype": "Tab Break",
+   "label": "Money Out"
+  },
+  {
+   "fieldname": "money_out_intro",
+   "fieldtype": "HTML",
+   "options": "<p class='text-muted small'>Payout lines follow the Money In switch 'Create Bank Transaction for Every Receipt and Payout': each Paid B2C or B2B payout gets a withdrawal line (its receipt) within seconds of its result. The two switches below add the Safaricom charge (line CHG-&lt;receipt&gt; and a Journal Entry from the shortcode's M-Pesa Charges Account, Mpesa Settings → Accounting Mapping) and reconcile the lines with their entries. Both act only when the answer is certain; anything else is listed in Mpesa Match Log for you. Lines and entries Astral's feed scripts made are found by the same keys and never made twice; still disable 'AIL Mpesa Feed - B2C Payout To Bank' and 'B2C Voucher Complete' when you switch this on.</p>"
+  },
+  {
+   "fieldname": "payout_lines_section",
+   "fieldtype": "Section Break",
+   "label": "Payout Statement Lines"
+  },
+  {
+   "fieldname": "book_payout_charges",
+   "fieldtype": "Check",
+   "label": "Book Safaricom Charges Automatically",
+   "default": "1",
+   "description": "Each Paid payout's Safaricom charge gets its own line (CHG-<receipt>) and a Journal Entry from the shortcode's M-Pesa Charges Account, only when the charge is certain: a B2B result states it; a B2C charge is its band below, and is left for you (listed in Mpesa Match Log) when the wallet balance on the result shows a different charge."
+  },
+  {
+   "fieldname": "reconcile_payout_lines",
+   "fieldtype": "Check",
+   "label": "Reconcile Payout and Charge Lines Automatically",
+   "default": "1",
+   "description": "Needs 'Auto-Reconcile M-Pesa Bank Transactions' (Money In). A withdrawal line on an M-Pesa Bank Account is matched only with the one submitted entry that carries its receipt (Payment Entry Reference No; salary and charge Journal Entry Cheque No), pays out of that account and has exactly its amount. Anything else (no entry, another amount, two candidates) is left for you and listed in Mpesa Match Log."
+  },
+  {
+   "fieldname": "b2c_charge_bands",
+   "fieldtype": "Small Text",
+   "label": "B2C Charge Bands",
+   "default": "1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13",
+   "description": "Safaricom's B2C charge per payout, one band per line: '<payout up to KES> = <charge>'. The default is the tariff seen on every one of Astral's 1,428 payouts from 4139683 (Aug–Oct 2026). B2C results carry no charge, so the band is booked once the wallet balance on the result agrees or cannot tell; when it shows a different charge nothing is booked and Mpesa Match Log says why. Leave empty to book only the charge the balances show."
+  },
+  {
+   "fieldname": "column_break_payout_lines",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "payout_lines_from",
+   "fieldtype": "Date",
+   "label": "Payout Lines From",
+   "description": "Payouts completed before this date get no lines or charge entries from the sweep (set to the upgrade date, so going live books nothing into past periods). Clear it, or move it back, to fill older payouts within Look Back (Days)."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-22 18:00:00.000000",
+ "modified": "2026-10-22 21:00:00.000000",
  "modified_by": "Administrator",
  "module": "Frappe Mpsa Payments",
  "name": "M-Pesa Suite Settings",

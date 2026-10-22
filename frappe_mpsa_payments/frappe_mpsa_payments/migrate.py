@@ -49,6 +49,31 @@ def create_custom_hrms_fields():
     create_fields(custom_fields)
 
 
+def payout_statement_fields(insert_after: str) -> list:
+    fields = [
+        ("bank_transaction", "Bank Transaction", "Link", "Bank Transaction"),
+        ("mpesa_charge", "M-Pesa Charge", "Currency", None),
+        ("charge_bank_transaction", "Charge Bank Transaction", "Link", "Bank Transaction"),
+    ]
+    rows = []
+    for fieldname, label, fieldtype, options in fields:
+        row = {
+            "fieldname": fieldname,
+            "label": label,
+            "fieldtype": fieldtype,
+            "insert_after": insert_after,
+            "read_only": 1,
+            "allow_on_submit": 1,
+            "no_copy": 1,
+            "module": MODULE,
+        }
+        if options:
+            row["options"] = options
+        rows.append(row)
+        insert_after = fieldname
+    return rows
+
+
 def create_custom_erpnext_fields():
     custom_fields = {
         # One Mpesa Settings record per shortcode/till: map it to its books once, instead of
@@ -256,6 +281,9 @@ def create_custom_erpnext_fields():
                 "module": MODULE,
             }
         ],
+        # money_out.statement: each Paid payout's line and its Safaricom charge's line
+        "B2C Disbursement Request": payout_statement_fields("accounting_error"),
+        "Mpesa B2B Payment Request": payout_statement_fields("payment_entry"),
         "Mpesa C2B Payment Register": [
             {
                 "fieldname": "company",

@@ -16,6 +16,13 @@ class MPesaSuiteSettings(Document):
         if self.enforce_ip_allowlist and not parse_allowlist(self.allowed_callback_ips):
             frappe.throw(_("Add at least one valid IP or CIDR before enforcing the callback allow-list."))
 
+        from ....money_out.statement import parse_bands
+
+        try:
+            parse_bands(self.get("b2c_charge_bands"))
+        except ValueError as e:
+            frappe.throw(_("B2C Charge Bands: {0}").format(e))
+
     @frappe.whitelist()
     def regenerate_callback_token(self):
         frappe.only_for(("System Manager", "M-Pesa Manager"))

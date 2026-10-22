@@ -697,3 +697,81 @@ reminds staff (at most once a day) to add an initiator allowed to query Transact
 Shortcodes with an initiator are verified as before. The Security Credential is regenerated
 whenever someone types the initiator password on Mpesa Settings and saves, so a Safaricom-forced
 password change needs no developer.
+
+## Money out on the statement: payout and charge Bank Transactions (2026-10-22, uncommitted)
+
+Money in already became a Bank Transaction per receipt within seconds. Money out now does too
+(`money_out/statement.py`).
+
+**What happens on each Paid payout**
+- Right after a B2C result's job books the payout (`b2c_response_service.update_b2c_reference_status`,
+  after `handle_successful_payment`), and after a B2B result's job books its Payment Entry
+  (`b2b.book_payment_entry`), the payout gets a **withdrawal line** on its shortcode's Bank Account
+  (`bank_account_for`: the Accounting Mapping, else the Mode of Payment's account). Reference and
+  transaction ID are the M-Pesa receipt, the date is the completion time, the party is the
+  employee or supplier.
+- **Charge line** `CHG-<receipt>` (type "M-Pesa Charges") and a **Journal Entry** (Bank Entry,
+  Cheque No `CHG-<receipt>`): Dr the shortcode's **M-Pesa Charges Account** (Mpesa Settings →
+  Accounting Mapping, the existing `charges_account` field; cost center from the same section or
+  the company default), Cr the shortcode's bank GL. Submitted when "Submit B2C Accounting Entries"
+  is ticked on that Mpesa Settings, like the payout's own entry; otherwise a draft for review.
+- **Reconciliation**: the payout line with its Payment Entry (Reference No = receipt; a salary
+  payout's Journal Entry by Cheque No), the charge line with its Journal Entry. Only when exactly
+  one submitted, uncleared entry carries the key, pays out of that bank GL and has exactly the
+  line's amount. No entry: left quietly (the sweep tries again when one is booked). Another amount
+  or two candidates: left, and listed in **Mpesa Match Log** (Ambiguous, Bank Reconciliation).
+- **Sweep** every 5 minutes (`money_in.events.every_five_minutes`): makes lines a job missed
+  and reconciles every unmatched withdrawal on an M-Pesa Bank Account, including lines Astral's
+  scripts or a statement import made. Re-sent results and re-runs never make a second line or entry.
+
+**The charge**
+- B2B: Safaricom states it (`DebitPartyCharges`, e.g. "Business Pay Bill Charge|KES|2.00").
+- B2C results carry no charge, only the wallet balances after the payout. Daraja's docs say charges
+  go to the Charges Paid account; on Astral's 4139683 that balance is 0 on all 1,474 payouts and the
+  charge comes off **Utility**, so the suite uses Utility + Charges Paid (right for either setup).
+  Ordering the restored copy's payouts by completion time (then balance, for payouts completing in
+  the same second) and taking the fall since the payout just before gives a charge for 1,428 of
+  1,473; every one equals Safaricom's banded tariff: up to 1,500 → 5, 5,000 → 9, 20,000 → 11,
+  above → 13. The other 45 follow a float top-up or a settlement sweep.
+- So a B2C charge is the **B2C Charge Bands** setting (that tariff by default), checked against the
+  balances: when no payout to that shortcode is still in flight, nothing else moved the wallet in
+  between (no C2B receipt, no payout without a balance) and the fall is a whole-shilling amount
+  between 0 and 100. **When the balances show a different charge, nothing is booked** and Mpesa
+  Match Log says why (Ambiguous, "Payout Charge"). Empty bands: the charge the balances show is
+  booked once they show it.
+- For comparison, Astral's feed sorted every payout ever made by Utility balance, across top-ups:
+  only 427 of its 1,473 payouts got a charge line, and 4 of those are wrong (48.02, 205.40, 219.02,
+  and a 4 that should be 5).
+
+**Settings** (M-Pesa Suite Settings → new **Money Out** tab)
+- Lines follow the Money In switch, now "Create Bank Transaction for Every Receipt and Payout".
+- "Book Safaricom Charges Automatically" (default on) and "Reconcile Payout and Charge Lines
+  Automatically" (default on; also needs "Auto-Reconcile M-Pesa Bank Transactions").
+- "B2C Charge Bands": `<payout up to KES> = <charge>` per line; checked on save.
+- "Payout Lines From": payouts completed earlier are left alone. A patch
+  (`payout_lines_from_upgrade_date`) sets it to the upgrade date on an existing site, so the first
+  sweep at go-live does not book about a thousand charge entries into past (maybe closed) months.
+  Move it back to fill older payouts on purpose (within Look Back (Days)).
+- New read-only fields on B2C Disbursement Request and Mpesa B2B Payment Request: Bank Transaction,
+  M-Pesa Charge, Charge Bank Transaction. Mpesa Match Log gets the method "Payout Charge".
+
+**Next to Astral's scripts.** The suite uses the same keys as "AIL Mpesa Feed - B2C Payout To
+Bank" and "B2C Voucher Complete" (receipt; `CHG-<receipt>` on the line and as the JE Cheque No),
+looks for an existing line by receipt before making one (on the mapped account, and on any other
+M-Pesa Bank Account: then it makes none and lists it), and uses an existing charge Journal Entry
+as it is. A charge line their script made with another amount gets no entry from the suite (listed
+in Match Log). Still disable both scripts when the switch is turned on.
+
+**Small change in money in**: the duplicate check for a statement line now looks only at lines
+moving money the same way. A B2B between two shortcodes mapped to one Bank Account puts the
+same receipt on a withdrawal and a deposit; before, the second was silently dropped.
+
+**Go-live**: on each paying Mpesa Settings set the M-Pesa Charges Account ("5.2.03.12 - (J015)
+M-Pesa Charges - AIL") and a cost center, keep "Submit B2C Accounting Entries" as staff want, map the
+Bank Account, then disable the two AIL B2C feed scripts and turn the switches on.
+
+Tests: `tests/unit/test_payout_statement.py` (charge rules on Astral's real balances, switches,
+reconciliation rules, both result jobs, settings, patch), bench `money_out/test_statement.py`
+(B2B through the real booking job, B2C Payment Entry and salary Journal Entry, balances agreeing and
+disputing the band, payouts in flight, Astral's own lines and entry reused, another M-Pesa account,
+switches, missing charges account, sweep and Payout Lines From, both directions of one receipt).

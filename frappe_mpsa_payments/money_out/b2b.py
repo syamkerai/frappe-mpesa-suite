@@ -180,7 +180,16 @@ def validate_against_invoice(doc) -> None:
 
 # ---------------------------------------------------------------- accounting
 def book_payment_entry(name: str) -> str | None:
-    """Payment Entry for a Paid request. Idempotent; errors are logged, not raised."""
+    """Payment Entry for a Paid request, then its statement lines. Idempotent; errors are
+    logged, not raised."""
+    from .statement import after_payout
+
+    pe = _book_payment_entry(name)
+    after_payout(B2B_DOCTYPE, name)  # reconciled with the entry just booked
+    return pe
+
+
+def _book_payment_entry(name: str) -> str | None:
     frappe.db.get_value(B2B_DOCTYPE, name, "name", for_update=True)
     doc = frappe.get_doc(B2B_DOCTYPE, name)
     if doc.status != "Paid" or not doc.transaction_id:
