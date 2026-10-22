@@ -12,8 +12,8 @@ import frappe
 
 from mpsa_suite.compat import IntegrationTestCase
 
-# in the app's repository (bench get-app clones it whole); the guest check is skipped without it
-SNAPSHOT = Path(__file__).resolve().parents[1] / "tests" / "unit" / "rename_whitelist_at_c.json"
+# in the app's repository, next to the package (bench get-app and Frappe Cloud clone it whole)
+SNAPSHOT = Path(__file__).resolve().parents[2] / "tests" / "unit" / "rename_whitelist_at_c.json"
 
 
 class TestRenameLookup(IntegrationTestCase):
@@ -21,7 +21,9 @@ class TestRenameLookup(IntegrationTestCase):
         overrides = frappe.get_hooks("override_whitelisted_methods") or {}
         old_paths = sorted(p for p in overrides if p.startswith("frappe_mpsa_payments."))
         self.assertGreaterEqual(len(old_paths), 70)
-        guest = json.loads(SNAPSHOT.read_text(encoding="utf-8"))["whitelisted"] if SNAPSHOT.is_file() else {}
+        self.assertTrue(SNAPSHOT.is_file(), f"{SNAPSHOT} is missing, so the guest settings cannot be checked")
+        guest = json.loads(SNAPSHOT.read_text(encoding="utf-8"))["whitelisted"]
+        self.assertTrue(set(guest) <= set(old_paths), sorted(set(guest) - set(old_paths)))
         for old in old_paths:
             target = overrides[old][-1]  # Frappe uses the last entry
             self.assertTrue(target.startswith("mpsa_suite."), target)

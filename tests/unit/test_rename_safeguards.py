@@ -2,7 +2,8 @@
 
 R1 after_sync re-homes at install, R4 the old-path lookup table, R5 Payment Entry STK fields on
 every migrate, R6 default_app re-pointed, R8 patches that already ran under the old name do
-nothing, R9 CI runs on mpsa-suite. R2 is in test_uninstall_guard.py.
+nothing, R9 CI runs on mpsa-suite. R2 is in test_uninstall_guard.py. Also: before_install
+rebuilds a stale module map (Frappe 15), and no bench test sits where Frappe 15 skips it.
 """
 
 import ast
@@ -438,6 +439,56 @@ def test_r5_patch_delegates_to_migrate():
     source = (APP / "mpsa_suite" / "patches" / "payment_entry_custom_fields.py").read_text(encoding="utf-8")
     assert "from ..migrate import create_payment_entry_mpesa_fields" in source
     assert '"Mpsa Suite"' not in source and "fieldname" not in source
+
+
+# ---------------------------------------------------------------------------------------------
+# before_install: a module map cached before `bench get-app` (Frappe 15) is rebuilt
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def install_env():
+    frappe, saved = fake_frappe.install()
+    try:
+        calls = []
+        frappe.cache = types.SimpleNamespace(delete_value=lambda key: calls.append(("delete_value", key)))
+
+        def setup_module_map(include_all_apps=True):
+            calls.append(("setup_module_map", include_all_apps))
+            frappe.local.app_modules = {"frappe": ["core"], OLD_APP: [OLD_APP], NEW_APP: [NEW_APP]}
+
+        frappe.setup_module_map = setup_module_map
+        yield importlib.import_module("mpsa_suite.install"), frappe, calls
+    finally:
+        fake_frappe.uninstall(saved)
+
+
+def test_before_install_hook_is_wired():
+    assert _hook("before_install") == "mpsa_suite.install.before_install"
+
+
+@pytest.mark.parametrize("cached", [{"frappe": ["core"], OLD_APP: [OLD_APP]}, None])
+def test_before_install_rebuilds_a_module_map_without_mpsa_suite(install_env, cached):
+    install, frappe, calls = install_env
+    frappe.local.app_modules = cached
+    assert install.before_install() is None  # False would make install-app stop
+    assert calls == [("delete_value", "app_modules"), ("setup_module_map", True)]
+    assert NEW_APP in frappe.local.app_modules
+
+
+def test_before_install_leaves_a_current_module_map_alone(install_env):
+    install, frappe, calls = install_env
+    frappe.local.app_modules = {"frappe": ["core"], NEW_APP: [NEW_APP]}
+    install.before_install()
+    assert calls == []
+
+
+def test_no_bench_test_in_the_app_folder_itself():
+    # Frappe 15's run-tests --app imports a test file in the app folder itself as the bare
+    # package (test_runner._add_test, relative_path == "."), so its tests would never run.
+    assert sorted(p.name for p in APP.glob("test_*.py")) == []
+    assert (APP / "tests" / "__init__.py").is_file()
+    assert (APP / "tests" / "test_rename_lookup.py").is_file()
 
 
 # ---------------------------------------------------------------------------------------------

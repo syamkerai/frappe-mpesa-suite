@@ -92,6 +92,21 @@ def backfill_single_defaults(doctype: str) -> None:
             frappe.db.set_single_value(doctype, df.fieldname, df.default)
 
 
+def before_install() -> None:
+    """Make sure Frappe's module map lists mpsa_suite before install-app syncs the app.
+
+    Frappe builds the map once per process, in frappe.init, from the site's Redis cache key
+    ``app_modules``. `bench get-app` adds mpsa_suite to apps.txt but never clears that key, so on
+    a bench whose cache was warm before, the map has no mpsa_suite. Frappe 15's install-app then
+    syncs no DocType, still commits the Module Def, installed_apps and the Patch Log rows, and
+    after_install fails with "Module Mpsa Suite not found". Frappe 16 rebuilds the map itself
+    after add_module_defs (installer.install_app); this does the same on both, before the sync.
+    """
+    if "mpsa_suite" not in (getattr(frappe.local, "app_modules", None) or {}):
+        frappe.cache.delete_value("app_modules")
+        frappe.setup_module_map(include_all_apps=True)
+
+
 def after_install() -> None:
     # install-app does not run after_migrate; without this a fresh site misses the
     # ERPNext custom fields (company, customer, payment_entry, ...) until the next migrate.

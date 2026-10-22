@@ -109,7 +109,9 @@ website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
 # Installation
 # ------------
 
-# before_install = "mpsa_suite.install.before_install"
+# Rebuilds Frappe's module map when it lacks mpsa_suite (a Redis cache from before `bench get-app`):
+# Frappe 15's install-app would otherwise sync no DocType and fail in after_install.
+before_install = "mpsa_suite.install.before_install"
 after_install = "mpsa_suite.install.after_install"
 # Runs last in install-app: files everything still under the old module "Frappe Mpsa Payments"
 # under "Mpsa Suite", so nothing is left for an uninstall of the old app to delete (R1).

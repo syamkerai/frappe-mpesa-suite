@@ -26,6 +26,8 @@ has been shown to work.
    Running the same command on C reproduces that commit. Run it under Linux or WSL: on Windows,
    deep paths exceed the 260-character limit.
 3. **Safeguards commit.** R1, R2 and R4 to R9 below, added by hand.
+4. **Review fixes.** `before_install` for Frappe 15's module map (below), the R4 bench test moved
+   to where Frappe 15's test runner finds it, and the docs updated to the new names.
 
 ## The safeguards
 
@@ -34,7 +36,7 @@ has been shown to work.
 | R1 | `after_sync` runs `rehome()` at the end of install-app, so nothing is left in the old module once mpsa_suite is installed (the check before uninstalling the old app can expect zero). | `mpsa_suite/hooks.py` `after_sync`; `handover.after_sync` |
 | R2 | mpsa_suite's own `before_uninstall` refuses every uninstall of mpsa_suite, whatever the row counts, unless site_config has `mpsa_allow_uninstall: 1`. It runs even when mpsa_suite is missing from installed_apps. `handover.before_app_uninstall("mpsa_suite")` repeats the check. | `mpsa_suite/uninstall_guard.py`; `handover.before_app_uninstall` |
 | R3 | Old app only (release C), see above. Not shipped under the new name. | `frappe_mpsa_payments/uninstall_guard.py` at `02d94a0` |
-| R4 | Unit test: each of the 70 whitelisted functions of C has an entry, each target exists, is whitelisted and keeps C's guest setting. A bench test imports every target as Frappe's handler does. | `tests/unit/test_rename_safeguards.py`, `tests/unit/rename_whitelist_at_c.json` (made by `scripts/gen_whitelist_snapshot.py` from git); `mpsa_suite/test_rename_lookup.py` |
+| R4 | Unit test: each of the 70 whitelisted functions of C has an entry, each target exists, is whitelisted and keeps C's guest setting. A bench test imports every target as Frappe's handler does. | `tests/unit/test_rename_safeguards.py`, `tests/unit/rename_whitelist_at_c.json` (made by `scripts/gen_whitelist_snapshot.py` from git); bench test `mpsa_suite/tests/test_rename_lookup.py` |
 | R5 | The 6 Payment Entry STK fields are made on every migrate and at install, filed under `MODULE`; the patch now calls the same function. | `mpsa_suite/mpsa_suite/migrate.py` `create_payment_entry_mpesa_fields` |
 | R6 | `rehome()` also moves `User.default_app` and System Settings `default_app` from the old app to mpsa_suite. | `handover.APP_FIELDS`, `SINGLE_APP_FIELDS` |
 | R7 | The rename script and this note are kept in the repository. | `scripts/do_rename.py`, `docs/RENAME_SPIKE.md` |
@@ -43,6 +45,21 @@ has been shown to work.
 
 The lookup table (`override_whitelisted_methods` in `hooks.py`) stays for good: Safaricom holds
 the registered C2B and Pull URLs under the old paths until they are re-registered.
+
+### Frappe 15 and a stale module map (`before_install`)
+
+Frappe builds its map of apps to modules once per process, in `frappe.init`, from the site's
+Redis cache key `app_modules`. `bench get-app` adds mpsa_suite to apps.txt but does not clear
+that key. On Frappe 15, `install-app` uses the map as it found it, so on a bench whose cache was
+warm before `get-app` it syncs no DocType of mpsa_suite. It still commits the Module Def
+"Mpsa Suite", mpsa_suite in installed_apps and 8 Patch Log rows, and after_install then fails
+with `DoesNotExistError: Module Mpsa Suite not found`. Frappe 16 rebuilds the map inside
+install-app (`installer.install_app`, after `add_module_defs`); Frappe 15 does not.
+
+`mpsa_suite.install.before_install` does what Frappe 16 does: when the map lacks mpsa_suite it
+deletes the cache key and rebuilds the map from apps.txt. Frappe runs before_install inside
+install-app before the Module Def and the DocType sync, so this covers a self-hosted bench and
+Frappe Cloud's Install App alike.
 
 ## Evidence so far
 
@@ -70,6 +87,51 @@ Client Script, Bank custom field holding a value and custom DocType with one row
 - The bench files (apps.txt, apps.json, common_site_config.json) were restored to their
   original checksums afterwards.
 
-**Not shown yet:** the same run on Frappe v15 (both live sites), R1 to R9 on a real site, the
-Frappe Cloud dashboard flow, a site that came from Navari, HTTP posts to the other 14 Safaricom
-paths, and live traffic during the switch. `docs/RENAME_PLAN.md` section 7 lists the rehearsals.
+**Frappe v15 hand-over spike** (2026-10-22, bench `~/mpesa15`, Frappe 15.123.1 / ERPNext
+15.123.0, throwaway site `rename15.localhost`, branch `mpsa-suite` at `6d30ad0`, outbound network
+blocked). The site had the old app at C with the same kinds of records as the v16 site.
+
+- R3 refused `uninstall-app frappe_mpsa_payments --dry-run` while mpsa_suite was not installed.
+- The first `install-app mpsa_suite --force` failed with the stale module map described above;
+  nothing was lost, and nothing had been synced. After `clear-cache` the same command succeeded:
+  R1 moved the site-made DocType, custom field, report, Client Script and Server Script; 27
+  DocTypes in "Mpsa Suite", 0 in the old module; R5 added the 6 Payment Entry fields; the 9 old
+  scheduled jobs were replaced by the 9 new ones, as expected on v15.
+- Uninstalling the old app (R3 now allowed it) deleted only the empty Module Def "Frappe Mpsa
+  Payments". The migrate after it found no orphaned DocType. Rows, Singles, secrets, the Bank
+  field's value and the custom DocType's row were unchanged against the baseline.
+- R2 refused `uninstall-app mpsa_suite --dry-run`.
+- Old paths over HTTP after the old app was gone: C2B validation and confirmation (v1 and v2),
+  the STK callback, the B2C result, Payments API `get_status` and `list_payments` and the Sandbox
+  Lab ping all reached mpsa_suite; an unmapped old path returned 417.
+- Bench tests on a fresh v15 site: all modules passed.
+
+**The `before_install` fix, on the same v15 site.** The cached map was set to one without
+mpsa_suite, as a warm cache from before `get-app` holds it. `install-app mpsa_suite --force`
+without before_install failed with `Module Mpsa Suite not found`; with before_install, and no
+`clear-cache`, the same command synced the DocTypes and finished.
+
+**Bench tests after the review fixes** (`run-tests --app mpsa_suite`): 292 tests passed on v15
+(`t15suite.localhost`) and 292 on v16 (`t16suite.localhost`). Each run includes
+`mpsa_suite.tests.test_rename_lookup` (R4). Before the move, v15's runner skipped that test.
+
+**Not shown yet:** a full v15 run from the old app with before_install in place (its effect was
+shown on the site above), R6 on a real site (no default_app was set), the R8 restore route, an
+install without `--force`, a migrate or HTTP calls while both apps are installed, the Frappe
+Cloud dashboard flow, a site that came from Navari, HTTP posts to the other Safaricom paths, and
+live traffic during the switch. `docs/RENAME_PLAN.md` section 7 lists the rehearsals.
+
+## Corrections to `docs/RENAME_PLAN.md`
+
+That plan lives with the old-name branch, so these are recorded here:
+
+- **Appendix A, check A7.** Frappe 15 and 16 keep installed_apps under `parent = '__global'`
+  (`db.get_global` / `set_global`), so the query as written (`parent = '__default'`) returns no
+  rows. Use the query below; in the v15 spike it returned the expected list at each step.
+
+  ```sql
+  SELECT defvalue FROM `tabDefaultValue` WHERE parent = '__global' AND defkey = 'installed_apps';
+  ```
+- **Sections 3.2 D and 7.2 step 6.** mpsa_suite's before_install now rebuilds a stale module map,
+  so `install-app` needs no `clear-cache` first. On a self-hosted bench a
+  `bench --site <site> clear-cache` before `install-app` is harmless and can still be added.

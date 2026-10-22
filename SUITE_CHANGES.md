@@ -960,5 +960,15 @@ old names as history.
   Settings' API switches are not rewritten.
 - R9: CI and the linters run on pushes to `mpsa-suite`.
 
-Not yet shown: the hand-over on Frappe v15, R1–R9 on a real site, Frappe Cloud, a Navari-era
-site (docs/RENAME_SPIKE.md, "Not shown yet").
+**Review fixes**
+- `before_install` rebuilds Frappe's module map when it lacks mpsa_suite. On a Frappe 15 bench
+  whose Redis cache was warm before `bench get-app`, install-app otherwise synced no DocType and
+  failed in after_install with "Module Mpsa Suite not found".
+- The R4 bench test moved to `mpsa_suite/tests/`: Frappe 15's `run-tests --app` skipped it in the
+  app folder itself.
+- README, the Payments API, Sandbox Lab and licensing docs use the new names; the Payments API
+  doc says the old base URL keeps working.
+
+Shown on a throwaway Frappe v15 site: the hand-over with R1, R2, R3 and R5, nothing lost, the old
+paths over HTTP, and the bench tests. Not yet shown: Frappe Cloud, a Navari-era site, R6 and
+the R8 restore route on a real site (docs/RENAME_SPIKE.md, "Not shown yet").
