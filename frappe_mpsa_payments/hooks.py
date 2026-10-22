@@ -115,7 +115,7 @@ after_install = "frappe_mpsa_payments.install.after_install"
 # Uninstallation
 # ------------
 
-# before_uninstall = "frappe_mpsa_payments.uninstall.before_uninstall"
+before_uninstall = "frappe_mpsa_payments.uninstall_guard.before_uninstall"
 # after_uninstall = "frappe_mpsa_payments.uninstall.after_uninstall"
 
 # Integration Setup
