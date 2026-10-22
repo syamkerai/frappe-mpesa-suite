@@ -21,6 +21,7 @@ def after_migrate():
     if is_app_installed("erpnext"):
         create_custom_erpnext_fields()
         create_erpnext_property_setters()
+        create_payment_entry_mpesa_fields()
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
@@ -431,6 +432,75 @@ def create_custom_erpnext_fields():
     # validation ran before the columns existed ("Unknown column ... b2c_payment_disbursement").
     create_fields({dt: custom_fields.pop(dt) for dt in ("Payment Entry Reference", "Journal Entry Account")})
     create_fields(custom_fields)
+
+
+def payment_entry_mpesa_fields() -> dict:
+    """The STK section on Payment Entry (public/js/payment_entry.js)."""
+    return {
+        "Payment Entry": [
+            {
+                "fieldname": "custom_mpesa_section",
+                "label": "M-Pesa STK Push",
+                "fieldtype": "Section Break",
+                "insert_after": "mode_of_payment",
+                "depends_on": "eval:doc.payment_type=='Receive' && doc.party_type=='Customer'",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "custom_payment_gateway_account",
+                "label": "Payment Gateway Account",
+                "fieldtype": "Link",
+                "options": "Payment Gateway Account",
+                "insert_after": "custom_mpesa_section",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "custom_payment_gateway",
+                "label": "Payment Gateway",
+                "fieldtype": "Link",
+                "options": "Payment Gateway",
+                "fetch_from": "custom_payment_gateway_account.payment_gateway",
+                "read_only": 1,
+                "insert_after": "custom_payment_gateway_account",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "custom_mpesa_column_break",
+                "fieldtype": "Column Break",
+                "insert_after": "custom_payment_gateway",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "custom_mpesa_phone_number",
+                "label": "M-Pesa Phone Number",
+                "fieldtype": "Data",
+                "insert_after": "custom_mpesa_column_break",
+                "module": MODULE,
+            },
+            {
+                "fieldname": "custom_mpesa_receipt_number",
+                "label": "M-Pesa Receipt Number",
+                "fieldtype": "Data",
+                "read_only": 1,
+                "insert_after": "custom_mpesa_phone_number",
+                "module": MODULE,
+            },
+        ]
+    }
+
+
+def create_payment_entry_mpesa_fields():
+    """Create the 6 Payment Entry STK fields on every migrate and at install (R5).
+
+    They used to come only from patch payment_entry_custom_fields, which install-app records as
+    done without running, so a fresh install never had them. Their Links need Payment Gateway
+    (payments app) and Payment Gateway Account; outside a patch Frappe refuses a Link to a
+    DocType that does not exist, so the fields wait until both are there.
+    """
+    needed = ("Payment Entry", "Payment Gateway", "Payment Gateway Account")
+    if not all(frappe.db.exists("DocType", doctype) for doctype in needed):
+        return
+    create_custom_fields(payment_entry_mpesa_fields(), update=True)
 
 
 def create_fields(custom_fields):

@@ -168,13 +168,26 @@ def _safaricom_callbacks():
                 yield f"{module}.{node.name}"
 
 
-def test_app_no_longer_sends_legacy_callback_urls():
-    literals = {
-        node.value
-        for path in APP.rglob("*.py")
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+def _lookup_table_nodes(tree) -> set:
+    """Nodes of hooks.py's override_whitelisted_methods: old paths that still arrive, not URLs we send."""
+    return {
+        id(node)
+        for stmt in tree.body
+        if isinstance(stmt, ast.Assign) and any(getattr(t, "id", None) == "override_whitelisted_methods" for t in stmt.targets)
+        for node in ast.walk(stmt.value)
     }
+
+
+def test_app_no_longer_sends_legacy_callback_urls():
+    literals = set()
+    for path in APP.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _lookup_table_nodes(tree) if path == APP / "hooks.py" else set()
+        literals |= {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip
+        }
     assert not any(legacy in text for legacy in LEGACY_CALLBACKS for text in literals)
 
 

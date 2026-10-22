@@ -11,6 +11,8 @@ ticked on the form.
 import frappe
 from frappe.utils import cstr
 
+from mpsa_suite.handover import ran_under_old_name
+
 from ...daraja.apis import ALL, switches_from_legacy
 
 SETTINGS = "Mpesa Settings"
@@ -30,6 +32,8 @@ def _received_c2b(row) -> bool:
 
 
 def execute():
+    if ran_under_old_name(__name__):
+        return  # R8: already ran as frappe_mpsa_payments.*; see handover.py
     if not all(frappe.db.has_column(SETTINGS, api) for api in ALL):
         return  # runs post_model_sync, so the columns exist; guard against a partial sync
     for row in frappe.get_all(SETTINGS, fields=["name", "api_type", "business_shortcode", "till_number"]):

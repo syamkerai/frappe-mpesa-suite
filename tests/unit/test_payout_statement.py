@@ -439,7 +439,8 @@ def test_settings_refuse_unreadable_bands(env):
 def test_upgrade_starts_payout_lines_at_the_upgrade_date(env, stored, expected):
     patch = importlib.import_module("mpsa_suite.mpsa_suite.patches.payout_lines_from_upgrade_date")
     written = []
-    env.frappe.db.exists = lambda doctype, name=None: True
+    # the Settings DocType exists; the old-name twin of the patch never ran (R8)
+    env.frappe.db.exists = lambda doctype, name=None: doctype != "Patch Log"
     env.frappe.db.sql = lambda query, values=None, **kw: stored
     env.frappe.db.set_single_value = lambda doctype, field, value: written.append((field, value))
     patch.nowdate = lambda: "2026-10-22"

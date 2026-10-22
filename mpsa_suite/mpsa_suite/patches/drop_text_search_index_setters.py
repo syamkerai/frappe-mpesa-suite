@@ -12,6 +12,8 @@ index-backed locking read) stays.
 
 import frappe
 
+from mpsa_suite.handover import ran_under_old_name
+
 # what install.ensure_lookup_indexes gave a search_index Property Setter
 LOOKUP_FIELDS = (
     ("Bank Transaction", "reference_number"),
@@ -24,6 +26,8 @@ UNINDEXABLE = ("Text", "Long Text", "Small Text", "Code", "Text Editor")
 
 
 def execute():
+    if ran_under_old_name(__name__):
+        return  # R8: already ran as frappe_mpsa_payments.*; see handover.py
     for doctype, fieldname in LOOKUP_FIELDS:
         if not frappe.db.exists("DocType", doctype):
             continue

@@ -912,3 +912,53 @@ Tests:
   - funding waiting for its bank line, and two candidate bank lines;
   - the combined export refused;
   - balance Gap closed by an import, Agrees, and Cannot Check.
+
+## Rename to Mpsa Suite (2026-10-22, branch mpsa-suite)
+
+The app is renamed: package `frappe_mpsa_payments` → `mpsa_suite`, title "Astral M-Pesa Suite" →
+"Mpsa Suite", module "Frappe Mpsa Payments" → "Mpsa Suite". DocType names and tables, roles,
+secrets, Payment Gateway names, the site URL and `/pay/<token>` stay. The `m_pesa_api` and
+`mpesa_settings` path segments stay too. Frappe has no rename, so each site hands over from one
+app to the other: install `mpsa_suite` next to the old app, then uninstall the old app. Notes and
+the v16 test evidence: [docs/RENAME_SPIKE.md](docs/RENAME_SPIKE.md). The headings above keep the
+old names as history.
+
+**Rename commit (generated)**
+- `scripts/do_rename.py` run on the last old-name release, `02d94a0`: folders and every code and
+  config mention renamed (165 files, 739 replacements), the `/assets/mpsa_suite/` paths, the
+  dashboard folder `mpsa_suite_dashboard/`, and `pyproject.toml` name `mpsa_suite` so both
+  packages can sit in one bench.
+- `modified` bumped on the 14 shipped Reports, Dashboard, Dashboard Charts, Number Cards,
+  Workspace, Workspace Sidebar and Desktop Icon, so a plain migrate files them under the new module.
+- **Old URLs keep working.** `override_whitelisted_methods` maps all 70 old
+  `/api/method/frappe_mpsa_payments...` paths (29 guest: the 18 Safaricom callbacks, the Payments
+  API, the pay page) to the same function in mpsa_suite. Safaricom holds the registered C2B and
+  Pull URLs under the old paths, so the table stays for good.
+- **Hand-over** (`mpsa_suite/handover.py`): `rehome()` files every record still under the old
+  module (DocTypes, Custom Fields, Property Setters, Reports, site-made Server and Client Scripts,
+  ...) and the Workspace / Desktop Icon `app` under mpsa_suite. It runs when the old app is
+  uninstalled, before Frappe reads which modules to delete, and on every migrate. Any other
+  non-empty module the old app owns (Navari's "Stanbic") is handed to mpsa_suite, not deleted.
+
+**Safeguards (RENAME_PLAN.md R1–R9)**
+- R1: `rehome()` also runs at the end of install-app (`after_sync`), so nothing is left in the
+  old module once mpsa_suite is installed.
+- R2: mpsa_suite refuses every uninstall of itself, whatever the data, unless site_config has
+  `mpsa_allow_uninstall: 1`. Uninstalling it would drop every M-Pesa table, the settings and their
+  secrets; it is never a rollback. The check runs even when mpsa_suite is missing from
+  installed_apps.
+- R3 stays in the old app only (release `02d94a0`, flag `mpsa_allow_old_uninstall`).
+- R4: a unit test holds the lookup table to release C: every whitelisted function of C has an
+  entry, and each target exists, is whitelisted and keeps C's guest setting. A bench test imports
+  every target.
+- R5: the 6 Payment Entry STK fields are made on every migrate and at install; a fresh install
+  used to miss them.
+- R6: users' and System Settings' `default_app` move from the old app to mpsa_suite.
+- R7: the rename script is kept in `scripts/`.
+- R8: a patch whose old-name twin already ran (Patch Log, `skipped = 0`) does nothing, so a site
+  that gets mpsa_suite without install-app (a restore, a manual fix) does not re-run them; Mpesa
+  Settings' API switches are not rewritten.
+- R9: CI and the linters run on pushes to `mpsa-suite`.
+
+Not yet shown: the hand-over on Frappe v15, R1–R9 on a real site, Frappe Cloud, a Navari-era
+site (docs/RENAME_SPIKE.md, "Not shown yet").

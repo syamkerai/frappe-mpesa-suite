@@ -14,11 +14,15 @@ row is taken from the request that holds it.
 
 import frappe
 
+from mpsa_suite.handover import ran_under_old_name
+
 REQUEST = "B2C Disbursement Request"
 ROW = "B2C Payment Disbursement Reference"
 
 
 def execute():
+    if ran_under_old_name(__name__):
+        return  # R8: already ran as frappe_mpsa_payments.*; see handover.py
     if not (frappe.db.table_exists(REQUEST) and frappe.db.table_exists(ROW)):
         return
     if not (

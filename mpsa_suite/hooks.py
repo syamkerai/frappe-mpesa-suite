@@ -111,10 +111,15 @@ website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
 
 # before_install = "mpsa_suite.install.before_install"
 after_install = "mpsa_suite.install.after_install"
+# Runs last in install-app: files everything still under the old module "Frappe Mpsa Payments"
+# under "Mpsa Suite", so nothing is left for an uninstall of the old app to delete (R1).
+after_sync = "mpsa_suite.handover.after_sync"
 
 # Uninstallation
 # ------------
 
+# Refuses every uninstall of this app unless site_config has mpsa_allow_uninstall = 1 (R2).
+# Frappe runs an app's own before_uninstall even when it is missing from installed_apps.
 before_uninstall = "mpsa_suite.uninstall_guard.before_uninstall"
 # after_uninstall = "mpsa_suite.uninstall.after_uninstall"
 
@@ -300,6 +305,8 @@ after_migrate = [
 
 # Hand-over from the old package name (see handover.py)
 # ------------------------------------------------------
+# Uninstalling frappe_mpsa_payments: moves what is left in its modules to mpsa_suite first.
+# Uninstalling mpsa_suite: refused unless mpsa_allow_uninstall = 1 (second check of R2).
 before_app_uninstall = "mpsa_suite.handover.before_app_uninstall"
 
 # Old /api/method/frappe_mpsa_payments.* paths keep working: Safaricom holds registered C2B and Pull

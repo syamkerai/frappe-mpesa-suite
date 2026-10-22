@@ -14,10 +14,14 @@ never runs this patch (install-app marks patches as done).
 import frappe
 from frappe.utils import nowdate
 
+from mpsa_suite.handover import ran_under_old_name
+
 SETTINGS = "M-Pesa Suite Settings"
 
 
 def execute():
+    if ran_under_old_name(__name__):
+        return  # R8: already ran as frappe_mpsa_payments.*; see handover.py
     if not frappe.db.exists("DocType", SETTINGS):
         return
     stored = frappe.db.sql("SELECT field, value FROM `tabSingles` WHERE doctype = %s", SETTINGS)

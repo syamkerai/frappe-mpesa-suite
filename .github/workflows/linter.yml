@@ -3,6 +3,9 @@ name: Linters
 
 on:
   pull_request: { }
+  push:
+    branches:
+      - mpsa-suite
   workflow_dispatch: { }
 
 permissions:
@@ -16,7 +19,7 @@ jobs:
   linter:
     name: 'Frappe Linter'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v4

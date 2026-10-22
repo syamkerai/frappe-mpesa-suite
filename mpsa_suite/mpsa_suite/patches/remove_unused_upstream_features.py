@@ -12,6 +12,8 @@ Kept on purpose: POS Invoice ``mpesa_receipt_number`` (it holds data on some sit
 
 import frappe
 
+from mpsa_suite.handover import ran_under_old_name
+
 DOCTYPES = (
     "Mpesa Payment Reconciliation",
     "Mpesa Draft Payments",
@@ -29,6 +31,8 @@ MODULE = "Stanbic"
 
 
 def execute():
+    if ran_under_old_name(__name__):
+        return  # R8: already ran as frappe_mpsa_payments.*; see handover.py
     for doctype in DOCTYPES:
         if frappe.db.exists("DocType", doctype):
             frappe.delete_doc("DocType", doctype, force=True, ignore_missing=True)
