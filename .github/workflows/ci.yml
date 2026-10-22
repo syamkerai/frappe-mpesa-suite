@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
-      - run: pip install pytest requests
+      - run: pip install pytest requests openpyxl  # openpyxl: the wallet statement-file tests
       - run: pytest -q tests/unit
 
   server:
