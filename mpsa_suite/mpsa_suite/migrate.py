@@ -9,9 +9,11 @@ def is_app_installed(app_name: str) -> bool:
 
 
 def after_migrate():
+    from mpsa_suite import access
     from mpsa_suite.install import ensure_lookup_indexes, ensure_roles, ensure_suite_settings
 
     ensure_roles()
+    access.after_migrate()  # Role Profiles, credential-field access, site permission overrides
     ensure_suite_settings()
     ensure_lookup_indexes()
 

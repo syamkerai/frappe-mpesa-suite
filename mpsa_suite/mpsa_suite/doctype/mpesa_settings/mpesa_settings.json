@@ -104,7 +104,8 @@
    "in_list_view": 1,
    "label": "Consumer Key",
    "reqd": 1,
-   "description": "Daraja portal (developer.safaricom.co.ke) > My Apps > your app > Consumer Key. Use the sandbox app while testing and the production app after Go Live."
+   "description": "Daraja portal (developer.safaricom.co.ke) > My Apps > your app > Consumer Key. Use the sandbox app while testing and the production app after Go Live.",
+   "permlevel": 1
   },
   {
    "fieldname": "consumer_secret",
@@ -112,13 +113,15 @@
    "in_list_view": 1,
    "label": "Consumer Secret",
    "reqd": 1,
-   "description": "Same app on Daraja > My Apps > Consumer Secret. Stored encrypted."
+   "description": "Same app on Daraja > My Apps > Consumer Secret. Stored encrypted.",
+   "permlevel": 1
   },
   {
    "fieldname": "initiator_name",
    "fieldtype": "Data",
    "label": "Initiator Name",
-   "description": "Username of the API operator. Live: created by the Business Administrator on the M-PESA Org Portal (org.ke.m-pesa.com) with the API roles you need. Sandbox: Initiator Name on Daraja's Test Credentials. Needed for Transaction Status, Account Balance, B2C, Reversal and C2B verification."
+   "description": "Username of the API operator. Live: created by the Business Administrator on the M-PESA Org Portal (org.ke.m-pesa.com) with the API roles you need. Sandbox: Initiator Name on Daraja's Test Credentials. Needed for Transaction Status, Account Balance, B2C, Reversal and C2B verification.",
+   "permlevel": 1
   },
   {
    "default": "150000",
@@ -151,13 +154,15 @@
    "fieldtype": "Password",
    "label": "Online PassKey",
    "reqd": 1,
-   "description": "M-Pesa Express (Lipa Na M-Pesa Online) passkey. Sandbox: Daraja > APIs > M-Pesa Express > Test Credentials. Live: emailed by Safaricom after Go Live. C2B- or B2C-only records: any text."
+   "description": "M-Pesa Express (Lipa Na M-Pesa Online) passkey. Sandbox: Daraja > APIs > M-Pesa Express > Test Credentials. Live: emailed by Safaricom after Go Live. C2B- or B2C-only records: any text.",
+   "permlevel": 1
   },
   {
    "fieldname": "security_credential",
    "fieldtype": "Small Text",
    "label": "Security Credential",
-   "description": "Filled in automatically: the Initiator Password encrypted with Safaricom's sandbox or production certificate. Do not paste anything here. Re-type the Initiator Password or use Security > Regenerate Security Credential."
+   "description": "Filled in automatically: the Initiator Password encrypted with Safaricom's sandbox or production certificate. Do not paste anything here. Re-type the Initiator Password or use Security > Regenerate Security Credential.",
+   "permlevel": 1
   },
   {
    "fieldname": "get_account_balance",
@@ -241,7 +246,8 @@
    "fieldname": "access_token",
    "fieldtype": "Data",
    "label": "Access Token",
-   "read_only": 1
+   "read_only": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "column_break_bcac",
@@ -251,7 +257,8 @@
    "fieldname": "expires_in",
    "fieldtype": "Int",
    "label": "Expires In",
-   "read_only": 1
+   "read_only": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "column_break_ppbt",
@@ -261,7 +268,8 @@
    "fieldname": "token_expiry",
    "fieldtype": "Datetime",
    "label": "Token Expiry",
-   "read_only": 1
+   "read_only": 1,
+   "permlevel": 1
   },
   {
    "fieldname": "paybill_type",
@@ -275,7 +283,8 @@
    "fieldname": "initiator_password",
    "fieldtype": "Password",
    "label": "Initiator Password",
-   "description": "Password of that API operator (set on the Org Portal; sandbox: Daraja Test Credentials). Typing it regenerates the Security Credential. Stored encrypted."
+   "description": "Password of that API operator (set on the Org Portal; sandbox: Daraja Test Credentials). Typing it regenerates the Security Credential. Stored encrypted.",
+   "permlevel": 1
   },
   {
    "collapsible": 1,
@@ -473,7 +482,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-21 14:00:00.000000",
+ "modified": "2026-10-23 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa Settings",
@@ -505,9 +514,6 @@
    "write": 1
   },
   {
-   "email": 1,
-   "export": 1,
-   "print": 1,
    "read": 1,
    "report": 1,
    "role": "Accounts Manager"
@@ -520,6 +526,26 @@
   {
    "read": 1,
    "role": "M-Pesa Viewer"
+  },
+  {
+   "read": 1,
+   "role": "M-Pesa Payer"
+  },
+  {
+   "read": 1,
+   "role": "M-Pesa Collector"
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "M-Pesa Manager",
+   "write": 1
   }
  ],
  "row_format": "Dynamic",

@@ -10,6 +10,7 @@ from frappe.query_builder import DocType
 from frappe.utils import cint, flt, now
 
 from ....daraja.guard import B2C_MIN_AMOUNT
+from ....permissions import PAYOUT_ROLES, is_direct_call, require
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
@@ -285,7 +286,7 @@ class B2CPaymentDisbursement(Document):
     @frappe.whitelist()
     def retry_failed_payments(self) -> None:
         """Retry failed B2C Payment References"""
-
+        require(PAYOUT_ROLES)  # each retry checks again, but its refusal would only be logged
         for ref in self.references:
             if ref.payment_status == "Failed" and ref.b2c_disbursement_request:
                 try:
@@ -311,7 +312,8 @@ class B2CPaymentDisbursement(Document):
         statuses are read from the database and only the status fields are written, with
         db_set, so on_change (Value Change notifications, webhooks) and the Version still run.
         """
-
+        if is_direct_call("update_disbursement_status"):
+            frappe.has_permission(self.doctype, "submit", throw=True)  # whoever may send them
         try:
             statuses = frappe.get_all(
                 "B2C Payment Disbursement Reference",
@@ -388,6 +390,7 @@ class B2CPaymentDisbursement(Document):
         Returns:
             List of outstanding reference documents
         """
+        self._check_can_prepare()
 
         args = args.get("args", args) if isinstance(args, dict) else args
         doctype = args["transaction_to_pay_against"]
@@ -395,6 +398,14 @@ class B2CPaymentDisbursement(Document):
         filters = self._build_filters(args, config)
         entries = self._fetch_entries(doctype, config, args, filters)
         return self._populate_references(entries, args, doctype, config.date_field)
+
+    def _check_can_prepare(self) -> None:
+        """Form helpers that read other documents (bypassing their permissions) run for anyone who
+        can read a disbursement: only someone who may prepare one gets them."""
+        if self.is_new():
+            frappe.has_permission(self.doctype, "create", throw=True)
+        else:
+            self.check_permission("write")
 
     def _get_doctype_config(self, doctype: str) -> DoctypeConfig:
         """
@@ -878,6 +889,7 @@ class B2CPaymentDisbursement(Document):
     def allocate_amount_to_references(
         self, paid_amount, paid_amount_change=0, allocate_payment_amount=None
     ):
+        self._check_can_prepare()
         if not self.references:
             return
 

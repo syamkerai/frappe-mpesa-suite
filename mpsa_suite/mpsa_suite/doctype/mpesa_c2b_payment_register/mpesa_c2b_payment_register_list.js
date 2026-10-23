@@ -63,73 +63,55 @@ frappe.listview_settings["Mpesa C2B Payment Register"] = {
 					},
 				],
 				(values) => {
-					frappe.db.get_value(
-						"Mpesa Settings",
-						values.mpesa_settings,
-						["initiator_name", "security_credential"],
-						(settings) => {
-							if (
-								!settings ||
-								(!settings.initiator_name && !settings.security_credential)
-							) {
-								frappe.throw(
-									__(
-										"Please set the initiator name and security credential in the selected Mpesa Settings"
-									)
-								);
-								return;
-							}
-
-							frappe.call({
-								method: "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.trigger_transaction_status",
-								args: {
-									mpesa_settings: values.mpesa_settings,
-									transaction_id: values.transaction_id,
-									remarks: values.remarks || "OK",
-								},
-								freeze: true,
-								freeze_message: __("Checking transaction status..."),
-								callback: (r) => {
-									if (r.message) {
-										if (r.message.status === "error") {
-											frappe.hide_progress();
-											frappe.msgprint({
-												message: __(r.message.message),
-												title: __("Error"),
-												indicator: "red",
-											});
-										} else {
-											frappe.show_progress(
-												__("Processing"),
-												50,
-												100,
-												__("Waiting for M-Pesa callback...")
-											);
-											window._mpesa_c2b_status_timeout = setTimeout(() => {
-												frappe.hide_progress();
-												frappe.show_alert({
-													message: __(
-														"No callback received from M-Pesa. Check Error Logs."
-													),
-													indicator: "orange",
-												});
-											}, 60000);
-										}
-									}
-								},
-								error: (err) => {
+					// the server checks the initiator: only M-Pesa admins can read those fields
+					frappe.call({
+						method: "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings.trigger_transaction_status",
+						args: {
+							mpesa_settings: values.mpesa_settings,
+							transaction_id: values.transaction_id,
+							remarks: values.remarks || "OK",
+						},
+						freeze: true,
+						freeze_message: __("Checking transaction status..."),
+						callback: (r) => {
+							if (r.message) {
+								if (r.message.status === "error") {
 									frappe.hide_progress();
 									frappe.msgprint({
-										message: __("An error occurred: {0}", [
-											err.message || "Unknown error",
-										]),
-										title: "Error",
+										message: __(r.message.message),
+										title: __("Error"),
 										indicator: "red",
 									});
-								},
+								} else {
+									frappe.show_progress(
+										__("Processing"),
+										50,
+										100,
+										__("Waiting for M-Pesa callback...")
+									);
+									window._mpesa_c2b_status_timeout = setTimeout(() => {
+										frappe.hide_progress();
+										frappe.show_alert({
+											message: __(
+												"No callback received from M-Pesa. Check Error Logs."
+											),
+											indicator: "orange",
+										});
+									}, 60000);
+								}
+							}
+						},
+						error: (err) => {
+							frappe.hide_progress();
+							frappe.msgprint({
+								message: __("An error occurred: {0}", [
+									err.message || "Unknown error",
+								]),
+								title: "Error",
+								indicator: "red",
 							});
-						}
-					);
+						},
+					});
 				},
 				__("Transaction Status Query"),
 				__("Submit")

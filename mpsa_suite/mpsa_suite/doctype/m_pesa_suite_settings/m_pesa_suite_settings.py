@@ -6,6 +6,7 @@ from frappe import _
 from frappe.model.document import Document
 
 from ....daraja.guard import parse_allowlist
+from ....permissions import CONFIG_ROLES, require
 
 
 class MPesaSuiteSettings(Document):
@@ -25,7 +26,7 @@ class MPesaSuiteSettings(Document):
 
     @frappe.whitelist()
     def regenerate_callback_token(self):
-        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        require(CONFIG_ROLES)
         self.callback_token = frappe.generate_hash(length=40)
         self.save()
         return _(
@@ -35,7 +36,7 @@ class MPesaSuiteSettings(Document):
 
     @frappe.whitelist()
     def reset_rejection_counter(self):
-        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        require(CONFIG_ROLES)
         self.rejected_callbacks = 0
         self.last_rejected_callback_on = None
         self.last_rejected_callback_reason = None

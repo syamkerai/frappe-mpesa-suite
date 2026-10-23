@@ -670,6 +670,8 @@ def validate_phone_number(phone_number):
 
 @frappe.whitelist()
 def get_mode_of_payment_account(mode_of_payment: str, company: str) -> str:
+    # the B2C Payment Disbursement form's helper (HR users who prepare payroll there may not read Mode of Payment)
+    frappe.has_permission("B2C Payment Disbursement", "write", throw=True)
     return frappe.db.get_value(
         "Mode of Payment Account",
         {"parent": mode_of_payment, "company": company},
@@ -689,6 +691,12 @@ def convert_amount_to_kes(
     2. If ERPNext is installed, use get_exchange_rate
     3. Otherwise, return None
     """
+    # Stays allow_guest because the old frappe_mpsa_payments path was (R4), but nothing public
+    # calls it: over HTTP it is the Express Request form's helper, for its users only.
+    from ..permissions import is_direct_call
+
+    if is_direct_call("convert_amount_to_kes"):
+        frappe.has_permission("Mpesa Express Request", "read", throw=True)
 
     try:
         if settings:

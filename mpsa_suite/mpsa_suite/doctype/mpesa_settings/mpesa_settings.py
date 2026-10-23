@@ -16,7 +16,7 @@ from frappe.model.document import Document
 from ....compat import in_test
 from ....daraja import apis
 from ....daraja.guard import is_zero_code
-from ....permissions import ADMIN_ROLES, FINANCE_ROLES, require_for_direct_call
+from ....permissions import ADMIN_ROLES, CONFIG_ROLES, FINANCE_ROLES, require, require_for_direct_call
 from ....daraja.callbacks import KIND_PULL, KIND_RESULT, safaricom_callback, with_token
 from frappe.utils import (
     fmt_money,
@@ -219,7 +219,7 @@ class MpesaSettings(Document):
 
     @frappe.whitelist()
     def regenerate_security_credential(self):
-        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        require(CONFIG_ROLES)
         self.refresh_security_credential(force=True)
         self.save()
         return _("Security credential regenerated.")
@@ -335,6 +335,11 @@ class MpesaSettings(Document):
 
     @frappe.whitelist()
     def get_account_balance_info(self) -> None:
+        # A form method runs for anyone who can read the record (M-Pesa Viewer too); asking
+        # Safaricom is a finance action, as get_account_balance is when called directly.
+        require(FINANCE_ROLES)
+        if not (self.initiator_name and self.security_credential):
+            frappe.throw(_("Set the Initiator Name and Initiator Password first."))
         if in_test():
             from .test_mpesa_settings import get_test_account_balance_response
 
@@ -492,6 +497,13 @@ def create_mode_of_payment(
 @frappe.whitelist()
 def trigger_transaction_status(mpesa_settings, transaction_id, remarks="OK"):
     require_for_direct_call("trigger_transaction_status", FINANCE_ROLES)
+    # checked here, not in the browser: only M-Pesa admins can read the credential fields
+    initiator = frappe.db.get_value("Mpesa Settings", mpesa_settings, ["initiator_name", "security_credential"])
+    if not initiator or not all(initiator):
+        return {
+            "status": "error",
+            "message": _("Set the Initiator Name and Initiator Password on {0} first.").format(mpesa_settings),
+        }
     try:
         site_address = get_request_site_address(True)
         parsed_url = urlparse(site_address)
@@ -629,6 +641,8 @@ def process_transaction_status(integration_request_name):
 
 @frappe.whitelist()
 def get_doctype_fields(doctype):
+    # the reconciliation-order picker on the Mpesa Settings form
+    frappe.has_permission("Mpesa Settings", "write", throw=True)
     if not doctype:
         return []
 
@@ -799,7 +813,7 @@ def bulk_register_pull_transactions(
     """
     from mpsa_suite.utils.utils import build_callback_url
 
-    frappe.only_for(["System Manager", "Administrator"])
+    require(("System Manager",))
 
     if isinstance(settings_names, str):
         settings_names = frappe.parse_json(settings_names)

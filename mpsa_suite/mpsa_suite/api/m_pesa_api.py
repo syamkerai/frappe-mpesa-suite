@@ -15,7 +15,7 @@ from frappe.utils import flt
 from ...daraja import apis
 from ...daraja.callbacks import KIND_C2B, KIND_PULL, KIND_RESULT, safaricom_callback
 from ...daraja.guard import daraja_id, daraja_timestamp, names_id, stk_amount, truncate_reference
-from ...permissions import COLLECT_ROLES, FINANCE_ROLES, require_for_direct_call
+from ...permissions import COLLECT_ROLES, FINANCE_ROLES, is_direct_call, require, require_for_direct_call
 
 from ...utils.doctype_names import MPESA_EXPRESS_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
 from ...utils.encoding_initiator_password import (
@@ -254,7 +254,9 @@ def get_account_balance(name: str) -> Any:
 @frappe.whitelist()
 def check_transaction_status(name: str) -> Any:
     """Check the status of a transaction by its name."""
-    require_for_direct_call("check_transaction_status", COLLECT_ROLES)
+    if is_direct_call("check_transaction_status"):
+        require(COLLECT_ROLES)
+        frappe.has_permission(MPESA_EXPRESS_REQUEST_DOCTYPE, "read", doc=name, throw=True)
     try:
         express_request = frappe.get_doc(MPESA_EXPRESS_REQUEST_DOCTYPE, name)
         settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, express_request.settings)
@@ -1235,7 +1237,7 @@ def bulk_pull_transactions(
     offset: int = 0,
 ) -> dict:
     """Queue one pull covering many shortcodes, reporting a single summary."""
-    frappe.only_for(["System Manager", "Administrator"])
+    require(("System Manager",))
 
     if isinstance(settings_names, str):
         settings_names = frappe.parse_json(settings_names)

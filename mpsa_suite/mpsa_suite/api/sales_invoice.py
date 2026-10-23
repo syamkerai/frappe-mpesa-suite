@@ -193,6 +193,7 @@ def _check_payment_row_parent(payment_name: str, ptype: str) -> None:
 
 @frappe.whitelist()
 def get_payment_gateway_from_mop(mode_of_payment: str, company: str) -> str:
+    frappe.has_permission("Payment Request", "read", throw=True)  # the Payment Request form's helper
     payment_gateway = None
     try:
         if not frappe.db.exists("Mode of Payment", mode_of_payment):
@@ -229,6 +230,7 @@ def get_payment_gateway_from_mop(mode_of_payment: str, company: str) -> str:
 @frappe.whitelist()
 def get_mop_from_payment_gateway(payment_gateway: str, company: str) -> str:
     """Get mode of payment associated with the given payment gateway"""
+    frappe.has_permission("Payment Request", "read", throw=True)  # the Payment Request form's helper
     mode_of_payment = None
     try:
         if not payment_gateway or not frappe.db.exists(

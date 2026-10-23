@@ -197,6 +197,7 @@ def build():
 
     frappe.throw = throw
     frappe.only_for = only_for
+    frappe.get_roles = lambda user=None: sorted(frappe.user_roles)
     frappe.get_doc = get_doc
     frappe.get_cached_doc = get_cached_doc
     frappe.whitelist = whitelist

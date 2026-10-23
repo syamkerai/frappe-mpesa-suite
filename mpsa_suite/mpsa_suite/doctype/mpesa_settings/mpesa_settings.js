@@ -88,9 +88,7 @@ frappe.ui.form.on("Mpesa Settings", {
 	},
 
 	get_account_balance: function (frm) {
-		if (!frm.doc.initiator_name && !frm.doc.security_credential) {
-			frappe.throw(__("Please set the initiator name and the security credential"));
-		}
+		// the server checks the initiator: only M-Pesa admins can read those fields
 		frappe.call({
 			method: "get_account_balance_info",
 			doc: frm.doc,
@@ -135,9 +133,6 @@ frappe.ui.form.on("Mpesa Settings", {
 	},
 
 	check_transaction_status: function (frm) {
-		if (!frm.doc.initiator_name && !frm.doc.security_credential) {
-			frappe.throw(__("Please set the initiator name and the security credential"));
-		}
 		frappe.clear_cache;
 		frappe.prompt(
 			[

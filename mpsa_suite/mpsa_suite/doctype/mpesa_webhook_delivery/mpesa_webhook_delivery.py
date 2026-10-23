@@ -4,11 +4,13 @@
 import frappe
 from frappe.model.document import Document
 
+from ....permissions import CONFIG_ROLES, require
+
 
 class MpesaWebhookDelivery(Document):
     @frappe.whitelist()
     def retry_now(self):
-        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        require(CONFIG_ROLES)
         from ....gateway.webhooks import deliver
 
         return deliver(self.name, force=True)

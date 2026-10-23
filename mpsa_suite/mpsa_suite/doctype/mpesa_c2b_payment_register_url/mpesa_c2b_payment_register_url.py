@@ -13,6 +13,7 @@ from frappe.model.document import Document
 from frappe.utils import get_url
 
 from mpsa_suite.mpsa_suite.api.m_pesa_api import get_token
+from mpsa_suite.permissions import CONFIG_ROLES, require
 
 
 # Fields that change what is registered at Safaricom.
@@ -36,7 +37,7 @@ class MpesaC2BPaymentRegisterURL(Document):
     @frappe.whitelist()
     def register_again(self):
         """Send the URLs again, e.g. after host_name or the callback token changed."""
-        frappe.only_for(("System Manager", "M-Pesa Manager"))
+        require(CONFIG_ROLES)
         self.flags.register_again = True
         self.save()
         return self.register_status

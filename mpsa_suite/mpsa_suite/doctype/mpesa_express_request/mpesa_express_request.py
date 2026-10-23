@@ -9,7 +9,7 @@ from mpsa_suite.utils.doctype_names import MPESA_SETTINGS_DOCTYPE
 from frappe.exceptions import DoesNotExistError
 from ....daraja import apis
 from ....daraja.guard import stk_amount
-from ....permissions import ADMIN_ROLES, require
+from ....permissions import ADMIN_ROLES, COLLECT_ROLES, require, require_for_direct_call
 from ....utils.utils import (
     handle_successful_transaction,
     stk_books_part_payments,
@@ -133,6 +133,10 @@ class MpesaExpressRequest(Document):
 
     @frappe.whitelist()
     def initiate_request(self):
+        # Sends a prompt. As a form method it runs for anyone who can read the request; the
+        # document flows (submit, retry, the pay page) have checked write or set ignore_permissions.
+        require_for_direct_call("initiate_request", COLLECT_ROLES)
+        self.check_permission("write")
         args = {
             "payment_gateway": self.payment_gateway,
             "phone_number": self.phone_number,
@@ -347,6 +351,7 @@ def get_request_status(name):
 
 @frappe.whitelist()
 def get_stkpush_defaults():
+    frappe.has_permission("Mpesa Express Request", "create", throw=True)
     gateways = frappe.get_all(
         "Payment Gateway",
         filters={"gateway_settings": "Mpesa Settings"},

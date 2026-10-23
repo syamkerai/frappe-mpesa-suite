@@ -22,6 +22,7 @@ from frappe.utils import add_to_date, cint, cstr, get_url, now_datetime
 from ..daraja import apis, verify
 from ..daraja.guard import daraja_id, is_zero_code
 from ..daraja.money_out import result_values, transaction_status_payload
+from ..permissions import CONFIG_ROLES
 from .common import EXPRESS, REGISTER, named_lock, settings_for_shortcode
 
 SERVICE = "Mpesa C2B Verification"
@@ -31,7 +32,7 @@ MAX_ATTEMPTS = 3
 RETRY_AFTER_MINUTES = 10
 RESULT_METHOD = "mpsa_suite.mpsa_suite.api.m_pesa_api.c2b_verification_result"
 TIMEOUT_METHOD = "mpsa_suite.mpsa_suite.api.m_pesa_api.handle_queue_timeout"
-RELEASE_ROLES = ("System Manager", "M-Pesa Manager")
+RELEASE_ROLES = CONFIG_ROLES
 
 
 def own_shortcodes(settings_name: str | None) -> set:

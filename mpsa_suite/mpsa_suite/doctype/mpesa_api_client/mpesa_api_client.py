@@ -9,8 +9,7 @@ from frappe.model.document import Document
 
 from ....daraja import apis
 from ....daraja.guard import parse_allowlist
-
-ADMIN_ROLES = ("System Manager", "M-Pesa Manager")
+from ....permissions import CONFIG_ROLES, require
 
 
 class MpesaAPIClient(Document):
@@ -37,7 +36,7 @@ class MpesaAPIClient(Document):
 
     @frappe.whitelist()
     def generate_new_secret(self):
-        frappe.only_for(ADMIN_ROLES)
+        require(CONFIG_ROLES)
         secret = "mps_" + frappe.generate_hash(length=40)
         self.api_secret = secret
         self.save()
@@ -45,7 +44,7 @@ class MpesaAPIClient(Document):
 
     @frappe.whitelist()
     def rotate_webhook_secret(self):
-        frappe.only_for(ADMIN_ROLES)
+        require(CONFIG_ROLES)
         secret = "whsec_" + frappe.generate_hash(length=40)
         self.webhook_secret = secret
         self.save()

@@ -8,6 +8,8 @@ from ...permissions import COLLECT_ROLES, require
 @frappe.whitelist()
 def get_mpesa_phone_mops_for_pos_profile(pos_profile, company):
     """Return all Phone-type Modes of Payment from a POS Profile that are successfully registered with Mpesa Urls."""
+    # the first step of picking received C2B payments (get_mpesa_payments) for an invoice
+    frappe.has_permission("Mpesa C2B Payment Register", "read", throw=True)
     if not pos_profile:
         return []
 

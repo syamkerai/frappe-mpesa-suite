@@ -227,7 +227,7 @@
    "table_fieldname": "references"
   }
  ],
- "modified": "2026-10-19 10:00:00.000000",
+ "modified": "2026-10-23 18:00:00.000000",
  "modified_by": "a@d.com",
  "module": "Mpsa Suite",
  "name": "B2C Payment Disbursement",
@@ -278,6 +278,36 @@
    "share": 1,
    "submit": 1,
    "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Payer",
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Viewer"
   }
  ],
  "row_format": "Dynamic",
