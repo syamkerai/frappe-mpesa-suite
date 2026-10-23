@@ -135,9 +135,10 @@ def test_suite_roles_are_the_installed_ones():
 
 
 def test_role_profiles_use_known_roles():
-    known = set(M.ROLES)
+    known = set(M.ROLES) | {M.EM}
     for profile, roles in M.ROLE_PROFILES.items():
         assert set(roles) <= known, profile
+        assert set(roles) & {M.AU, M.SU, M.EM}, f"{profile}: no ERPNext role that reads Company"
 
 
 # ---------------------------------------------------------------- reports

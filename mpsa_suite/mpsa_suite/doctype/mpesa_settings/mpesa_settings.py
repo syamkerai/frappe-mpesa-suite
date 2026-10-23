@@ -338,8 +338,6 @@ class MpesaSettings(Document):
         # A form method runs for anyone who can read the record (M-Pesa Viewer too); asking
         # Safaricom is a finance action, as get_account_balance is when called directly.
         require(FINANCE_ROLES)
-        if not (self.initiator_name and self.security_credential):
-            frappe.throw(_("Set the Initiator Name and Initiator Password first."))
         if in_test():
             from .test_mpesa_settings import get_test_account_balance_response
 
@@ -347,6 +345,8 @@ class MpesaSettings(Document):
             request = {"reference_doctype": self.doctype, "reference_docname": self.name}
             self.handle_api_response("ConversationID", request, frappe._dict(get_test_account_balance_response()))
         else:
+            if not (self.initiator_name and self.security_credential):
+                frappe.throw(_("Set the Initiator Name and Initiator Password first."))
             get_account_balance(self.name)
 
     def handle_api_response(

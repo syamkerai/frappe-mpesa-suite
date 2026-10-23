@@ -11,7 +11,7 @@
  "is_standard": "Yes",
  "letter_head": "Default",
  "letterhead": null,
- "modified": "2026-10-23 18:00:00.000000",
+ "modified": "2026-10-22 20:35:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "C2B Reconciliation Report",
@@ -32,15 +32,6 @@
   },
   {
    "role": "Sales User"
-  },
-  {
-   "role": "M-Pesa Manager"
-  },
-  {
-   "role": "M-Pesa Collector"
-  },
-  {
-   "role": "M-Pesa Viewer"
   }
  ],
  "timeout": 0

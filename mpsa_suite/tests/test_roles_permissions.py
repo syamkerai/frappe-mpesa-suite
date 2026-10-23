@@ -83,15 +83,14 @@ class TestRolesPermissions(IntegrationTestCase):
         import frappe.api
 
         request = Request(EnvironBuilder(path=path, method="POST", data=form).get_environ())
-        saved = getattr(frappe.local, "request", None), frappe.local.form_dict, dict(frappe.local.response)
+        saved = getattr(frappe.local, "request", None), frappe.local.form_dict, frappe.local.response
         frappe.local.request = request
+        frappe.local.response = frappe._dict(docs=[])  # as a fresh request has it
         try:
             make_form_dict(request)
             return frappe.api.handle(request)
         finally:
-            frappe.local.request, frappe.local.form_dict = saved[0], saved[1]
-            frappe.local.response.clear()
-            frappe.local.response.update(saved[2])
+            frappe.local.request, frappe.local.form_dict, frappe.local.response = saved
 
     def refused(self, path: str, **form):
         with self.assertRaises(frappe.PermissionError, msg=f"{frappe.session.user} was let through {path}"):
@@ -257,11 +256,38 @@ class TestRolesPermissions(IntegrationTestCase):
     def test_report_roles(self):
         from frappe.desk.query_report import run
 
-        for role in (M.MV, M.MC, M.MM):
+        with self.as_user(user_for(M.AU)):
+            run("STK Push Request Status", filters={})
+        for role in (M.MV, M.MC, M.MP):  # the upstream reports show ERPNext documents
+            with self.as_user(user_for(role)), self.assertRaises(frappe.PermissionError, msg=role):
+                run("C2B Reconciliation Report", filters={})
+        for role in (M.MP, M.MV, M.AU):
             with self.as_user(user_for(role)):
-                run("STK Push Request Status", filters={})
-        with self.as_user(user_for(M.MP)), self.assertRaises(frappe.PermissionError):
-            run("C2B Reconciliation Report", filters={})
+                run("M-Pesa Payments Due", filters={"show": "All"})
+
+    def test_suite_roles_read_every_link_of_their_reports(self):
+        """Frappe refuses a report row whose Link column points at a document the reader cannot
+        read (query_report.get_filtered_data): a suite role listed on a report reads every target."""
+        from frappe.desk.query_report import get_filtered_data
+
+        for report, roles in M.REPORTS.items():
+            doc = frappe.get_doc("Report", report)
+            module = frappe.get_module(
+                f"mpsa_suite.mpsa_suite.report.{frappe.scrub(report)}.{frappe.scrub(report)}")
+            columns = (getattr(module, "get_columns", None) or getattr(module, "columns"))()
+            row = {c["fieldname"]: "X" for c in columns if c.get("fieldtype") == "Link"}
+            for role in set(roles) & set(M.SUITE_ROLES):
+                with self.as_user(user_for(role)):
+                    try:
+                        get_filtered_data(doc.ref_doctype, columns, [frappe._dict(row)], user_for(role))
+                    except frappe.PermissionError as e:
+                        self.fail(f"{role} on {report}: {e}")
+
+    def test_role_profiles_read_company(self):
+        """Every page with a Company filter needs read on Company; each profile carries a role that has it."""
+        for profile, roles in M.ROLE_PROFILES.items():
+            user = _user(f"{frappe.scrub(profile)}@{DOMAIN}", roles)
+            self.assertTrue(frappe.has_permission("Company", "read", user=user), profile)
 
     # ------------------------------------------------------------ site side
     def test_role_profiles_exist(self):

@@ -40,8 +40,9 @@ def columns() -> list:
         {"fieldname": "left_to_pay", "label": "Document Left to Pay", "fieldtype": "Currency", "options": "currency",
          "width": 120},
         {"fieldname": "amount", "label": "Amount", "fieldtype": "Currency", "options": "currency", "width": 110},
-        # M-Pesa pays KES only; without this the amounts show in the site's default currency
-        {"fieldname": "currency", "label": "Currency", "fieldtype": "Link", "options": "Currency", "hidden": 1},
+        # M-Pesa pays KES only; without this the amounts show in the site's default currency. Data, not a
+        # Link: Frappe refuses a report row whose Link the reader cannot read, and Payers do not read Currency.
+        {"fieldname": "currency", "label": "Currency", "fieldtype": "Data", "hidden": 1},
         {"fieldname": "status", "label": "Status", "fieldtype": "Data", "width": 90},
         {"fieldname": "problem", "label": "Problem", "fieldtype": "Data", "width": 320},
         {"fieldname": "prepared_by", "label": "Prepared By", "fieldtype": "Link", "options": "User", "width": 150},

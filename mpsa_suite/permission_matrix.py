@@ -38,6 +38,7 @@ HU = "HR User"
 SU = "Sales User"
 PM = "Purchase Manager"
 PU = "Purchase User"
+EM = "Employee"  # ERPNext's smallest role that reads Company (every page with a Company filter needs it)
 
 # Column order of the matrix in the doc.
 ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
@@ -139,23 +140,27 @@ SECRET_FIELDS = {
 # DocTypes holding Password fields that only CONFIG roles may read at all.
 CONFIG_ONLY = ("M-Pesa Suite Settings", "Mpesa API Client", "Mpesa Webhook Delivery")
 
-# Script Report -> roles (Frappe also needs "report" on its ref_doctype).
+# Script Report -> roles (Frappe also needs "report" on its ref_doctype). Frappe refuses a report
+# row whose Link column points at a document the reader cannot read, so a suite role is listed only
+# where it reads every Link target itself. The four upstream reports show ERPNext documents (Payment
+# Request and Entry, invoices, Customer, Mode of Payment): their users reach them through ERPNext roles.
 REPORTS = {
-    "B2C Disbursement Summary": (SM, AM, HM, MM, MP, MV),
-    "C2B Payment Summary Group by Customer": (SM, AU, AM, SU, MM, MC, MV),
+    "B2C Disbursement Summary": (SM, AM, HM),
+    "C2B Payment Summary Group by Customer": (SM, AU, AM, SU),
     "M-Pesa Payments Due": (SM, AM, AU, MM, MP, MV),
-    "C2B Reconciliation Report": (SM, AU, AM, SU, MM, MC, MV),
-    "STK Push Request Status": (SM, AU, AM, SU, MM, MC, MV),
+    "C2B Reconciliation Report": (SM, AU, AM, SU),
+    "STK Push Request Status": (SM, AU, AM, SU),
 }
 
 # Role Profiles the suite creates once (never changed after; see access.ensure_role_profiles).
-# On Frappe 15 a user's Role Profile REPLACES all their roles, so each is a complete job.
+# On Frappe 15 a user's Role Profile REPLACES all their roles, so each is a complete job, with an
+# ERPNext role that reads Company (Accounts User, Sales User or Employee).
 ROLE_PROFILES = {
     "M-Pesa Finance Clerk": (AU, MC, MV),
     "M-Pesa Paying Officer": (AU, MP, MV),
     "M-Pesa Approver": (AU, MM, MV),
     "M-Pesa Cashier": (SU, MC),
-    "M-Pesa Auditor": (MV,),
+    "M-Pesa Auditor": (MV, EM),
 }
 
 # ---------------------------------------------------------------- endpoints

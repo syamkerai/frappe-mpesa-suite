@@ -51,12 +51,13 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | G4 | **High** | **Many people can send money.** Submitting a B2C document sends money. Its submit permission is held by Accounts Manager, HR Manager and System Manager, and nothing on the server checks a role at B2C submit (B2B and reversals do). On the live sites about 15 people per site hold one of those roles. | `b2c_payment_disbursement.py:47`, `b2c_disbursement_request.py:28`, their JSON | Fixed after decisions D1 to D3 (section 9): only the pay roles send, checked at submit, by someone other than who prepared it |
 | G5 | Medium | **Form buttons ran for anyone who can read.** `run_doc_method` asks only for read. So M-Pesa Viewer could start a Safaricom balance query (`get_account_balance_info`), a reader could re-send an STK prompt (`initiate_request`), any reader of a B2C disbursement could pull other documents' outstanding amounts past their permissions (`get_outstanding_reference_documents`, `allocate_amount_to_references`) or rewrite its status (`update_disbursement_status`), and a refused retry (`retry_failed_payments`) was only logged. | `mpesa_settings.py:337`, `mpesa_express_request.py:135`, `b2c_payment_disbursement.py:287`, `:305`, `:383`, `:889` | Fixed |
 | G6 | Medium | **Role gates were never tested on Frappe 15.** `frappe.only_for` returns early whenever `flags.in_test` is set on v15, so the suite's `require()` and nine direct `only_for` calls let everyone through in v15 bench tests. | `permissions.py` `require` | Fixed: `require()` checks roles itself; every `only_for` replaced (a unit test keeps it out) |
-| G7 | Medium | **Roles that cannot do their job.** M-Pesa Payer is in `PAYOUT_ROLES` but had no permission on the B2C DocTypes, nor read on C2B registers (`make_reversal` needs it); M-Pesa Collector had no permission on Mpesa Express Request; M-Pesa Manager none on B2C, C2B registers, C2B URL registration or the certificates; M-Pesa Viewer could not read B2C, STK or C2B records; the reports left out the suite roles. | DocType and Report JSON | Fixed (matrix below) |
+| G7 | Medium | **Roles that cannot do their job.** M-Pesa Payer is in `PAYOUT_ROLES` but had no permission on the B2C DocTypes, nor read on C2B registers (`make_reversal` needs it); M-Pesa Collector had no permission on Mpesa Express Request; M-Pesa Manager none on B2C, C2B registers, C2B URL registration or the certificates; M-Pesa Viewer could not read B2C, STK or C2B records. | DocType JSON | Fixed (matrix below) |
 | G8 | Low | **Helpers open to every logged-in user** (portal users too), leaking set-up data or request status: Mode of Payment accounts, payment gateways, POS M-Pesa shortcodes, STK defaults (read with ignore_permissions), any DocType's field list, an STK request's status and redirect. | `utils.py:672`, `sales_invoice.py:195`, `:231`, `mpesa_quick_pay.py:9`, `mpesa_express_request.py:353`, `mpesa_settings.py:643`, `www/mpesa/stkpush.py:103` | Fixed: each checks the permission of the form that uses it |
 | G9 | Low | **A guest endpoint that is not a callback.** `convert_amount_to_kes` loads any Mpesa Settings record for a guest (exchange rates). Its old path was guest at release C, and R4 keeps the flag. | `utils.py:683` | Fixed: the flag stays, but an HTTP call needs read on Mpesa Express Request (guests have none) |
 | G10 | Low | `check_transaction_status` did not check that the user may read the request, and its errors were swallowed. | `m_pesa_api.py:255` | Fixed (checked before the try) |
 | G11 | Info (live) | Trident has no Integration User, so Safaricom callbacks run as Administrator (policy Warn). | M-Pesa Suite Settings | Rollout step 2 |
 | G12 | Info | Workspace, charts and number cards are public. Their data goes through `frappe.get_list`, so each user sees only what their permissions allow; links hide DocTypes the user cannot read. The `Payment Gateway` DocType in this app's folder comes from upstream and belongs to the payments app: left as it is, never reset by the suite. | `workspace/m_pesa`, `dashboard_chart/*`, `number_card/*` | No change |
+| G14 | Medium | **Reports refuse readers of their Link columns.** Frappe drops or refuses every report row whose Link column points at a document the reader cannot read (`frappe.desk.query_report.get_filtered_data`), but only once the report has rows. M-Pesa Payments Due had a hidden Currency Link, which a Payer or Viewer cannot read on Frappe 15, so their main screen failed as soon as a line existed. The four upstream reports link to Payment Request and Entry, invoices, Customer and Mode of Payment, which only Accounts (and for some, Sales) roles read; upstream lists Sales User on two of them and HR Manager on B2C Disbursement Summary, roles that cannot read all those links. | `m_pesa_payments_due.py` columns; the upstream report JSON | Fixed for Payments Due (the column is Data). The suite roles stay off the upstream reports (their users reach them through Accounts User / Sales User). The upstream Sales User / HR Manager listing is left as it was: a follow-up decides between dropping those roles and changing the columns |
 | G13 | Info | Supplier M-Pesa Account grants share to Accounts User, M-Pesa Payer and Purchase Manager. Frappe 15 and 16 let a user share only rights they hold, and approving needs `ADMIN_ROLES` on the server, so sharing cannot approve an account. | `supplier_m_pesa_account.json` | No change (payouts Phase 3 mirrors this DocType) |
 
 Checked and found sound (no change):
@@ -93,6 +94,15 @@ Checked and found sound (no change):
 (an admin may edit them). **On Frappe 15 (Trident today) a Role Profile replaces all of a user's
 roles**, so give a profile only to people whose whole job it describes; for everyone else tick
 the M-Pesa role in the user's Roles list. Frappe 16 allows several profiles per user.
+
+**Every M-Pesa user also holds an ERPNext role.** The suite's roles grant M-Pesa records only.
+ERPNext's own records stay under ERPNext's roles: Company, customers, suppliers, invoices,
+Payment Requests and Entries, Mode of Payment. Frappe refuses pages and report rows that show
+a record the user cannot read. ERPNext lets Employee, Accounts User, Sales User, Purchase User,
+Stock User and Projects User read Company. Finance staff hold Accounts User, cashiers Sales User,
+and a read-only M-Pesa Viewer at least Employee. Each Role Profile below includes one. The payouts
+browser check met this: a user with only M-Pesa Payer was refused on Company on the M-Pesa
+Payments Due page.
 
 ## 4. Who may do what
 
@@ -142,11 +152,11 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 | Report | Roles |
 |---|---|
-| B2C Disbursement Summary | System Manager, Accounts Manager, HR Manager, M-Pesa Manager, M-Pesa Payer, M-Pesa Viewer |
-| C2B Payment Summary Group by Customer | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
-| C2B Reconciliation Report | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
+| B2C Disbursement Summary | System Manager, Accounts Manager, HR Manager |
+| C2B Payment Summary Group by Customer | System Manager, Accounts User, Accounts Manager, Sales User |
+| C2B Reconciliation Report | System Manager, Accounts User, Accounts Manager, Sales User |
 | M-Pesa Payments Due | System Manager, Accounts Manager, Accounts User, M-Pesa Manager, M-Pesa Payer, M-Pesa Viewer |
-| STK Push Request Status | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
+| STK Push Request Status | System Manager, Accounts User, Accounts Manager, Sales User |
 
 ### Role Profiles the suite creates
 
@@ -156,7 +166,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | M-Pesa Paying Officer | Accounts User, M-Pesa Payer, M-Pesa Viewer |
 | M-Pesa Approver | Accounts User, M-Pesa Manager, M-Pesa Viewer |
 | M-Pesa Cashier | Sales User, M-Pesa Collector |
-| M-Pesa Auditor | M-Pesa Viewer |
+| M-Pesa Auditor | M-Pesa Viewer, Employee |
 
 ### Whitelisted endpoints
 
@@ -333,7 +343,8 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 4. Assign roles: User > (the person) > Roles: tick the M-Pesa roles from step 1. Use a Role
    Profile (M-Pesa Finance Clerk, Paying Officer, Approver, Cashier, Auditor) only for people who
-   have no other roles on Frappe 15. Each user must log out and in again.
+   have no other roles on Frappe 15. Everyone also keeps (or gets) an ERPNext role that reads Company
+   (section 3: Accounts User, Sales User or at least Employee). Each user must log out and in again.
 5. M-Pesa Suite Settings > Permissions > **Check Permissions**: read the differences. Anyone
    listed under "the site grants, beyond the suite" (with the number of users) loses that right on
    reset unless step 3/4 gave them the matching M-Pesa role.
@@ -346,7 +357,7 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 | Role | Must work | Must be refused |
 |---|---|---|
-| M-Pesa Viewer | M-Pesa workspace; lists and reports of STK, C2B, B2C, B2B, reversals; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
+| M-Pesa Viewer (with Employee) | M-Pesa workspace; lists of STK, C2B, B2C, B2B, reversals; M-Pesa Payments Due; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
 | Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Refresh Balances on M-Pesa Payments Due; Transaction Status Query from the C2B register list | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; opening Mpesa Settings |
 | M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); Pay Selected on M-Pesa Payments Due for a line someone else prepared; submit a B2C disbursement; retry a failed B2C | Pay Selected on a line they prepared or last changed (maker-checker on); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
@@ -379,7 +390,8 @@ On a site using the suite's own rules (new installs, and DocTypes after a reset)
 - M-Pesa Manager: full access to B2C documents, C2B registers, C2B URL registration, certificates.
 - Accounts Manager and HR Manager: no submit or cancel on B2C, B2B, reversal or Supplier M-Pesa
   Account documents; Accounts Manager: C2B URL registrations read-only, no Sandbox Lab.
-- Reports: M-Pesa Manager, the matching suite roles and M-Pesa Viewer can open them.
+- M-Pesa Payments Due opens for M-Pesa Payer and M-Pesa Viewer with rows too (its Currency column
+  no longer needs read on Currency).
 
 On every site, at once, whatever its own rules:
 
