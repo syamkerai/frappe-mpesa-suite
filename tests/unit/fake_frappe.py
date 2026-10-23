@@ -77,6 +77,9 @@ class FakeDB:
     def has_column(self, doctype, column):
         return (doctype, column) in self.columns
 
+    def table_exists(self, doctype, cached=True):
+        return True  # every table exists here (they are made on first use)
+
     def _rows(self, doctype, filters):
         rows = self.table(doctype)
         if isinstance(filters, str):

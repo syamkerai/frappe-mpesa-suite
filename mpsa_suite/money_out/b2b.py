@@ -9,7 +9,13 @@ Get Advances) or neither. Every check runs on save, again at submit under the do
 and again right before sending: the approved destination, the shortcode, the supplier's hold,
 the document, and what is left to pay with B2B, B2C, draft entries and order advances counted
 (money_out.owed). The entry is booked when M-Pesa confirms, or later (money_out.b2b_entries).
+
+A request made by the payment schedule (money_out.schedule) is submitted by Pay Selected but not
+sent then: send_deferred sends it from a job, after committing its send_started_on marker, and
+never before its line's planned day.
 """
+
+import re
 
 import frappe
 from frappe.utils import cint, cstr, flt, now_datetime
@@ -19,7 +25,7 @@ from ..daraja import money_out as daraja
 from ..permissions import PAYOUT_ROLES, require
 from ..utils.phone import normalize_msisdn
 from . import owed, supplier_accounts
-from .common import apply_ack, callback_url, initiator_settings, lock_for_send, log_callback, post
+from .common import NOT_INITIATED, apply_ack, callback_url, initiator_settings, lock_for_send, log_callback, post
 from .results import find_request
 
 B2B_DOCTYPE = "Mpesa B2B Payment Request"
@@ -32,8 +38,62 @@ RESULT_TRIES = 5
 
 
 def send_b2b(name: str) -> None:
+    from . import schedule
+
     doc = lock_for_send(B2B_DOCTYPE, name)
+    schedule.assert_line_due(doc)
+    if doc.get("schedule_line"):
+        # sent only by send_deferred, which commits its marker before the call (R1)
+        frappe.throw(f"{doc.name} is paid from payment schedule {doc.payment_schedule}: it is sent by the schedule.")
     check_ready_to_send(doc)
+    settings, payload = _payload(doc)
+    # Nothing below may raise: the request has (maybe) left the building.
+    data, error = post(
+        settings, daraja.B2B_ENDPOINT, payload, doctype=B2B_DOCTYPE, name=doc.name, description="Mpesa B2B"
+    )
+    apply_ack(doc, data, error)
+
+
+def send_deferred(name: str) -> None:
+    """Send a request the payment schedule submitted (send_batch's job). The send_started_on marker
+    is committed first: a worker that dies after it leaves a request the 5-minute sweep makes
+    Unknown, never one that is sent again (R1). A check that fails now marks the request Failed,
+    "Not sent: <reason>", and its line may be planned again. Nothing after the call raises."""
+    from . import schedule
+
+    frappe.db.get_value(B2B_DOCTYPE, name, "name", for_update=True)
+    doc = frappe.get_doc(B2B_DOCTYPE, name)
+    if cint(doc.docstatus) != 1 or (doc.status or NOT_INITIATED) != NOT_INITIATED or doc.get("send_started_on"):
+        return  # cancelled, sent, or being sent by another worker
+    doc.db_set("send_started_on", now_datetime(), update_modified=False)
+    frappe.db.commit()  # the marker stays whatever happens next
+    frappe.db.savepoint("mpsa_b2b_send_checks")
+    try:
+        doc = lock_for_send(B2B_DOCTYPE, name)
+        schedule.assert_line_due(doc)
+        check_ready_to_send(doc)
+        settings, payload = _payload(doc)
+    except Exception as e:
+        try:
+            frappe.db.rollback(save_point="mpsa_b2b_send_checks")  # the checks write nothing
+        except Exception:
+            frappe.db.rollback()  # a deadlock ended the transaction, savepoint and all
+        reason = re.sub(r"<[^>]+>", "", cstr(e)).strip() or type(e).__name__
+        frappe.db.set_value(B2B_DOCTYPE, name, {"status": "Failed", "error_message": f"Not sent: {reason}"[:1000]},
+                            update_modified=False)
+        frappe.db.commit()
+        schedule.sync_line(name)  # nothing else is pending: the sweep repeats it if this fails
+        frappe.db.commit()
+        return
+    data, error = post(
+        settings, daraja.B2B_ENDPOINT, payload, doctype=B2B_DOCTYPE, name=doc.name, description="Mpesa B2B"
+    )
+    apply_ack(doc, data, error)  # never raises; queues the line's update
+    frappe.db.commit()
+
+
+def _payload(doc) -> tuple:
+    """(settings, Daraja body) of the request."""
     settings = initiator_settings(doc.mpesa_settings)
     apis.require(settings, apis.B2B)
     payload = daraja.b2b_payload(
@@ -51,11 +111,7 @@ def send_b2b(name: str) -> None:
         result_url=callback_url("b2b_result", ref=doc.name),
         queue_timeout_url=callback_url("b2b_queue_timeout", ref=doc.name),
     )
-    # Nothing below may raise: the request has (maybe) left the building.
-    data, error = post(
-        settings, daraja.B2B_ENDPOINT, payload, doctype=B2B_DOCTYPE, name=doc.name, description="Mpesa B2B"
-    )
-    apply_ack(doc, data, error)
+    return settings, payload
 
 
 def handle_result(result: dict, ref: str | None, attempt: int = 1) -> None:
@@ -111,6 +167,9 @@ def _record_result(result: dict, ref: str | None) -> None:
         notify=True,
     )
     log_callback({"Result": result}, "Mpesa B2B Result", B2B_DOCTYPE, doc.name, "Completed")
+    from . import schedule
+
+    schedule.sync_line_later(doc)  # a payment schedule's line, from a job after this commits
 
     if outcome == "Paid":
         try:
@@ -223,7 +282,9 @@ def _check_settings(doc, fill: bool = True) -> None:
 def _check_document(doc, dt: str, dn: str, for_update: bool = False) -> None:
     """The document can be paid and still needs at least this amount. ``for_update``: under the
     document's lock, payouts first and the document row last (R3, R4)."""
-    result = owed.left_to_pay(dt, dn, exclude_request=doc.name, for_update=for_update)
+    # a schedule's request does not count its own line as planned
+    result = owed.left_to_pay(dt, dn, exclude_request=doc.name, exclude_line=doc.get("schedule_line") or None,
+                              for_update=for_update)
     values = owed.read_document(dt, dn, for_update=for_update)
     problems = owed.document_problems(dt, values)
     if problems:
@@ -254,7 +315,7 @@ def _check_earlier_payouts(doc, at_submit: bool) -> None:
             f"{doc.supplier} already got M-Pesa payments that are not on any invoice: {listed}. Check that none "
             "of them paid this invoice, then tick the box under Purchase Invoice."
         )
-    if not at_submit:
+    if not at_submit and not (getattr(doc, "flags", None) or {}).get("mpesa_from_schedule"):
         frappe.msgprint(
             f"{doc.supplier} already got M-Pesa payments that are not on any invoice: {listed}. Check that none "
             "of them paid this invoice before you send this one.",

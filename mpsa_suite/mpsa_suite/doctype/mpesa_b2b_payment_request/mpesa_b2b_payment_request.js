@@ -46,6 +46,14 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 				"red"
 			);
 		}
+		if (frm.doc.docstatus === 1 && frm.doc.status === "Not Initiated" && frm.doc.payment_schedule) {
+			frm.dashboard.set_headline(
+				__("Approved on payment schedule {0}: it is being sent to M-Pesa with the other payments of its batch.", [
+					frappe.utils.escape_html(frm.doc.payment_schedule),
+				]),
+				"blue"
+			);
+		}
 		if (frm.doc.docstatus === 0 && !frm.is_new()) mpsa_b2b.load_left(frm, false);
 		mpsa_b2b.entry_actions(frm);
 	},
@@ -140,6 +148,7 @@ const mpsa_b2b = {
 			let text = __("Left to pay on {0}: KES {1}. Outstanding {2}", [e(name), kes(s.left), kes(s.outstanding)]);
 			if (s.in_progress) text += " − " + __("in progress {0}", [kes(s.in_progress)]);
 			if (s.drafts) text += " − " + __("draft entries {0}", [kes(s.drafts)]);
+			if (s.planned) text += " − " + __("planned on a payment schedule {0}", [kes(s.planned)]);
 			if (s.order_advance) text += " − " + __("order advance {0}", [kes(s.order_advance)]);
 			if ((r.parts || []).length) text += "<br><span class='small'>" + r.parts.map(e).join("; ") + "</span>";
 			frm.dashboard.set_headline(text, "blue");

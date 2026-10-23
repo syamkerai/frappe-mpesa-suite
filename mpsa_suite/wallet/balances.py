@@ -7,6 +7,9 @@ the next Account Balance should be. When it differs, money moved that the ERP ha
 (a funding, a sweep to the bank, a transfer made on the portal, a payout whose result never
 came): the balance is marked "Gap" with the amount, within minutes when balances are asked
 for on a schedule. Importing the statement that holds the missing rows explains it.
+
+available() says, approximately, how much a sub-account can pay right now, for the payment
+schedule's Pay Selected summary and the M-Pesa Payments Due report.
 """
 
 import datetime
@@ -24,6 +27,9 @@ QUIET_MINUTES = 10
 # A balance still unchecked after this long (a payout stuck in flight) is checked anyway.
 GIVE_UP_HOURS = 24
 IN_FLIGHT = {"B2C Disbursement Request": ("Initiated", "Status Unknown"), "Mpesa B2B Payment Request": ("Initiated", "Unknown")}
+# Which payouts a sub-account pays, and the field of a B2C Result that gives its available funds.
+PAID_FROM = {accounts.WORKING: "Mpesa B2B Payment Request", accounts.UTILITY: "B2C Disbursement Request"}
+B2C_FUNDS = {accounts.WORKING: "working_acct_avlbl_funds", accounts.UTILITY: "utility_acct_avlbl_funds"}
 
 
 # ---------------------------------------------------------------- recording
@@ -56,6 +62,22 @@ def parse_balances(text) -> dict:
             continue
         try:
             out[sub] = float(fields[2].replace(",", ""))
+        except ValueError:
+            continue
+    return out
+
+
+def parse_available(text) -> dict:
+    """{sub-account: available balance}: the fourth field of "Working Account|KES|current|available|reserved|...",
+    the current balance when a result gives no more."""
+    out = {}
+    for part in cstr(text).split("&"):
+        fields = part.split("|")
+        sub = accounts.from_balance_text(part)
+        if not sub or len(fields) < 3:
+            continue
+        try:
+            out[sub] = float((fields[3] if len(fields) > 3 and fields[3].strip() else fields[2]).replace(",", ""))
         except ValueError:
             continue
     return out
@@ -213,3 +235,99 @@ def ask_for_balances() -> None:
         except Exception:
             frappe.db.rollback()
             frappe.log_error(title=f"M-Pesa balance query for {s.name} failed", message=frappe.get_traceback())
+
+
+# ---------------------------------------------------------------- what can be paid now (approximate)
+def available(settings, sub_account=accounts.WORKING):
+    """_dict(amount, as_of, source, pending, after, approximate): about how much the sub-account
+    can pay now. The newest balance Safaricom reported (an Account Balance result, a B2B Result or
+    a B2C Result), less payouts of this shortcode sent after it. Only approximate: balances arrive
+    late, Utility is funded by hand on the portal and charges come off too, so a payment above the
+    real balance is failed by Safaricom (no money is lost)."""
+    wallet = _wallet(settings)
+    found = [b for b in (_from_balance_query(settings, sub_account), _from_b2b(wallet, sub_account),
+                         _from_b2c(wallet, sub_account)) if b]
+    if not found:
+        return frappe._dict(amount=None, as_of=None, source=None, pending=0.0, after=None, approximate=True)
+    newest = max(found, key=lambda b: get_datetime(b.as_of) if b.as_of else datetime.datetime.min)
+    as_of = get_datetime(newest.as_of) if newest.as_of else None
+    pending = _sent_since(wallet, sub_account, as_of)
+    return frappe._dict(amount=flt(newest.amount, 2), as_of=as_of, source=newest.source, pending=pending,
+                        after=flt(flt(newest.amount) - pending, 2), approximate=True)
+
+
+def _wallet(settings) -> list:
+    """Mpesa Settings records of the same shortcode (a sandbox copy, a till on the same account)."""
+    shortcode = cstr(frappe.db.get_value("Mpesa Settings", settings, "business_shortcode")).strip()
+    rows = frappe.get_all("Mpesa Settings", fields=["name", "business_shortcode"], order_by="creation asc")
+    names = [r.name for r in rows if shortcode and cstr(r.business_shortcode).strip() == shortcode]
+    return names or [settings]
+
+
+def _from_balance_query(settings, sub_account):
+    """The last Account Balance result stored on Mpesa Settings; its time is that of the balance
+    snapshot recorded from the same result."""
+    amount = parse_available(frappe.db.get_value("Mpesa Settings", settings, "account_balance")).get(sub_account)
+    if amount is None:
+        return None
+    as_of = None
+    if frappe.db.table_exists(SNAPSHOT):
+        shortcode = cstr(frappe.db.get_value("Mpesa Settings", settings, "business_shortcode")).strip()
+        as_of = frappe.db.get_value(SNAPSHOT, {"shortcode": shortcode, "sub_account": sub_account,
+                                               "source": "Account Balance"}, "taken_at", order_by="taken_at desc")
+    return frappe._dict(amount=amount, as_of=as_of, source="Account Balance")
+
+
+def _from_b2b(wallet, sub_account):
+    """The balance the newest B2B Result reported (it names the account it paid from)."""
+    if sub_account != accounts.WORKING:
+        return None
+    for row in frappe.db.sql(
+        """
+        SELECT debit_account_balance, trans_completed_time FROM `tabMpesa B2B Payment Request`
+        WHERE mpesa_settings IN %(wallet)s AND status = 'Paid' AND trans_completed_time IS NOT NULL
+          AND COALESCE(debit_account_balance, '') != ''
+        ORDER BY trans_completed_time DESC LIMIT 5
+        """,
+        {"wallet": tuple(wallet)},
+        as_dict=True,
+    ):
+        amount = parse_available(row.debit_account_balance).get(sub_account)
+        if amount is not None:
+            return frappe._dict(amount=amount, as_of=row.trans_completed_time, source="B2B Result")
+    return None
+
+
+def _from_b2c(wallet, sub_account):
+    """The available funds the newest B2C Result reported for the sub-account."""
+    field = B2C_FUNDS.get(sub_account)
+    if not field:
+        return None
+    rows = frappe.db.sql(
+        f"""
+        SELECT `{field}` AS funds, transaction_completed_datetime AS completed FROM `tabB2C Disbursement Request`
+        WHERE mpesa_settings IN %(wallet)s AND transaction_completed_datetime IS NOT NULL AND `{field}` IS NOT NULL
+        ORDER BY transaction_completed_datetime DESC LIMIT 1
+        """,
+        {"wallet": tuple(wallet)},
+        as_dict=True,
+    )
+    if not rows:
+        return None
+    return frappe._dict(amount=flt(rows[0].funds), as_of=rows[0].completed, source="B2C Result")
+
+
+def _sent_since(wallet, sub_account, as_of) -> float:
+    """Payouts from the sub-account still on their way that were made after the balance."""
+    doctype = PAID_FROM.get(sub_account)
+    if not doctype:
+        return 0.0
+    since = "AND creation > %(as_of)s" if as_of else ""
+    total = frappe.db.sql(
+        f"""
+        SELECT SUM(amount) FROM `tab{doctype}`
+        WHERE mpesa_settings IN %(wallet)s AND docstatus = 1 AND status IN %(statuses)s {since}
+        """,
+        {"wallet": tuple(wallet), "statuses": ("Not Initiated", *IN_FLIGHT[doctype]), "as_of": as_of},
+    )
+    return flt(total[0][0] if total else 0, 2)

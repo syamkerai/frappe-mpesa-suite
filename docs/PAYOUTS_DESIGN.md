@@ -2,7 +2,7 @@
 
 Draft, 2026-10-23. Merged by a judge from three independent designs, each checked against the code and the ERPNext/HRMS source.
 
-Status: Phase 1 is built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1"). Phases 2 to 4 are not.
+Status: Phases 1 and 2 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1" and "Payouts Phase 2"). Phase 2 is unit-tested; its bench tests are written but not yet run on the v15 and v16 benches. Phases 3 and 4 are not built.
 
 ## Decisions taken (2026-10-23)
 
@@ -434,6 +434,17 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
   - minus payouts in flight created after that time;
   - labelled approximate.
 - Planned lines count in owed.left_to_pay, so a document on a schedule cannot also be paid directly beyond what is left.
+- Built (2026-10-23), where it differs from the above:
+  - Maker-checker reads two fields: prepared_by (who added the line) and changed_by (who last changed it, moved its date or planned it again). The payer must be neither. Administrator is exempt, as in Supplier M-Pesa Account approval.
+  - Over-planning on save counts this schedule's lines from the form and every other schedule's planned lines (left_to_pay(exclude_schedule)), so two new rows for one invoice are caught together. The check at pay time uses exclude_line.
+  - confirm_payment takes the document's lock first, then the schedule row, then the line (R4), lines in schedule and row order. The line is marked Sending with its request before the request is submitted, so assert_line_due also checks that the request is the line's own.
+  - send_b2b refuses a schedule request after the date check: only send_deferred sends one, because only it commits the marker first. on_submit never sends a schedule request inline.
+  - sync_line runs from a queued job when apply_ack, handle_result or refresh_entry calls it (sync_line_later), so a Result never waits on or deadlocks with schedule rows. The sweep and send_deferred's failure path call it inline. It re-raises a deadlock or lock wait instead of swallowing it.
+  - send_deferred undoes a failed check with a savepoint (a full rollback only after a deadlock). The sweep re-sends an unstarted request only once it is 5 minutes old, so it does not race the queue.
+  - A schedule whose lines were only planned or cancelled may be deleted. Any line sent, or any request naming the schedule, refuses the delete.
+  - Pay Selected also refuses a line when the supplier got M-Pesa payments with no invoice after the summary. The summary lists the earlier ones, and confirming ticks checked_earlier_payouts.
+  - The report also filters by schedule (Pay Due Lines) and has Plan Again for failed lines.
+  - Not built: the write-off of balances under KES 1 (decision 5, optional). B2C's own guards do not count planned lines; a line for a document B2C paid meanwhile is refused at Pay Selected by left_to_pay.
 
 === PHASE 3: Employees and payroll ===
 - NEW submittable "Employee M-Pesa Account" (MEA-.#####), mirroring Supplier M-Pesa Account (maker-checker approval with proof, hold hours, is_default, name_mismatch).

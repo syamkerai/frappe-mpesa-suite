@@ -6,7 +6,9 @@ submitted entry is allocated to it. Until then the money is counted here:
 - B2C payouts: the same two lists B2C's own guard uses;
 - draft Payment and Journal Entries staff made for the document;
 - for an invoice, advances still sitting on the orders it was made from (ERPNext offers them
-  under Get Advances, so they are taken off, not refused).
+  under Get Advances, so they are taken off, not refused);
+- lines of an M-Pesa Payment Schedule planned for the document and not yet sent (a sent line
+  counts as its B2B request).
 
 B2B and B2C share the per-document lock "b2c-pay:<doctype>:<name>", so a B2B request and a B2C
 disbursement for one invoice cannot both pass. Lock order (R4): the document lock, the payout
@@ -17,6 +19,7 @@ import frappe
 from frappe.utils import cint, cstr, flt, getdate, nowdate
 
 B2B = "Mpesa B2B Payment Request"
+SCHEDULE_LINE = "M-Pesa Payment Schedule Line"
 DOC_FIELDS = {"Purchase Invoice": "purchase_invoice", "Purchase Order": "purchase_order"}
 # Requests that may still take money from M-Pesa: their whole amount counts.
 OPEN = ("Not Initiated", "Initiated", "Unknown")
@@ -342,6 +345,36 @@ def order_advances(pi: str, for_update: bool = False, exclude_request: str | Non
     return parts
 
 
+def planned_lines(dt: str, dn: str, exclude_line=None, exclude_schedule=None, for_update: bool = False) -> list:
+    """Payment schedule lines planned for the document and not sent yet. ``exclude_line``: the
+    line being checked; ``exclude_schedule``: a schedule being saved, whose lines are counted
+    from the form instead."""
+    if not frappe.db.table_exists(SCHEDULE_LINE):
+        return []  # before migrate
+    rows = frappe.db.sql(
+        f"""
+        SELECT name, parent, amount, planned_date
+        FROM `tab{SCHEDULE_LINE}`
+        WHERE reference_doctype = %(dt)s AND reference_name = %(dn)s AND parenttype = 'M-Pesa Payment Schedule'
+          AND status = 'Planned' AND COALESCE(request, '') = ''
+          AND name != %(line)s AND parent != %(schedule)s
+        ORDER BY planned_date, parent, idx
+        {_locking(for_update)}
+        """,
+        {"dt": dt, "dn": dn, "line": exclude_line or "", "schedule": exclude_schedule or ""},
+        as_dict=True,
+    )
+    found = []
+    for row in rows:
+        amount = flt(row.amount, 2)
+        if amount <= MIN:
+            continue
+        day = getdate(row.planned_date)
+        found.append(frappe._dict(kind="planned", name=row.parent, line=row.name, amount=amount, planned_date=day,
+                                  label=f"planned on {row.parent} for {day.day} {day:%b} {money(amount)}"))
+    return found
+
+
 def outstanding(dt: str, dn: str, for_update: bool = False) -> float:
     """What the document itself says it owes (B2C's reading of it)."""
     from ..mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement import current_outstanding
@@ -349,12 +382,13 @@ def outstanding(dt: str, dn: str, for_update: bool = False) -> float:
     return flt(current_outstanding(dt, dn, for_update=for_update), 2)
 
 
-def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, for_update: bool = False):
+def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
+                for_update: bool = False):
     """_dict(owed, parts, left): what the document owes, what is already on its way, and the rest.
 
-    ``exclude_request``: the B2B request being checked. ``exclude_line``: kept for the payment
-    schedule (Phase 2), whose planned lines will count here too. Payouts are read before the
-    document row (R4).
+    ``exclude_request``: the B2B request being checked. ``exclude_line`` / ``exclude_schedule``:
+    the payment schedule line being checked, or the schedule being saved (planned_lines).
+    Payouts and planned lines are read before the document row (R4).
     """
     parts = []
     b2b = b2b_open(dt, dn, exclude=exclude_request, for_update=for_update)
@@ -369,6 +403,7 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, fo
     for entry in draft_entries(dt, dn, skip, for_update):
         parts.append(frappe._dict(kind="draft", name=entry.name, amount=entry.amount,
                                   label=f"draft {entry.doctype} {entry.name} {money(entry.amount)}"))
+    parts += planned_lines(dt, dn, exclude_line, exclude_schedule, for_update)
     if dt == "Purchase Invoice":
         parts += order_advances(dn, for_update, exclude_request)
     owed = outstanding(dt, dn, for_update)  # last: the document row (R4)
@@ -385,6 +420,7 @@ def summary(result) -> dict:
         "outstanding": result.owed,
         "in_progress": total("b2b", "b2c"),
         "drafts": total("draft"),
+        "planned": total("planned"),
         "order_advance": total("advance"),
         "left": result.left,
     }

@@ -78,6 +78,10 @@
   "payout_lines_from",
   "b2b_entries_section",
   "entry_reminder_days",
+  "schedule_section",
+  "schedule_maker_checker",
+  "column_break_schedule",
+  "send_interval_seconds",
   "accounts_tab",
   "accounts_intro",
   "statement_import_section",
@@ -580,11 +584,34 @@
    "label": "Remind When a Paid B2B Has No Entry After (Days)",
    "default": "3",
    "description": "A Paid B2B payment whose accounting entry is still not made (or not submitted, or needs checking) after this many days alerts the Notify Role once. 0 = never. Failed automatic bookings are tried again every 15 minutes for 30 days either way."
+  },
+  {
+   "fieldname": "schedule_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Schedule"
+  },
+  {
+   "fieldname": "schedule_maker_checker",
+   "fieldtype": "Check",
+   "label": "Who Pays a Scheduled Line Must Not Be Who Prepared It",
+   "default": "1",
+   "description": "On: Pay Selected refuses a line the payer prepared or last changed (amount, payee, document or Pay On), so two people see every scheduled payment. Turn off only when one person does both jobs."
+  },
+  {
+   "fieldname": "column_break_schedule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "send_interval_seconds",
+   "fieldtype": "Int",
+   "label": "Seconds Between Scheduled Payments",
+   "default": "2",
+   "description": "After Confirm, the payments are sent to M-Pesa one at a time, this many seconds apart."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-23 12:00:00.000000",
+ "modified": "2026-10-23 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",
