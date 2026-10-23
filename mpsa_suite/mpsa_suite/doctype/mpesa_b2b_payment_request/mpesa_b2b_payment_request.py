@@ -5,6 +5,7 @@ import frappe
 from frappe.model.document import Document
 
 from ....money_out.b2b import send_b2b, validate_request
+from ....money_out.schedule import assert_line_due, check_request
 from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
 
 # Written only by the server (the send, the ack, the Result, the booking), with db writes. The
@@ -14,7 +15,7 @@ SERVER_FIELDS = (
     "error_code", "error_message", "queue_timed_out", "result_code", "result_desc", "transaction_id",
     "trans_completed_time", "receiver_public_name", "receiver_name_mismatch", "debit_party_charges",
     "debit_account_balance", "payment_entry", "journal_entry", "entry_status", "entry_note",
-    "entry_attempted_on", "entry_alerted_on",
+    "entry_attempted_on", "entry_alerted_on", "send_started_on",
 )
 # A request in one of these states may have reached M-Pesa.
 MAY_HAVE_PAID = ("Initiated", "Paid", "Unknown")
@@ -25,16 +26,21 @@ class MpesaB2BPaymentRequest(Document):
 
     def validate(self):
         if self.docstatus == 0:
+            check_request(self)
             validate_request(self)
 
     def before_submit(self):
         # Every check again, under the document's lock: validate() above runs only on drafts,
         # and Frappe also submits an insert that carries docstatus 1 (F1).
         require(PAYOUT_ROLES)
+        check_request(self)  # a schedule line only from Pay Selected
+        assert_line_due(self)  # never before the line's planned day, whatever the route
         validate_request(self, at_submit=True)
         self.status = "Not Initiated"
 
     def on_submit(self):
+        if self.flags.get("mpesa_send_later") or self.get("schedule_line"):
+            return  # the payment schedule's job sends it after this commits (schedule.send_batch)
         send_b2b(self.name)  # sending checks everything once more (check_ready_to_send)
 
     def before_update_after_submit(self):

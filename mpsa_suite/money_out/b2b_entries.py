@@ -250,7 +250,10 @@ def refresh_entry(doc, entries=None, feed: bool = True, log: bool = True) -> str
     state, entry, note = classify(doc, entries, gl)
     if note is None:
         note = doc.get("entry_note") if before == NOT_MADE and doc.get("entry_note") else _default_note(doc)
-    set_entry(doc, state, note, entry, log=log)
+    if set_entry(doc, state, note, entry, log=log):
+        from .schedule import sync_line_later
+
+        sync_line_later(doc)  # a payment schedule's line shows the entry state too
     if feed and state != before:
         statement.after_payout(B2B, doc.name)
     return state

@@ -699,6 +699,8 @@ def _controller(env, monkeypatch):
     monkeypatch.setattr(module, "send_b2b", lambda name: calls.append(("send", name)))
     doc = module.MpesaB2BPaymentRequest()
     doc.name, doc.docstatus, doc.status = "MB2B-1", 1, None
+    doc.flags = fake_frappe._dict()  # as a Frappe Document has
+    doc.get = lambda key, default=None: getattr(doc, key, default)
     return doc, calls
 
 

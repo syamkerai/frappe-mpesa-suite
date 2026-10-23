@@ -200,7 +200,7 @@ def test_summary_and_explanation(env):
     env.request(purchase_invoice="PINV-1", amount=2000, status="Initiated")
     env.pe("ACC-PAY-50", "BANK-REF-1", [(PI, "PINV-1", 1000)], docstatus=0)
     result = left(env)
-    assert env.owed.summary(result) == {"outstanding": 10000, "in_progress": 2000, "drafts": 1000,
+    assert env.owed.summary(result) == {"outstanding": 10000, "in_progress": 2000, "drafts": 1000, "planned": 0,
                                         "order_advance": 0, "left": 7000}
     assert env.owed.explain("PINV-1", result) == (
         "PINV-1 owes 10,000, less MB2B-1 Initiated 2,000; draft Payment Entry ACC-PAY-50 1,000: 7,000 is left to pay.")

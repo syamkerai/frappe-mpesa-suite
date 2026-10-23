@@ -25,6 +25,8 @@
   "purchase_order",
   "checked_earlier_payouts",
   "entry_mode",
+  "payment_schedule",
+  "schedule_line",
   "amended_from",
   "accounting_entry_section",
   "entry_status",
@@ -43,6 +45,7 @@
   "error_code",
   "error_message",
   "queue_timed_out",
+  "send_started_on",
   "result_section",
   "result_code",
   "result_desc",
@@ -416,10 +419,39 @@
    "read_only": 1,
    "allow_on_submit": 1,
    "no_copy": 1
+  },
+  {
+   "fieldname": "payment_schedule",
+   "fieldtype": "Link",
+   "label": "Payment Schedule",
+   "options": "M-Pesa Payment Schedule",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "depends_on": "eval:doc.payment_schedule",
+   "description": "Paid from this schedule (Pay Selected in M-Pesa Payments Due)."
+  },
+  {
+   "fieldname": "schedule_line",
+   "fieldtype": "Data",
+   "label": "Schedule Line",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "send_started_on",
+   "fieldtype": "Datetime",
+   "label": "Send Started On",
+   "hidden": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
   }
  ],
  "links": [],
- "modified": "2026-10-23 12:00:00.000000",
+ "modified": "2026-10-23 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2B Payment Request",

@@ -175,6 +175,10 @@ def apply_ack(doc, data, error, *, settings_ids=True) -> None:
         doc.db_set(values, notify=True)
     except Exception:
         frappe.log_error(frappe.get_traceback(), f"{doc.doctype} {doc.name}: could not record M-Pesa answer")
+    if doc.doctype == "Mpesa B2B Payment Request":
+        from .schedule import sync_line_later
+
+        sync_line_later(doc)  # a payment schedule's line follows its request (never raises)
 
 
 def log_callback(payload: dict, description: str, doctype: str, name: str | None, status: str) -> None:

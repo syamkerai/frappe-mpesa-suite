@@ -28,7 +28,8 @@ TODAY = NOW.date()
 COLUMNS = {
     B2B: ("name", "docstatus", "status", "amount", "transaction_id", "purchase_invoice", "purchase_order",
           "supplier", "company", "creation", "entry_status", "entry_note", "entry_mode", "payment_entry",
-          "journal_entry", "entry_attempted_on", "entry_alerted_on", "trans_completed_time", "mpesa_settings"),
+          "journal_entry", "entry_attempted_on", "entry_alerted_on", "trans_completed_time", "mpesa_settings",
+          "payment_schedule", "schedule_line", "send_started_on", "debit_account_balance"),
     PE: ("name", "docstatus", "payment_type", "party_type", "party", "paid_from", "paid_to", "paid_amount",
          "unallocated_amount", "reference_no", "posting_date", "creation"),
     PER: ("name", "parent", "idx", "reference_doctype", "reference_name", "allocated_amount",
@@ -40,7 +41,16 @@ COLUMNS = {
     "Payment Schedule": ("name", "parent", "parenttype", "idx", "payment_term", "due_date", "payment_amount",
                          "paid_amount", "outstanding"),
     "B2C Disbursement Request": ("name", "docstatus", "status", "reference_doctype", "reference_name",
-                                 "transaction_id"),
+                                 "transaction_id", "mpesa_settings", "amount", "creation",
+                                 "transaction_completed_datetime", "working_acct_avlbl_funds",
+                                 "utility_acct_avlbl_funds"),
+    "M-Pesa Payment Schedule": ("name", "title", "company", "b2b_settings", "closed", "status", "modified"),
+    "M-Pesa Payment Schedule Line": (
+        "name", "parent", "parenttype", "idx", "modified", "planned_date", "party_type", "party", "payee_name",
+        "payee_account_doctype", "payee_account", "route", "destination", "one_off_type", "one_off_shortcode",
+        "one_off_account", "amount", "reference_doctype", "reference_name", "entry_mode", "remarks", "status",
+        "request", "receipt", "paid_on", "entry_status", "last_problem", "prepared_by", "changed_by", "approved_by",
+        "approved_on", "batch", "attempts"),
 }
 
 

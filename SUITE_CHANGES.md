@@ -1103,3 +1103,76 @@ b2b_pay_first_then_entry.
   advance still on its order is taken off what it owes. The release C bench test that paid a
   second advance on a partly invoiced order now expects this refusal.
 - Bench test fix: an empty Accounting Entry status reads back as "", not None.
+
+## Payouts Phase 2: M-Pesa Payment Schedule and the M-Pesa Payments Due report (2026-10-23)
+
+Design: [docs/PAYOUTS_DESIGN.md](docs/PAYOUTS_DESIGN.md), Phase 2 and "Rules every flow keeps".
+Suppliers and payees not saved on a supplier, B2B only. No patch: the new DocTypes, fields and
+the report come from JSON, the two new settings from the Suite settings backfill.
+
+**Accounts prepare, a Payer pays, nothing is paid automatically**
+- New **M-Pesa Payment Schedule** (MPS-YY-MM-####): a title, the company, Pay From (B2B) and
+  lines. Each line has Pay On, the supplier and its approved M-Pesa account (the default one
+  when left empty), the amount in whole shillings, optionally the Purchase Invoice or Order it
+  pays, When Paid and remarks. The paybill or till is copied from the approved account.
+  Accounts users and managers create and change schedules; M-Pesa Payers and Viewers read them.
+- A number not saved on a supplier (a utility's paybill) can be a line only when "Allow B2B to
+  Numbers Not Saved on a Supplier" is on, and only a manager enters it or pays it.
+- A line's Pay On cannot be before today when it is added or moved. Accounts move planned lines
+  to another day (Move Date) until they are sent; each move is noted on the schedule with the
+  old and new day.
+- Once a line is sent it cannot be changed or deleted. The status, request, receipt and the
+  other fields the server writes are always taken from the database on save.
+- What is planned for an invoice or order counts in what it has left to pay: a schedule cannot
+  plan more than is left, and a direct B2B request (or another schedule) cannot pay what a
+  schedule has planned. The B2B request form's headline shows the planned amount.
+
+**Pay Selected, with a 5-second confirm**
+- New Script Report **M-Pesa Payments Due** (M-Pesa workspace and sidebar, and Pay Due Lines on
+  the schedule): due today and overdue, the next 7 days, in progress or all, by company, route,
+  Pay From and schedule. Each line shows its Pay On (with an Overdue badge), payee, route,
+  paybill or till, document and what it has left, amount, status and why it cannot be paid now.
+  Cards show each shortcode's Working balance (approximate, with its age), what is due, what you
+  can pay and the selected total.
+- Tick lines (or all of them) and press **Pay Selected**: a summary per payee and per shortcode
+  and route, the total, the balance against the selected total with a warning when it is short
+  or old, and the lines left out with the reason. **Confirm stays disabled for 5 seconds** with
+  a countdown, and the server refuses a confirm under 5 seconds too: the summary's token is
+  bound to the user, used once and lives 10 minutes. A line changed since the summary is refused.
+- **Never before the planned day**: Pay Selected, the request's submit, a console send and the
+  sending job all refuse a line before its Pay On (the site's date). Paying any time on the day
+  is fine. A request that carries a schedule line is accepted only from Pay Selected.
+- **Maker-checker**: who prepared or last changed a line (including moving its date) cannot pay
+  it. "Who Pays a Scheduled Line Must Not Be Who Prepared It" (Money Out tab) is on by default;
+  turn it off only when one person does both jobs.
+- Confirm submits a B2B request per line (every B2B check again, under the document's lock) but
+  sends nothing itself. A job sends them one at a time ("Seconds Between Scheduled Payments",
+  default 2). Before each call to M-Pesa the request is marked and that is committed, so a
+  request is never sent twice.
+- The line follows its request: Sending, Sent, Paid (with the receipt and the accounting entry
+  state), Failed or Unknown. A failed line is planned again with **Plan Again** and paid again
+  with Pay Selected. An Unknown one may have been paid: a manager checks the statement and
+  cancels its request first.
+- **Refresh Balances** asks Safaricom for the shortcodes' balances (finance roles). **Close
+  Schedule** cancels the planned lines; payments already sent carry on. A schedule with any
+  payment sent cannot be deleted.
+
+**The 5-minute sweep**
+- A request whose send began more than 10 minutes ago and never recorded an answer becomes
+  Unknown ("Sending was interrupted after it may have reached M-Pesa. Check the statement before
+  paying again."), is never sent again, and the Notify Role is alerted.
+- A confirmed request whose job never started is sent again within the hour; after an hour it
+  is cancelled (it cannot have reached M-Pesa) and its line is planned again.
+- Lines that missed news of their request are brought up to date.
+
+**Approximate balances** (`wallet.balances.available`): the newest of the last Account Balance
+result, the last B2B Result's balance and the last B2C Result's available funds, less the
+payouts of that shortcode sent since. Labelled approximate everywhere.
+
+Tests: `tests/unit/test_schedule.py` (the date rule on every route with the site's day mocked,
+the schedule-line check, saved-line rules, double planning and direct payments, maker-checker on
+and off, the token, the summary, confirm to send to Result to booking, Plan Again, Move Date,
+Close, the sweep, balances, the report). Bench tests in
+`mpsa_suite/money_out/test_payment_schedule.py`, not yet run on the v15 and v16 benches. Not
+built: the write-off of balances under KES 1 (decision 5, optional); B2C phone lines, employees
+and payroll (Phase 3).
