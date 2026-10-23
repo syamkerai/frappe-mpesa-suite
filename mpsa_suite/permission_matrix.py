@@ -68,6 +68,14 @@ DOCTYPES = {
         SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh", AU: "rwcdRepmh",
         MP: "rRep", MV: "rRep",
     },
+    # payouts Phase 3: HR and Accounts propose an employee's payee account; an M-Pesa Manager approves
+    # it (submit; never who entered it, party_accounts.approve), as for suppliers
+    "Employee M-Pesa Account": {
+        SM: ALL, MM: ALL,
+        AM: PREPARE,
+        AU: "rwcaRepmh", HM: "rwcaRepmh", HU: "rwcaRep",
+        MP: "rRep", MV: "rRep",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -247,6 +255,12 @@ ENDPOINTS = {
     "mpsa_suite.money_out.b2b_entries.entry_facts": ("FINANCE_ROLES + read request", ("roles:FINANCE_ROLES", "perm")),
     "mpsa_suite.money_out.b2b.amount_left": ("Read the invoice / order", ("perm",)),
     "mpsa_suite.money_out.b2b.order_advances": ("Read the order", ("perm",)),
+    "mpsa_suite.money_out.b2b.salary_left": ("Read the Salary Slip", ("perm",)),
+    "mpsa_suite.money_out.payroll.payroll_status": ("Read the Payroll Entry", ("perm",)),
+    "mpsa_suite.money_out.payroll.from_payroll_entry": (
+        "FINANCE_ROLES + read the Payroll Entry + create a schedule", ("roles:FINANCE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.from_payroll_entry": (
+        "FINANCE_ROLES + read the Payroll Entry + create a schedule", ("via:from_payroll_entry",)),
     "mpsa_suite.utils.utils.get_mode_of_payment_account": ("Write B2C Payment Disbursement", ("perm",)),
     # Money out
     "mpsa_suite.money_out.api.check_b2c_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
@@ -268,6 +282,10 @@ ENDPOINTS = {
         "Create / write the disbursement", ("via:_check_can_prepare",)),
     _D + "supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier": ("Read Supplier M-Pesa Account", ("perm",)),
     _D + "supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.confirm_receiver_name": (
+        "ADMIN_ROLES", ("via:confirm_receiver_name",)),
+    _D + "employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee": (
+        "Read Employee M-Pesa Account", ("via:accounts_for",)),
+    _D + "employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.confirm_receiver_name": (
         "ADMIN_ROLES", ("via:confirm_receiver_name",)),
     # Admin and configuration
     "mpsa_suite.money_in.c2b_verify.release": ("CONFIG_ROLES", ("roles:RELEASE_ROLES",)),
@@ -302,7 +320,9 @@ HELPERS = {
     "_check_can_push": ("mpsa_suite.www.mpesa.stkpush", ("perm",)),
     "_run": ("mpsa_suite.sandbox_lab.api", ("perm", "via:require_lab")),
     "require_lab": ("mpsa_suite.sandbox_lab.guard", ("roles:ADMIN_ROLES",)),
-    "confirm_receiver_name": ("mpsa_suite.money_out.supplier_accounts", ("roles:ADMIN_ROLES",)),
+    "confirm_receiver_name": ("mpsa_suite.money_out.party_accounts", ("roles:ADMIN_ROLES",)),
+    "accounts_for": ("mpsa_suite.money_out.party_accounts", ("perm",)),
+    "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:FINANCE_ROLES", "perm")),
 }
 
 GUEST_EVIDENCE = ("callback", "api", "page")

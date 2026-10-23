@@ -3,19 +3,34 @@
 
 const MPSA_SCHEDULE_API = "mpsa_suite.money_out.schedule";
 const MPSA_SCHEDULE_ORDER_CLOSED = ["On Hold", "Closed", "Completed"];
+// the approved-account DocType of each party type
+const MPSA_PARTY_ACCOUNT = { Supplier: "Supplier M-Pesa Account", Employee: "Employee M-Pesa Account" };
+const MPSA_ACCOUNTS_FOR = {
+	Supplier: ["mpsa_suite.mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier", "supplier"],
+	Employee: ["mpsa_suite.mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee", "employee"],
+};
 
 frappe.ui.form.on("M-Pesa Payment Schedule", {
 	setup(frm) {
 		frm.set_query("b2b_settings", () => ({
 			filters: { use_b2b: 1, ...(frm.doc.company ? { company: frm.doc.company } : {}) },
 		}));
+		frm.set_query("b2c_settings", () => ({
+			filters: { use_b2c: 1, ...(frm.doc.company ? { company: frm.doc.company } : {}) },
+		}));
 		frm.set_query("payee_account", "lines", (doc, cdt, cdn) => {
 			const row = locals[cdt][cdn];
-			return { filters: { docstatus: 1, ...(row.party ? { supplier: row.party } : {}) } };
+			const field = row.party_type === "Employee" ? "employee" : "supplier";
+			return { filters: { docstatus: 1, ...(row.party ? { [field]: row.party } : {}) } };
 		});
 		frm.set_query("reference_name", "lines", (doc, cdt, cdn) => {
 			const row = locals[cdt][cdn];
 			const filters = { docstatus: 1, company: frm.doc.company };
+			if (row.reference_doctype === "Salary Slip") {
+				if (row.party) filters.employee = row.party;
+				filters.status = ["!=", "Withheld"];
+				return { filters };
+			}
 			if (row.party) filters.supplier = row.party;
 			if (row.reference_doctype === "Purchase Invoice") filters.outstanding_amount = [">", 0];
 			if (row.reference_doctype === "Purchase Order") {
@@ -56,6 +71,7 @@ frappe.ui.form.on("M-Pesa Payment Schedule", {
 
 	company(frm) {
 		if (frm.doc.b2b_settings) frm.set_value("b2b_settings", null);
+		if (frm.doc.b2c_settings) frm.set_value("b2c_settings", null);
 	},
 });
 
@@ -63,32 +79,28 @@ frappe.ui.form.on("M-Pesa Payment Schedule Line", {
 	lines_add(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
 		if (!row.planned_date) frappe.model.set_value(cdt, cdn, "planned_date", frappe.datetime.get_today());
-		if (row.party_type === "Supplier") {
-			frappe.model.set_value(cdt, cdn, "payee_account_doctype", "Supplier M-Pesa Account");
+		if (MPSA_PARTY_ACCOUNT[row.party_type]) {
+			frappe.model.set_value(cdt, cdn, "payee_account_doctype", MPSA_PARTY_ACCOUNT[row.party_type]);
 		}
 	},
 
 	party_type(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
-		frappe.model.set_value(
-			cdt,
-			cdn,
-			"payee_account_doctype",
-			row.party_type === "Supplier" ? "Supplier M-Pesa Account" : null
-		);
+		frappe.model.set_value(cdt, cdn, "payee_account_doctype", MPSA_PARTY_ACCOUNT[row.party_type] || null);
 		frappe.model.set_value(cdt, cdn, "party", null);
+		// a salary pays its Salary Slip (HRMS sites only)
+		const hrms = frappe.boot && frappe.boot.versions && frappe.boot.versions.hrms;
+		if (row.party_type === "Employee" && hrms) frappe.model.set_value(cdt, cdn, "reference_doctype", "Salary Slip");
 	},
 
 	async party(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
 		frappe.model.set_value(cdt, cdn, "payee_account", null);
-		if (!row.party || row.party_type !== "Supplier") return;
-		frappe.model.set_value(cdt, cdn, "payee_account_doctype", "Supplier M-Pesa Account");
+		const how = MPSA_ACCOUNTS_FOR[row.party_type];
+		if (!row.party || !how) return;
+		frappe.model.set_value(cdt, cdn, "payee_account_doctype", MPSA_PARTY_ACCOUNT[row.party_type]);
 		// the default approved account, or the only one (the server checks again on save)
-		const accounts = await frappe.xcall(
-			"mpsa_suite.mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier",
-			{ supplier: row.party }
-		);
+		const accounts = await frappe.xcall(how[0], { [how[1]]: row.party });
 		const approved = (accounts || []).filter((a) => a.docstatus === 1);
 		const pick = approved.find((a) => a.is_default) || (approved.length === 1 ? approved[0] : null);
 		if (pick) frappe.model.set_value(cdt, cdn, "payee_account", pick.name);
@@ -101,12 +113,16 @@ frappe.ui.form.on("M-Pesa Payment Schedule Line", {
 	async reference_name(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
 		if (!row.reference_doctype || !row.reference_name) return;
-		const r = await frappe.xcall("mpsa_suite.money_out.b2b.amount_left", {
-			doctype: row.reference_doctype,
-			name: row.reference_name,
-		});
+		const slip = row.reference_doctype === "Salary Slip";
+		const r = slip
+			? await frappe.xcall("mpsa_suite.money_out.b2b.salary_left", { salary_slip: row.reference_name })
+			: await frappe.xcall("mpsa_suite.money_out.b2b.amount_left", {
+					doctype: row.reference_doctype,
+					name: row.reference_name,
+			  });
 		if (!r) return;
-		if (!row.party && r.supplier) await frappe.model.set_value(cdt, cdn, "party", r.supplier);
+		const payee = slip ? r.employee : r.supplier;
+		if (!row.party && payee) await frappe.model.set_value(cdt, cdn, "party", payee);
 		if (!flt(row.amount)) frappe.model.set_value(cdt, cdn, "amount", Math.floor(r.left));
 		const stops = [...(r.problems || []), ...(r.supplier_hold ? [r.supplier_hold] : [])];
 		frappe.show_alert({

@@ -12,6 +12,10 @@ books nothing; staff press Make Entry once they know what the money paid for. Ei
 The request's Accounting Entry section says where each payout stands. A 15-minute sweep keeps
 it current, retries failed bookings for 30 days and reminds notify_role once. Requests Paid
 before this release are only classified, never booked automatically.
+
+A request to an employee for a Salary Slip is booked with the salary Journal Entry (it clears
+the Payroll Entry's payroll payable, money_out.salary_entries), under the slip's lock. A request
+to an employee with no slip waits for Make Entry (Salary Slip or Journal Entry).
 """
 
 import contextlib
@@ -28,7 +32,9 @@ B2B = statement.B2B
 PE, JE = "Payment Entry", "Journal Entry"
 AUTO, LATER = "Book automatically", "Make the entry later"
 NOT_MADE, DRAFT, CHECK, MADE = "Entry Not Made", "Draft Entry", "Needs Checking", "Entry Made"
-KINDS = ("Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry")
+SALARY = "Salary Slip"
+KINDS = ("Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry", SALARY)
+SUPPLIER_KINDS = ("Purchase Invoice", "Purchase Order", "Supplier Advance")
 # Failed automatic bookings are tried again this long; older ones are left to Make Entry.
 RETRY_WINDOW_DAYS = 30
 MIN = owed.MIN
@@ -140,11 +146,54 @@ def _where(entry) -> str:
     return f"a draft, {where}" if entry.docstatus == 0 else where
 
 
+def _employee(doc) -> bool:
+    return bool(cstr(doc.get("employee")).strip())
+
+
+def classify_employee(doc, entries, gl=None) -> tuple:
+    """(state, entry, note) for a request to an employee: a salary is on target on a Journal
+    Entry that debits its Payroll Entry (the salary entry); with no slip, any Journal Entry."""
+    receipt = cstr(doc.transaction_id).strip()
+    slip = cstr(doc.get("salary_slip")).strip()
+    payroll = cstr(doc.get("payroll_entry")).strip()
+    if not entries:
+        if cint(doc.docstatus) == 2:
+            return CHECK, None, (
+                f"M-Pesa paid this after the request was cancelled. Check the statement and that {slip or doc.employee} "
+                "was not paid again, then make the entry (managers only)."
+            )
+        return NOT_MADE, None, None
+    if len(entries) > 1:
+        listed = ", ".join(f"{e.doctype} {e.name}" for e in entries)
+        return CHECK, None, f"Receipt {receipt} is on {len(entries)} entries ({listed}). Keep one and cancel the others."
+    entry = entries[0]
+    label = f"{entry.doctype} {entry.name}"
+    on_target = entry.doctype == JE and (
+        not slip or any((a.reference_doctype, a.reference_name) == ("Payroll Entry", payroll) for a in entry.allocations))
+    if not on_target:
+        target = f"the payroll payable of {payroll}" if slip else "a Journal Entry"
+        return CHECK, entry, f"Receipt {receipt} is on {label} ({_where(entry)}): a salary is booked on {target}."
+    if entry.docstatus == 0:
+        return DRAFT, entry, f"Submit {label}."
+    amount = flt(doc.amount, 2)
+    if gl and abs(flt(entry.credits.get(gl, 0)) - amount) > MIN:
+        return CHECK, entry, (
+            f"{label} pays from {entry.account or '-'} for {money(entry.credit)}; the M-Pesa line is "
+            f"{money(amount)} on {gl}, so it will not reconcile."
+        )
+    note = cstr(doc.get("entry_note"))
+    if doc.get("entry_status") == CHECK and "was not paid twice" in note:
+        return CHECK, entry, note  # the slip had less left than was paid: kept until staff act on it
+    return MADE, entry, f"Booked on {label}."
+
+
 def classify(doc, entries, gl=None) -> tuple:
     """(state, entry, note) for the request's Accounting Entry. ``note`` None: keep the reason
     already on the request (no entry yet)."""
     if doc.status != "Paid":
         return "", None, ""
+    if _employee(doc):
+        return classify_employee(doc, entries, gl)
     receipt = cstr(doc.transaction_id).strip()
     dt, dn = owed.document_of(doc)
     if not entries:
@@ -273,11 +322,17 @@ def _locks(name: str, dt, dn, receipt):
 
 
 def _peek(name: str):
-    """The request's document and receipt, read without a lock (to know which locks to take)."""
-    values = frappe.db.get_value(B2B, name, ["purchase_invoice", "purchase_order", "transaction_id"], as_dict=True)
+    """The request's document (its invoice or order, or the Salary Slip it pays) and receipt,
+    read without a lock (to know which locks to take)."""
+    fields = ["purchase_invoice", "purchase_order", "transaction_id"]
+    if frappe.get_meta(B2B).has_field("salary_slip"):
+        fields.append("salary_slip")
+    values = frappe.db.get_value(B2B, name, fields, as_dict=True)
     if not values:
         frappe.throw(f"{B2B} {name} not found")
     dt, dn = owed.document_of(values)
+    if not dt and cstr(values.get("salary_slip")).strip():
+        dt, dn = owed.SLIP, values.salary_slip
     return dt, dn, cstr(values.transaction_id).strip()
 
 
@@ -321,12 +376,18 @@ def book_automatically(name: str) -> str | None:
         if reason:
             set_entry(doc, NOT_MADE, reason)
             return None
+        if _employee(doc):
+            return _book(doc, None, None, salary=True)
         return _book(doc, dt, dn)
 
 
 def _not_automatic(doc) -> str | None:
     if (doc.get("entry_mode") or AUTO) == LATER:
         return f"Paid on {_paid_on(doc)}. Press Make Entry when you know what this paid for."
+    if _employee(doc):
+        if not cstr(doc.get("salary_slip")).strip():
+            return f"Paid to {doc.employee} with no salary slip: press Make Entry."
+        return None
     if not doc.supplier:
         return "Paid to a number not saved on a supplier: press Make Entry."
     if owed.supplier_hold(doc.supplier):
@@ -337,12 +398,15 @@ def _not_automatic(doc) -> str | None:
     return None
 
 
-def _book(doc, dt, dn) -> str | None:
+def _book(doc, dt, dn, salary: bool = False) -> str | None:
     savepoint = "mpesa_b2b_pe"
     frappe.db.savepoint(savepoint)
     try:
         with money_in_common.as_user("Administrator"):
-            pe, problem = build_payment_entry(doc, dt, dn, doc.supplier, flt(doc.amount))
+            if salary:
+                pe, problem = build_salary_entry(doc)
+            else:
+                pe, problem = build_payment_entry(doc, dt, dn, doc.supplier, flt(doc.amount))
             pe.flags.ignore_permissions = True
             pe.insert(ignore_permissions=True)
             if cint(frappe.db.get_value("Mpesa Settings", doc.mpesa_settings, "submit_b2c_accounting_entries")):
@@ -354,7 +418,7 @@ def _book(doc, dt, dn) -> str | None:
         last = re.sub(r"^[\w.]*(Error|Exception)\w*: ", "", last).strip()[:300] or "Unknown error"
         note = (
             f"Could not book automatically: {last}. It is tried again every 15 minutes for {RETRY_WINDOW_DAYS} "
-            "days, or press Make Entry. Do not make a Payment Entry for it by hand."
+            f"days, or press Make Entry. Do not make a {'Journal' if salary else 'Payment'} Entry for it by hand."
         )
         if doc.get("entry_note") != note:  # the sweep retries every run; log each new reason once
             frappe.log_error(title="M-Pesa B2B booking failed", message=f"{doc.name}\n{traceback}",
@@ -377,6 +441,17 @@ def _not_taken(doc, problem: str) -> None:
     set_entry(doc, CHECK, problem)
     doc.add_comment("Comment", problem)
     _alert(doc, f"{doc.name}: {problem}")
+
+
+def build_salary_entry(doc) -> tuple:
+    """(Journal Entry, problem): the salary Journal Entry of a Paid salary request, on the
+    payout's own GL and completion date (R6). ``problem``: the slip had less left than was paid."""
+    from . import salary_entries
+
+    bank_account, gl, date = payout_account(doc.name)
+    if not gl:
+        frappe.throw(f"Map a Bank Account on Mpesa Settings {doc.mpesa_settings} (Accounting Mapping)")
+    return salary_entries.for_b2b(doc, bank_account, gl, date)
 
 
 def remark_text(doc, dn=None, extra=None) -> str:
@@ -551,17 +626,26 @@ def build_journal_entry(doc, account: str, cost_center, remark: str):
 # ---------------------------------------------------------------- Make Entry and Check Entry Again
 @frappe.whitelist(methods=["POST"])
 def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=None, account=None,
-               cost_center=None, submit=1, remark=None):
+               cost_center=None, submit=1, remark=None, salary_slip=None):
     """Make the entry of a Paid request now: against an invoice or order, as a supplier advance,
-    or as a Journal Entry. Runs with the user's own ERPNext permissions."""
+    as a Journal Entry, or (a payment to an employee) as the salary entry of a Salary Slip. Runs
+    with the user's own ERPNext permissions."""
     require(FINANCE_ROLES)
     if kind not in KINDS:
         frappe.throw(f"Entry Type must be one of: {', '.join(KINDS)}")
-    entry_doctype = JE if kind == "Journal Entry" else PE
+    entry_doctype = JE if kind in ("Journal Entry", SALARY) else PE
     frappe.has_permission(entry_doctype, "create", throw=True)
-    frappe.get_doc(B2B, name).check_permission("read")
+    request = frappe.get_doc(B2B, name)
+    request.check_permission("read")
+    employee = _employee(request)
+    if employee and kind in SUPPLIER_KINDS:
+        frappe.throw("This payment went to an employee: make a Salary Slip or Journal Entry entry.")
+    if kind == SALARY and not employee:
+        frappe.throw("A salary entry is for a payment to an employee.")
     dt = kind if kind in owed.DOC_FIELDS else None
     dn = cstr({"Purchase Invoice": purchase_invoice, "Purchase Order": purchase_order}.get(kind)).strip() or None
+    if kind == SALARY:
+        dt, dn = owed.SLIP, cstr(salary_slip or request.get("salary_slip")).strip() or None
     if dt and not dn:
         frappe.throw(f"Pick the {dt}.")
     _, _, receipt = _peek(name)
@@ -576,7 +660,10 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
             frappe.throw(f"Receipt {receipt} is already on {e.doctype} {e.name} ({_where(e)}): open it, "
                          "or press Check Entry Again.")
         amount = flt(doc.amount, 2)
-        if kind == "Journal Entry":
+        if kind == SALARY:
+            entry, problem = _salary_entry(doc, dn)
+            supplier = None
+        elif kind == "Journal Entry":
             text = remark_text(doc, None, remark)
             entry, problem = build_journal_entry(doc, _journal_account(doc, account, cost_center), cost_center, text), None
             supplier = None
@@ -602,7 +689,10 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
                     frappe.throw(f"Nothing is left to pay on {dn}. {owed.explain(dn, left)}")
                 cap = left.left
             entry, problem = build_payment_entry(doc, dt, dn, supplier, amount, cap=cap, remark=remark)
-        _move_request(doc, dt, dn, supplier)  # checked before the entry is made
+        if employee:
+            _move_salary(doc, dn if kind == SALARY else None)
+        else:
+            _move_request(doc, dt, dn, supplier)  # checked before the entry is made
         entry.insert()
         if cint(submit) and frappe.has_permission(entry_doctype, "submit"):
             entry.submit()
@@ -612,6 +702,43 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
     statement.after_payout(B2B, name)  # the payout line is reconciled with the entry now
     return {"doctype": entry_doctype, "name": entry.name, "docstatus": cint(entry.docstatus),
             "entry_status": doc.get("entry_status")}
+
+
+def _salary_entry(doc, slip: str) -> tuple:
+    """Make Entry's salary entry: the slip is the employee's, payable, and has the amount left
+    (this payout itself not counted: its own Paid request is in what the slip owes)."""
+    from . import salary_entries
+
+    values = owed.read_slip(slip, for_update=True)  # the slip row, last (R4)
+    if not values:
+        frappe.throw(f"Salary Slip {slip} not found")
+    if cint(values.docstatus) != 1:
+        frappe.throw(f"{slip} is not submitted.")
+    if not values.get("payroll_entry"):
+        frappe.throw(f"{slip} is not part of a Payroll Entry, so it has no payroll payable to clear.")
+    if values.employee != doc.employee:
+        frappe.throw(f"{slip} belongs to {values.employee}, not {doc.employee}.")
+    bank_account, gl, date = payout_account(doc.name)
+    if not gl:
+        frappe.throw(f"Map a Bank Account on Mpesa Settings {doc.mpesa_settings} (Accounting Mapping)")
+    return salary_entries.for_b2b(doc, bank_account, gl, date, slip=slip)
+
+
+def _move_salary(doc, slip) -> None:
+    """Fill the request's Salary Slip (and Payroll Entry) where blank. Changing one already set
+    moves the salary to another slip: managers only, and it is noted on the request."""
+    if not slip or not frappe.get_meta(B2B).has_field("salary_slip"):
+        return
+    old = cstr(doc.get("salary_slip")).strip()
+    if old == slip:
+        return
+    if old:
+        require(ADMIN_ROLES)
+        doc.add_comment("Comment", f"Make Entry by {frappe.session.user} moved this payment from {old} to {slip}.")
+    values = {"salary_slip": slip}
+    if frappe.get_meta(B2B).has_field("payroll_entry"):
+        values["payroll_entry"] = frappe.db.get_value(owed.SLIP, slip, "payroll_entry")
+    doc.db_set(values, update_modified=False)
 
 
 def _journal_account(doc, account, cost_center) -> str:
@@ -686,7 +813,8 @@ def entry_facts(name):
         "amount": flt(doc.amount), "date": date, "receipt": receipt, "company": _company(doc, bank_account),
         "paid_to": doc.receiver_public_name or doc.receiver_shortcode, "bank_account": bank_account, "gl": gl,
         "charge_entry": charge, "supplier": doc.supplier, "purchase_invoice": doc.purchase_invoice,
-        "purchase_order": doc.get("purchase_order"),
+        "purchase_order": doc.get("purchase_order"), "employee": doc.get("employee"),
+        "salary_slip": doc.get("salary_slip"),
         "cost_center": _settings_value(doc.mpesa_settings, "cost_center"),
     }
 

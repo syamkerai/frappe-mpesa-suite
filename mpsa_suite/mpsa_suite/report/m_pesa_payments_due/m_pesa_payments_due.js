@@ -28,7 +28,7 @@ frappe.query_reports["M-Pesa Payments Due"] = {
 			fieldname: "route",
 			label: __("Route"),
 			fieldtype: "Select",
-			options: ["", "B2B Paybill", "B2B Till"].join("\n"),
+			options: ["", "B2B Paybill", "B2B Till", "B2C Phone"].join("\n"),
 		},
 		{
 			fieldname: "pay_from",

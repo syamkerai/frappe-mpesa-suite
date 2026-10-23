@@ -26,6 +26,17 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 			if (frm.doc.company) filters.company = frm.doc.company;
 			return { filters };
 		});
+		// an employee is paid by B2B to an approved bank paybill account only
+		frm.set_query("employee_mpesa_account", () => ({
+			filters: {
+				docstatus: 1,
+				account_type: "Bank Paybill (B2B)",
+				...(frm.doc.employee ? { employee: frm.doc.employee } : {}),
+			},
+		}));
+		frm.set_query("salary_slip", () => ({
+			filters: { docstatus: 1, status: ["!=", "Withheld"], ...(frm.doc.employee ? { employee: frm.doc.employee } : {}) },
+		}));
 	},
 	onload(frm) {
 		// opened from a Purchase Invoice or Order (Pay via M-Pesa): fill in what to pay
@@ -59,6 +70,27 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 	},
 	supplier(frm) {
 		if (frm.doc.supplier_mpesa_account && !frm.mpsa_filling) frm.set_value("supplier_mpesa_account", null);
+	},
+	employee(frm) {
+		if (frm.mpsa_filling) return;
+		if (frm.doc.employee_mpesa_account) frm.set_value("employee_mpesa_account", null);
+		if (frm.doc.salary_slip) frm.set_value("salary_slip", null);
+	},
+	employee_mpesa_account(frm) {
+		// Display only: the server copies the destination from the approved account on save.
+		if (!frm.doc.employee_mpesa_account) return;
+		frappe.db
+			.get_value("Employee M-Pesa Account", frm.doc.employee_mpesa_account, ["employee", "shortcode", "account_number"])
+			.then(({ message }) => {
+				if (!message) return;
+				if (!frm.doc.employee) frm.set_value("employee", message.employee);
+				frm.set_value("command_id", "BusinessPayBill");
+				frm.set_value("receiver_shortcode", message.shortcode);
+				frm.set_value("account_reference", message.account_number || "");
+			});
+	},
+	salary_slip(frm) {
+		mpsa_b2b.load_left(frm, true);
 	},
 	supplier_mpesa_account(frm) {
 		// Display only: the server copies the destination from the approved account on save.
@@ -97,9 +129,41 @@ const mpsa_b2b = {
 		return [null, null];
 	},
 
+	// What is left to pay on a Salary Slip, and why; ``fill``: take employee, company, the
+	// employee's bank paybill account and the amount from it.
+	async load_salary(frm, fill) {
+		const r = await frappe.xcall(`${MPSA_B2B}.salary_left`, {
+			salary_slip: frm.doc.salary_slip,
+			request: frm.is_new() ? null : frm.doc.name,
+		});
+		if (!r || frm.doc.docstatus !== 0) return;
+		if (fill) {
+			frm.mpsa_filling = true;
+			try {
+				if (r.employee && frm.doc.employee !== r.employee) await frm.set_value("employee", r.employee);
+				if (r.company && frm.doc.company !== r.company) await frm.set_value("company", r.company);
+				if (!frm.doc.employee_mpesa_account && r.employee_mpesa_account) {
+					await frm.set_value("employee_mpesa_account", r.employee_mpesa_account);
+				}
+				await frm.set_value("amount", Math.floor(r.left));
+			} finally {
+				frm.mpsa_filling = false;
+			}
+		}
+		const e = frappe.utils.escape_html;
+		if ((r.problems || []).length) {
+			frm.dashboard.set_headline(r.problems.map(e).join("<br>"), "red");
+			return;
+		}
+		let text = __("Left to pay on {0}: KES {1}", [e(frm.doc.salary_slip), format_number(r.left, null, 2)]);
+		if ((r.parts || []).length) text += "<br><span class='small'>" + r.parts.map(e).join("; ") + "</span>";
+		frm.dashboard.set_headline(text, "blue");
+	},
+
 	// What is left to pay on the invoice or order, and why; ``fill``: take supplier, company,
 	// shortcode and amount from it.
 	async load_left(frm, fill) {
+		if (frm.doc.salary_slip) return mpsa_b2b.load_salary(frm, fill);
 		const [doctype, name] = mpsa_b2b.document(frm);
 		if (!doctype) {
 			frm.toggle_display("checked_earlier_payouts", false);
@@ -203,7 +267,17 @@ const mpsa_b2b = {
 		]
 			.map(([label, value]) => `<div><span class="text-muted">${label}:</span> ${e(value || "-")}</div>`)
 			.join("");
-		const kind = f.purchase_invoice
+		const hrms = frappe.boot && frappe.boot.versions && frappe.boot.versions.hrms;
+		const kinds = f.employee
+			? hrms
+				? ["Salary Slip", "Journal Entry"]
+				: ["Journal Entry"]
+			: ["Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry"];
+		const kind = f.employee
+			? f.salary_slip
+				? "Salary Slip"
+				: "Journal Entry"
+			: f.purchase_invoice
 			? "Purchase Invoice"
 			: f.purchase_order
 			? "Purchase Order"
@@ -220,8 +294,19 @@ const mpsa_b2b = {
 					fieldname: "kind",
 					label: __("Entry Type"),
 					reqd: 1,
-					options: ["Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry"].join("\n"),
+					options: kinds.join("\n"),
 					default: kind,
+				},
+				{
+					fieldtype: "Link",
+					fieldname: "salary_slip",
+					label: __("Salary Slip"),
+					options: "Salary Slip",
+					default: f.salary_slip,
+					depends_on: "eval:doc.kind=='Salary Slip'",
+					mandatory_depends_on: "eval:doc.kind=='Salary Slip'",
+					description: __("The salary Journal Entry clears its Payroll Entry's payroll payable."),
+					get_query: () => ({ filters: { docstatus: 1, employee: f.employee } }),
 				},
 				{
 					fieldtype: "Link",
@@ -229,7 +314,7 @@ const mpsa_b2b = {
 					label: __("Supplier"),
 					options: "Supplier",
 					default: f.supplier,
-					depends_on: "eval:doc.kind!='Journal Entry'",
+					depends_on: "eval:doc.kind!='Journal Entry' && doc.kind!='Salary Slip'",
 				},
 				{
 					fieldtype: "Link",

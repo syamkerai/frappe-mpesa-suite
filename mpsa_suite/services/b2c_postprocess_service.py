@@ -66,7 +66,13 @@ def _book(disbursement_name: str, ref) -> None:
     submit = settings.submit_b2c_accounting_entries
 
     doctype = ref.reference_doctype
-    if doctype == "Salary Slip":
+    if doctype == "Salary Slip" and ref.get("mpesa_schedule_line"):
+        # paid from a payment schedule: the salary Journal Entry (round-off, payroll payable once,
+        # party per Payroll Settings); B2C payouts made by hand keep journal_service's entry
+        from mpsa_suite.money_out.salary_entries import for_b2c
+
+        for_b2c(b2c_disb, ref, submit)
+    elif doctype == "Salary Slip":
         create_journal_entry(b2c_disb, ref, submit)
     elif doctype in (
         "Employee Advance",
@@ -302,7 +308,27 @@ def booked_docstatus(disbursement_name: str, ref, for_update: bool = False) -> i
     value = rows[0][0] if rows else None
     if value is not None:
         return int(value)
+    if ref.reference_doctype == "Salary Slip":
+        # a payment schedule's salary entry names no employee when Payroll Settings books payroll
+        # without one: found by its receipt and its tag (the disbursement)
+        value = _tagged_salary_entry(disbursement_name, receipt, entries.locking)
+        if value is not None:
+            return value
     return _spare_entry_docstatus(disbursement_name, ref, receipt, entries)
+
+
+def _tagged_salary_entry(disbursement_name: str, receipt: str, locking: str) -> int | None:
+    if not frappe.get_meta("Journal Entry Account").has_field("b2c_payment_disbursement"):
+        return None
+    rows = frappe.db.sql(
+        f"""SELECT MAX(je.docstatus) FROM `tabJournal Entry` je
+        JOIN `tabJournal Entry Account` jea ON jea.parent = je.name
+        WHERE jea.b2c_payment_disbursement = %s AND COALESCE(jea.party, '') = '' AND je.docstatus < 2
+          AND je.cheque_no = %s {locking}""",
+        (disbursement_name, receipt),
+    )
+    value = rows[0][0] if rows else None
+    return int(value) if value is not None else None
 
 
 def _disbursement_rows(filters: dict, fields: list, for_update: bool = False) -> list:

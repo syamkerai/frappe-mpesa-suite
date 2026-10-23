@@ -66,6 +66,9 @@ doctype_js = {
     "Supplier": "public/js/supplier.js",
     "Purchase Invoice": "public/js/purchase_invoice.js",
     "Purchase Order": "public/js/purchase_order.js",
+    # HRMS only: a form that does not exist on the site never loads its script
+    "Payroll Entry": "public/js/payroll_entry.js",
+    "Employee": "public/js/employee.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -200,6 +203,10 @@ doc_events = {
         "before_validate": "mpsa_suite.money_in.payment_request.before_validate",
         "before_insert": "mpsa_suite.money_in.payment_request.before_insert",
     },
+    # HRMS: no cancel while M-Pesa salaries of the payroll are paid or on their way
+    "Payroll Entry": {
+        "before_cancel": "mpsa_suite.money_out.payroll.before_cancel",
+    },
 }
 
 # Scheduled Tasks
@@ -250,6 +257,8 @@ override_doctype_dashboards = {
     "Supplier": "mpsa_suite.money_out.supplier_dashboard.get_data",
     "Purchase Invoice": "mpsa_suite.money_out.document_dashboards.get_data",
     "Purchase Order": "mpsa_suite.money_out.document_dashboards.get_data",
+    "Employee": "mpsa_suite.money_out.payroll.get_employee_dashboard_data",
+    "Payroll Entry": "mpsa_suite.money_out.payroll.get_dashboard_data",
 }
 
 # exempt linked doctypes from being automatically cancelled

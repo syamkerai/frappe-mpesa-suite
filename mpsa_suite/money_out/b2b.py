@@ -10,6 +10,12 @@ and again right before sending: the approved destination, the shortcode, the sup
 the document, and what is left to pay with B2B, B2C, draft entries and order advances counted
 (money_out.owed). The entry is booked when M-Pesa confirms, or later (money_out.b2b_entries).
 
+A request may instead pay an employee, never both: to the employee's approved bank paybill
+account (Employee M-Pesa Account), optionally for a Salary Slip (HRMS), which it may not pay past
+what the slip has left (B2B, B2C and planned lines counted, under the slip's lock). A salary is
+booked with a salary Journal Entry that clears the Payroll Entry's payroll payable
+(money_out.salary_entries); a payment to an employee with no slip waits for Make Entry.
+
 A request made by the payment schedule (money_out.schedule) is submitted by Pay Selected but not
 sent then: send_deferred sends it from a job, after committing its send_started_on marker, and
 never before its line's planned day.
@@ -25,7 +31,7 @@ from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..permissions import PAYOUT_ROLES, require
 from ..utils.phone import normalize_msisdn
-from . import owed, supplier_accounts
+from . import employee_accounts, owed, supplier_accounts
 from .common import NOT_INITIATED, apply_ack, callback_url, initiator_settings, lock_for_send, log_callback, post
 from .results import find_request
 
@@ -76,8 +82,7 @@ def send_deferred(name: str) -> bool:
     frappe.db.set_value(B2B_DOCTYPE, name, "send_started_on", marker, update_modified=False)
     frappe.db.commit()  # the marker stays whatever happens next
     # the document, read without a lock, to take its lock before any row's (R4)
-    dt, dn = owed.document_of(frappe.db.get_value(B2B_DOCTYPE, name, ["purchase_invoice", "purchase_order"],
-                                                  as_dict=True) or frappe._dict())
+    dt, dn = lock_document(name)
     frappe.db.savepoint("mpsa_b2b_send_checks")
     try:
         with contextlib.ExitStack() as stack:
@@ -104,6 +109,19 @@ def send_deferred(name: str) -> bool:
     apply_ack(doc, data, error)  # never raises; queues the line's update
     frappe.db.commit()
     return True
+
+
+def lock_document(name: str) -> tuple:
+    """(doctype, name) whose per-document lock a request's send or booking takes first (R4): its
+    invoice or order, or the Salary Slip it pays. Read without a lock."""
+    fields = ["purchase_invoice", "purchase_order"]
+    if frappe.get_meta(B2B_DOCTYPE).has_field("salary_slip"):
+        fields.append("salary_slip")
+    values = frappe.db.get_value(B2B_DOCTYPE, name, fields, as_dict=True) or frappe._dict()
+    dt, dn = owed.document_of(values)
+    if not dt and cstr(values.get("salary_slip")).strip():
+        return owed.SLIP, values.salary_slip
+    return dt, dn
 
 
 def _fail_unsent(name: str, marker, message: str) -> None:
@@ -197,7 +215,11 @@ def _record_result(result: dict, ref: str | None) -> None:
 
     if outcome == "Paid":
         try:
-            supplier_accounts.record_receiver_name(doc, values.get("ReceiverPartyPublicName"))
+            if is_employee(doc):
+                employee_accounts.record_receiver_name(doc, doc.get("employee_mpesa_account"),
+                                                       values.get("ReceiverPartyPublicName"))
+            else:
+                supplier_accounts.record_receiver_name(doc, values.get("ReceiverPartyPublicName"))
         except Exception:
             frappe.log_error(title="M-Pesa B2B receiver name check failed",
                              message=f"{doc.name}\n{frappe.get_traceback()}")
@@ -218,9 +240,24 @@ def handle_queue_timeout(payload: dict, ref: str | None) -> None:
 
 
 # ---------------------------------------------------------------- validation
+def is_employee(doc) -> bool:
+    return bool(cstr(doc.get("employee")).strip())
+
+
+def salary_slip(doc) -> str | None:
+    return cstr(doc.get("salary_slip")).strip() or None
+
+
 def validate_request(doc, at_submit: bool = False) -> None:
     """Every check a request must pass: on save, again at submit (under the document's lock) and,
     through check_ready_to_send, again right before the money leaves."""
+    if is_employee(doc):
+        _validate_employee_request(doc, at_submit)
+        return
+    if salary_slip(doc):
+        frappe.throw("A Salary Slip is paid to its employee: pick the Employee.")
+    if doc.get("employee_mpesa_account"):
+        frappe.throw("An Employee M-Pesa Account is paid to its employee: pick the Employee.")
     dt, dn = owed.linked_document(doc)
     if dt:
         _take_from_document(doc, dt, dn)
@@ -242,6 +279,59 @@ def validate_request(doc, at_submit: bool = False) -> None:
             _check_document(doc, dt, dn)
     if dt == "Purchase Invoice":
         _check_earlier_payouts(doc, at_submit)
+
+
+def _validate_employee_request(doc, at_submit: bool) -> None:
+    """A payment to an employee's approved bank paybill account, optionally for a Salary Slip."""
+    if cstr(doc.get("supplier")).strip() or doc.get("supplier_mpesa_account"):
+        frappe.throw("Pay a supplier or an employee, not both.")
+    if cstr(doc.get("purchase_invoice")).strip() or cstr(doc.get("purchase_order")).strip():
+        frappe.throw("A payment to an employee cannot pay a Purchase Invoice or Purchase Order.")
+    slip = salary_slip(doc)
+    if slip:
+        _take_from_slip(doc, slip)
+    employee_accounts.apply_destination(doc)
+    _check_fields(doc)
+    _check_settings(doc, fill=True)
+    if not slip:
+        doc.entry_mode = LATER  # nothing says what it paid for until someone makes the entry
+    elif not doc.get("entry_mode"):
+        doc.entry_mode = AUTO
+    if slip:
+        if at_submit:
+            with owed.slip_lock(slip):
+                _check_slip(doc, slip, for_update=True)
+        else:
+            _check_slip(doc, slip)
+
+
+def _take_from_slip(doc, slip: str) -> None:
+    """Company and Payroll Entry come from the slip, whose employee must be the request's."""
+    values = owed.read_slip(slip)
+    if not values:
+        frappe.throw(f"Salary Slip {slip} not found")
+    if values.employee != doc.employee:
+        frappe.throw(f"{slip} belongs to {values.employee}, not {doc.employee}.")
+    doc.company = values.company or doc.company
+    if frappe.get_meta(B2B_DOCTYPE).has_field("payroll_entry"):
+        doc.payroll_entry = values.get("payroll_entry")
+
+
+def _check_slip(doc, slip: str, for_update: bool = False) -> None:
+    """The slip can be paid and has at least this amount left, its payouts on their way and its
+    planned lines counted (under the slip's lock at submit and send: payouts first, R4)."""
+    result = owed.slip_left_to_pay(slip, exclude_request=doc.name, exclude_line=doc.get("schedule_line") or None,
+                                   for_update=for_update)
+    values = owed.read_slip(slip, for_update=for_update)
+    problems = owed.slip_problems(values)
+    if problems:
+        frappe.throw(problems[0])
+    if values.employee != doc.employee:
+        frappe.throw(f"{slip} belongs to {values.employee}, not {doc.employee}.")
+    if values.get("company") and doc.company != values.company:
+        frappe.throw(f"{slip} belongs to {values.company}, not {doc.company or 'no company'}.")
+    if flt(doc.amount) > result.left + 0.001:
+        frappe.throw(f"KES {owed.money(doc.amount)} is more than is left to pay. {owed.explain(slip, result)}")
 
 
 def _take_from_document(doc, dt: str, dn: str) -> None:
@@ -352,6 +442,9 @@ def check_ready_to_send(doc) -> None:
     """Every check once more, right before the money leaves. Changes nothing and only throws,
     always before post(): server code may submit with flags.ignore_validate."""
     require(PAYOUT_ROLES)
+    if is_employee(doc):
+        _check_employee_ready(doc)
+        return
     supplier_accounts.check_before_send(doc)
     if not doc.mpesa_settings:
         frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")
@@ -363,6 +456,41 @@ def check_ready_to_send(doc) -> None:
     if dt:
         with owed.doc_lock(dt, dn):
             _check_document(doc, dt, dn, for_update=True)
+
+
+def _check_employee_ready(doc) -> None:
+    if cstr(doc.get("supplier")).strip() or owed.document_of(doc) != (None, None):
+        frappe.throw("Pay a supplier or an employee, not both.")
+    employee_accounts.check_before_send(doc)
+    if not doc.mpesa_settings:
+        frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")
+    _check_settings(doc, fill=False)
+    slip = salary_slip(doc)
+    if slip:
+        with owed.slip_lock(slip):
+            _check_slip(doc, slip, for_update=True)
+
+
+@frappe.whitelist()
+def salary_left(salary_slip: str, request: str | None = None) -> dict:
+    """What the request form shows for a Salary Slip: the employee, the company, what is left to
+    pay and why, and anything that stops it being paid."""
+    frappe.has_permission(owed.SLIP, "read", doc=salary_slip, throw=True)
+    values = owed.read_slip(salary_slip)
+    if not values:
+        frappe.throw(f"Salary Slip {salary_slip} not found")
+    result = owed.slip_left_to_pay(salary_slip, exclude_request=request)
+    return {
+        "employee": values.employee,
+        "company": values.company,
+        "payroll_entry": values.get("payroll_entry"),
+        "owed": result.owed,
+        "left": result.left,
+        "parts": [p.label for p in result.parts],
+        "problems": owed.slip_problems(values),
+        "employee_mpesa_account": employee_accounts.pa.pick_account(
+            employee_accounts.ACCOUNT_DOCTYPE, values.employee, (employee_accounts.BANK,)),
+    }
 
 
 @frappe.whitelist()

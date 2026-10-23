@@ -28,6 +28,7 @@
   "status",
   "column_break_oy1c",
   "amended_from",
+  "payment_schedule",
   "more_info_section",
   "retry_count",
   "column_break_rpjq",
@@ -77,6 +78,17 @@
    "print_hide": 1,
    "read_only": 1,
    "search_index": 1
+  },
+  {
+   "fieldname": "payment_schedule",
+   "fieldtype": "Link",
+   "label": "Payment Schedule",
+   "options": "M-Pesa Payment Schedule",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "depends_on": "eval:doc.payment_schedule",
+   "description": "Made by Pay Selected for the phone lines of this M-Pesa Payment Schedule."
   },
   {
    "default": "Mpesa Disbursement",
@@ -227,7 +239,7 @@
    "table_fieldname": "references"
   }
  ],
- "modified": "2026-10-23 19:00:00.000000",
+ "modified": "2026-10-23 22:00:00.000000",
  "modified_by": "a@d.com",
  "module": "Mpsa Suite",
  "name": "B2C Payment Disbursement",

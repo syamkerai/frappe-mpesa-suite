@@ -20,6 +20,8 @@
   "company",
   "supplier",
   "supplier_mpesa_account",
+  "employee",
+  "employee_mpesa_account",
   "column_break_b",
   "purchase_invoice",
   "purchase_order",
@@ -73,17 +75,17 @@
    "default": "BusinessPayBill",
    "reqd": 1,
    "in_list_view": 1,
-   "read_only_depends_on": "eval:doc.supplier_mpesa_account"
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account || doc.employee_mpesa_account"
   },
   {
    "fieldname": "receiver_shortcode",
    "fieldtype": "Data",
-   "label": "Supplier Paybill / Till",
+   "label": "Paybill / Till",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "read_only_depends_on": "eval:doc.supplier_mpesa_account",
-   "description": "Copied from the supplier's approved M-Pesa account."
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account || doc.employee_mpesa_account",
+   "description": "Copied from the approved M-Pesa account."
   },
   {
    "fieldname": "account_reference",
@@ -91,7 +93,7 @@
    "label": "Account Number",
    "mandatory_depends_on": "eval:doc.command_id==\"BusinessPayBill\"",
    "depends_on": "eval:doc.command_id==\"BusinessPayBill\"",
-   "read_only_depends_on": "eval:doc.supplier_mpesa_account"
+   "read_only_depends_on": "eval:doc.supplier_mpesa_account || doc.employee_mpesa_account"
   },
   {
    "fieldname": "amount",
@@ -140,7 +142,7 @@
   {
    "fieldname": "party_section",
    "fieldtype": "Section Break",
-   "label": "Supplier"
+   "label": "Payee"
   },
   {
    "fieldname": "company",
@@ -154,7 +156,8 @@
    "label": "Supplier",
    "options": "Supplier",
    "in_standard_filter": 1,
-   "search_index": 1
+   "search_index": 1,
+   "depends_on": "eval:!doc.employee"
   },
   {
    "fieldname": "supplier_mpesa_account",
@@ -162,7 +165,27 @@
    "label": "Supplier M-Pesa Account",
    "options": "Supplier M-Pesa Account",
    "description": "Approved paybill / till of the supplier. The number and account are taken from it.",
-   "search_index": 1
+   "search_index": 1,
+   "depends_on": "eval:!doc.employee"
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "in_standard_filter": 1,
+   "search_index": 1,
+   "depends_on": "eval:!doc.supplier",
+   "description": "Pays an employee instead of a supplier: to the employee's approved bank paybill account."
+  },
+  {
+   "fieldname": "employee_mpesa_account",
+   "fieldtype": "Link",
+   "label": "Employee M-Pesa Account",
+   "options": "Employee M-Pesa Account",
+   "search_index": 1,
+   "depends_on": "eval:doc.employee",
+   "description": "Approved bank paybill account of the employee. The paybill and account number are taken from it."
   },
   {
    "fieldname": "column_break_b",
@@ -174,7 +197,8 @@
    "label": "Purchase Invoice",
    "options": "Purchase Invoice",
    "search_index": 1,
-   "description": "Optional. The payment is allocated to it and cannot exceed what is left to pay."
+   "description": "Optional. The payment is allocated to it and cannot exceed what is left to pay.",
+   "depends_on": "eval:!doc.employee"
   },
   {
    "fieldname": "payment_entry",
@@ -345,7 +369,7 @@
    "label": "Purchase Order",
    "options": "Purchase Order",
    "search_index": 1,
-   "depends_on": "eval:!doc.purchase_invoice",
+   "depends_on": "eval:!doc.purchase_invoice && !doc.employee",
    "description": "Optional. Paid as an advance on the order; the invoice made from it picks it up under Get Advances."
   },
   {
@@ -451,7 +475,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-23 19:00:00.000000",
+ "modified": "2026-10-23 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2B Payment Request",

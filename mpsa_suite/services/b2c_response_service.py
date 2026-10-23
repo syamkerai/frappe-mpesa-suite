@@ -38,6 +38,9 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
     """
     req = frappe.get_doc(B2C_REQUEST_DOCTYPE, b2c_request_name)
     ref_name = req.b2c_payment_disbursement_reference
+    line = _schedule_line(ref_name)
+    was_paid = bool(line) and frappe.db.get_value(
+        "B2C Payment Disbursement Reference", ref_name, "payment_status") == "Paid"
 
     if req.status in ("Paid", "Failed") and ref_name:
         update = {
@@ -55,6 +58,8 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
             update["b2c_disbursement_request"] = req.name
 
         frappe.db.set_value("B2C Payment Disbursement Reference", ref_name, update)
+        if line and req.status == "Paid" and not was_paid and req.docstatus == 1:
+            _check_receiver_name(req, line)  # once, when the row first shows Paid
         frappe.db.commit()
 
     if enqueue_next and req.status == "Paid":
@@ -66,6 +71,30 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
         handle_successful_payment(req.b2c_payment_disbursement, ref_name)
         # the payout's statement lines, reconciled with the entry just booked
         after_payout(B2C_REQUEST_DOCTYPE, req.name)
+
+    if line:
+        from mpsa_suite.money_out.schedule import sync_b2c_line_later
+
+        sync_b2c_line_later(ref_name)  # the payment schedule's line shows the result and its entry
+
+
+def _schedule_line(ref_name: str | None) -> str | None:
+    """The M-Pesa Payment Schedule line a disbursement row pays, or None."""
+    if not ref_name or not frappe.get_meta("B2C Payment Disbursement Reference").has_field("mpesa_schedule_line"):
+        return None
+    return frappe.db.get_value("B2C Payment Disbursement Reference", ref_name, "mpesa_schedule_line") or None
+
+
+def _check_receiver_name(req, line: str) -> None:
+    """The name M-Pesa paid against the employee's approved phone account: a mismatch blocks the
+    account until a manager confirms it. Never raises."""
+    try:
+        from mpsa_suite.money_out import employee_accounts
+
+        account = frappe.db.get_value("M-Pesa Payment Schedule Line", line, "payee_account")
+        employee_accounts.record_receiver_name(req, account, req.receiver_public_name)
+    except Exception:
+        frappe.log_error(title="M-Pesa B2C receiver name check failed", message=f"{req.name}\n{frappe.get_traceback()}")
 
 
 def _link_is_free(ref_name: str) -> bool:

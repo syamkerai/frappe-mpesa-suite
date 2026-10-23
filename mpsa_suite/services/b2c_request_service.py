@@ -45,6 +45,11 @@ def create_b2c_request(doc_name: str) -> dict:
     if doc.status not in ("Not Initiated", "", None):
         frappe.throw(f"B2C request {doc_name} is {doc.status}; only unsent requests are sent")
     validate_b2c_amount_and_party(doc)
+    # a payout of a payment schedule line: never before its planned day, and only to the line's
+    # approved phone (money_out.schedule)
+    from mpsa_suite.money_out.schedule import assert_b2c_line_due
+
+    assert_b2c_line_due(doc)
 
     if not doc.mpesa_settings:
         frappe.throw(f"Select the Mpesa Settings to pay from on {doc_name}")

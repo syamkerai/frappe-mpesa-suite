@@ -812,6 +812,7 @@ def connector(monkeypatch):
     try:
         frappe.db.commit = lambda: None
         frappe.after_commit = []
+        frappe.get_meta = lambda doctype: types.SimpleNamespace(has_field=lambda field: True)
         mod = importlib.import_module(CONNECTOR)
         monkeypatch.setattr(mod, "update_integration_request", lambda *a, **kw: None)
         monkeypatch.setattr(mod, "create_request_log", lambda **kw: fake_frappe._dict(name="IR-1"))

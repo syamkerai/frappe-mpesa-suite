@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Astral Industries Limited and contributors
 # For license information, please see license.txt
 
-"""What M-Pesa Payment Schedules have due, and what each shortcode can pay.
+"""What M-Pesa Payment Schedules have due, and what each shortcode can pay (Working for B2B
+lines, Utility for B2C phone lines).
 
 Ticked lines are paid with Pay Selected (money_out.schedule.prepare_payment, then
 confirm_payment after the 5-second confirm step), or moved to another day with Move Date.
@@ -46,7 +47,9 @@ def columns() -> list:
         {"fieldname": "status", "label": "Status", "fieldtype": "Data", "width": 90},
         {"fieldname": "problem", "label": "Problem", "fieldtype": "Data", "width": 320},
         {"fieldname": "prepared_by", "label": "Prepared By", "fieldtype": "Link", "options": "User", "width": 150},
-        {"fieldname": "request", "label": "B2B Request", "fieldtype": "Link", "options": s.B2B, "width": 160},
+        {"fieldname": "request_doctype", "label": "Payout Type", "fieldtype": "Data", "hidden": 1},
+        {"fieldname": "request", "label": "Payout", "fieldtype": "Dynamic Link", "options": "request_doctype",
+         "width": 160},
     ]
 
 
@@ -62,15 +65,19 @@ def _rows(filters) -> list:
     elif show == IN_PROGRESS:
         where.append("l.status IN %(in_progress)s")
         values["in_progress"] = s.IN_PROGRESS
-    for field, column in (("company", "p.company"), ("route", "l.route"), ("pay_from", "p.b2b_settings"),
-                          ("schedule", "l.parent")):
+    for field, column in (("company", "p.company"), ("route", "l.route"), ("schedule", "l.parent")):
         if filters.get(field):
             where.append(f"{column} = %({field})s")
             values[field] = filters.get(field)
+    if filters.get("pay_from"):
+        # a phone line is paid from Pay From (B2C), the others from Pay From (B2B)
+        where.append("((l.route IN %(b2c_routes)s AND p.b2c_settings = %(pay_from)s)"
+                     " OR (l.route NOT IN %(b2c_routes)s AND p.b2b_settings = %(pay_from)s))")
+        values.update(pay_from=filters.get("pay_from"), b2c_routes=s.B2C_ROUTES)
     fields = ", ".join(f"l.`{f}`" for f in s.LINE_FIELDS)
     return frappe.db.sql(
         f"""
-        SELECT {fields}, p.company, p.b2b_settings, p.title, p.closed
+        SELECT {fields}, p.company, p.b2b_settings, p.b2c_settings, p.title, p.closed
         FROM `tab{s.LINE}` l
         JOIN `tab{s.SCHEDULE}` p ON p.name = l.parent
         WHERE {" AND ".join(where)}
@@ -84,10 +91,10 @@ def _rows(filters) -> list:
 
 def _row(line) -> dict:
     header = frappe._dict(name=line.parent, title=line.title, company=line.company, b2b_settings=line.b2b_settings,
-                          closed=line.closed)
+                          b2c_settings=line.b2c_settings, closed=line.closed)
     today = getdate(nowdate())
     problem, kind, left = cstr(line.last_problem), "note", None
-    if line.status == s.PLANNED and not line.request:
+    if line.status == s.PLANNED and not s._sent(line):
         check = s.line_problem(line, header)
         left = check.left
         if check.problem:
@@ -116,8 +123,10 @@ def _row(line) -> dict:
         "problem_kind": kind,
         "payable": 1 if kind in ("ok", "warning") else 0,
         "prepared_by": line.prepared_by,
-        "request": line.request,
-        "pay_from": line.b2b_settings,
+        "request_doctype": s.B2B if line.request else (s.B2C_REQUEST if line.b2c_request else
+                                                       (s.B2C_DOCTYPE if line.b2c_disbursement else None)),
+        "request": line.request or line.b2c_request or line.b2c_disbursement,
+        "pay_from": s.pay_from(header, line),
     }
 
 

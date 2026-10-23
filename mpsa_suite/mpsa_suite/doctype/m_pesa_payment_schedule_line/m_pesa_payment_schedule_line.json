@@ -35,7 +35,10 @@
   "approved_by",
   "approved_on",
   "batch",
-  "attempts"
+  "attempts",
+  "b2c_disbursement",
+  "b2c_row",
+  "b2c_request"
  ],
  "fields": [
   {
@@ -51,7 +54,7 @@
    "fieldname": "party_type",
    "fieldtype": "Select",
    "label": "Party Type",
-   "options": "\nSupplier",
+   "options": "\nSupplier\nEmployee",
    "default": "Supplier"
   },
   {
@@ -67,7 +70,7 @@
    "fieldname": "payee_name",
    "fieldtype": "Data",
    "label": "Payee",
-   "description": "Filled from the supplier. For a number not saved on a supplier, who is being paid."
+   "description": "Filled from the supplier or employee. For a number not saved on a supplier, who is being paid."
   },
   {
    "fieldname": "payee_account_doctype",
@@ -75,8 +78,7 @@
    "label": "Approved Account Type",
    "options": "DocType",
    "hidden": 1,
-   "read_only": 1,
-   "default": "Supplier M-Pesa Account"
+   "read_only": 1
   },
   {
    "fieldname": "payee_account",
@@ -84,13 +86,13 @@
    "label": "Approved Account",
    "options": "payee_account_doctype",
    "depends_on": "eval:doc.party",
-   "description": "The supplier's approved M-Pesa account (its default when left empty). The paybill or till is taken from it."
+   "description": "The supplier's or employee's approved M-Pesa account (the default one when left empty). The paybill, till or phone is taken from it."
   },
   {
    "fieldname": "route",
    "fieldtype": "Select",
    "label": "Route",
-   "options": "\nB2B Paybill\nB2B Till",
+   "options": "\nB2B Paybill\nB2B Till\nB2C Phone",
    "read_only": 1,
    "in_list_view": 1,
    "columns": 1
@@ -138,8 +140,8 @@
    "fieldname": "reference_doctype",
    "fieldtype": "Select",
    "label": "Pays",
-   "options": "\nPurchase Invoice\nPurchase Order",
-   "description": "Optional. The invoice is paid, or the order is paid in advance, as with Pay via M-Pesa (B2B)."
+   "options": "\nPurchase Invoice\nPurchase Order\nSalary Slip",
+   "description": "Optional for suppliers. The invoice is paid, or the order is paid in advance, as with Pay via M-Pesa (B2B). An employee's salary pays its Salary Slip (needed for a phone)."
   },
   {
    "fieldname": "reference_name",
@@ -265,11 +267,37 @@
    "default": "0",
    "read_only": 1,
    "no_copy": 1
+  },
+  {
+   "fieldname": "b2c_disbursement",
+   "fieldtype": "Link",
+   "label": "B2C Disbursement",
+   "options": "B2C Payment Disbursement",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "b2c_row",
+   "fieldtype": "Data",
+   "label": "B2C Disbursement Row",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "b2c_request",
+   "fieldtype": "Link",
+   "label": "B2C Request",
+   "options": "B2C Disbursement Request",
+   "read_only": 1,
+   "no_copy": 1
   }
  ],
  "istable": 1,
  "links": [],
- "modified": "2026-10-23 18:00:00.000000",
+ "modified": "2026-10-23 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Payment Schedule Line",
