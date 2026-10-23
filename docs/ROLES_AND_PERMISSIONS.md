@@ -106,6 +106,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | B2C Disbursement Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcsxadRepmh` | `rwcRepmh` | `rwcsxadRepmh` | `rwcRepmh` |  |  |  |
 | B2C Payment Disbursement | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcsxadRepmh` |  | `rwcsxadRepmh` |  |  |  |  |
+| M-Pesa Payment Schedule | `rwcdRepmh` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa B2B Payment Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcsxadRepmh` | `rwcdRep` |  |  |  |  |  |
@@ -143,6 +144,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | B2C Disbursement Summary | System Manager, Accounts Manager, HR Manager, M-Pesa Manager, M-Pesa Payer, M-Pesa Viewer |
 | C2B Payment Summary Group by Customer | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
 | C2B Reconciliation Report | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
+| M-Pesa Payments Due | System Manager, Accounts Manager, Accounts User, M-Pesa Manager, M-Pesa Payer, M-Pesa Viewer |
 | STK Push Request Status | System Manager, Accounts User, Accounts Manager, Sales User, M-Pesa Manager, M-Pesa Collector, M-Pesa Viewer |
 
 ### Role Profiles the suite creates
@@ -186,6 +188,11 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.close_schedule` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.confirm_payment` | PAYOUT_ROLES, the user the summary was made for | roles:PAYOUT_ROLES |
+| `money_out.schedule.move_date` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.plan_again` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.prepare_payment` | PAYOUT_ROLES + read the schedule | roles:PAYOUT_ROLES, perm |
 | `mpsa_suite.api.b2c.b2c_results_callback` | Safaricom (guest) | callback |
 | `mpsa_suite.api.m_pesa_api.account_balance_result` | Safaricom (guest) | callback |
 | `mpsa_suite.api.m_pesa_api.balance_query_callback` | Safaricom (guest) | callback |
@@ -338,8 +345,8 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 |---|---|---|
 | M-Pesa Viewer | M-Pesa workspace; lists and reports of STK, C2B, B2C, B2B, reversals; Mpesa Settings opens | Mpesa Settings shows no Consumer Key, Initiator, Security Credential or Access Token; Get Account Balance; any New/Submit/Cancel; Export of Mpesa Settings |
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
-| Accounts User (Finance Clerk) | Draft B2B request and B2C request; Make Entry / Check Entry Again; Get Account Balance; transaction status | Submitting a B2B request (needs a pay role); approving a Supplier M-Pesa Account; Mpesa Settings credentials or edit |
-| M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); submit a B2C disbursement; retry a failed B2C | Approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
+| Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Get Account Balance; transaction status | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; Mpesa Settings credentials or edit |
+| M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); Pay Selected on M-Pesa Payments Due for a line someone else prepared; submit a B2C disbursement; retry a failed B2C | Pay Selected on a line they prepared or last changed (maker-checker on); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
 | M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; Check Permissions | Approving an account they entered themselves |
 | Portal / website user | nothing M-Pesa | `/api/v2/method/Mpesa Express Request/initiate_stk_push` and `/api/v2/method/Mpesa Settings/get_account_balance?name=<record>` answer 403 |
 | Guest (logged out) | the pay page `/pay/<token>`; Safaricom callbacks keep arriving | `/api/method/mpsa_suite.utils.utils.convert_amount_to_kes?currency=USD&amount=1` answers 403 |

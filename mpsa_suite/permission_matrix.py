@@ -58,6 +58,11 @@ DOCTYPES = {
         MP: "rwsRp",
         MV: "rRep",
     },
+    # payouts Phase 2: Accounts prepare and move lines; a Payer pays them (maker-checker in schedule.py)
+    "M-Pesa Payment Schedule": {
+        SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh", AU: "rwcdRepmh",
+        MP: "rRep", MV: "rRep",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -130,6 +135,7 @@ CONFIG_ONLY = ("M-Pesa Suite Settings", "Mpesa API Client", "Mpesa Webhook Deliv
 REPORTS = {
     "B2C Disbursement Summary": (SM, AM, HM, MM, MP, MV),
     "C2B Payment Summary Group by Customer": (SM, AU, AM, SU, MM, MC, MV),
+    "M-Pesa Payments Due": (SM, AM, AU, MM, MP, MV),
     "C2B Reconciliation Report": (SM, AU, AM, SU, MM, MC, MV),
     "STK Push Request Status": (SM, AU, AM, SU, MM, MC, MV),
 }
@@ -233,6 +239,11 @@ ENDPOINTS = {
     # Money out
     "mpsa_suite.money_out.api.check_b2c_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
     "mpsa_suite.money_out.api.make_reversal": ("PAYOUT_ROLES or ADMIN_ROLES + read register", ("roles:PAYOUT_OR_ADMIN", "perm")),
+    "mpsa_suite.money_out.schedule.prepare_payment": ("PAYOUT_ROLES + read the schedule", ("roles:PAYOUT_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.confirm_payment": ("PAYOUT_ROLES, the user the summary was made for", ("roles:PAYOUT_ROLES",)),
+    "mpsa_suite.money_out.schedule.move_date": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.plan_again": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.close_schedule": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
     _D + "b2c_disbursement_request.b2c_disbursement_request.B2CDisbursementRequest.retry_failed_payment": (
         "PAYOUT_ROLES", ("roles:PAYOUT_ROLES",)),
     _D + "b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.retry_failed_payments": (
