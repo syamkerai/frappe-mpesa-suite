@@ -154,15 +154,17 @@ before_uninstall = "mpsa_suite.uninstall_guard.before_uninstall"
 
 # Permissions
 # -----------
-# Permissions evaluated in scripted ways
-
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+# Salary payouts (net pay, phone, bank account) only for HR roles and those who send or
+# administer payouts (decision D4, mpsa_suite/salary_privacy.py)
+_SALARY_DOCTYPES = (
+    "M-Pesa Payment Schedule",
+    "B2C Payment Disbursement",
+    "B2C Disbursement Request",
+    "Mpesa B2B Payment Request",
+    "Mpesa B2C Status Query",
+)
+permission_query_conditions = {dt: "mpsa_suite.salary_privacy.query_condition" for dt in _SALARY_DOCTYPES}
+has_permission = {dt: "mpsa_suite.salary_privacy.has_permission" for dt in _SALARY_DOCTYPES}
 
 # DocType Class
 # ---------------

@@ -68,13 +68,12 @@ DOCTYPES = {
         SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh", AU: "rwcdRepmh",
         MP: "rRep", MV: "rRep",
     },
-    # payouts Phase 3: HR and Accounts propose an employee's payee account; an M-Pesa Manager approves
-    # it (submit; never who entered it, party_accounts.approve), as for suppliers
+    # payouts Phase 3: HR proposes an employee's payee account; an M-Pesa Manager approves it (submit;
+    # never who entered it, party_accounts.approve). Salary data (D4): no Accounts roles, no Viewer.
     "Employee M-Pesa Account": {
         SM: ALL, MM: ALL,
-        AM: PREPARE,
-        AU: "rwcaRepmh", HM: "rwcaRepmh", HU: "rwcaRep",
-        MP: "rRep", MV: "rRep",
+        HM: "rwcaRepmh", HU: "rwcaRep",
+        MP: "rRep",
     },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
@@ -143,6 +142,16 @@ SECRET_FIELDS = {
         "token_expiry",
     ),
 }
+
+# Salary payouts (decision D4): rows that pay an employee are hidden from everyone outside
+# permissions.SALARY_ROLES but their creator (salary_privacy, registered in hooks.py).
+SALARY_DOCTYPES = (
+    "M-Pesa Payment Schedule",
+    "B2C Payment Disbursement",
+    "B2C Disbursement Request",
+    "Mpesa B2B Payment Request",
+    "Mpesa B2C Status Query",
+)
 
 # DocTypes holding Password fields that only CONFIG roles may read at all.
 CONFIG_ONLY = ("M-Pesa Suite Settings", "Mpesa API Client", "Mpesa Webhook Delivery")
@@ -366,6 +375,12 @@ def render_markdown(role_sets: dict) -> str:
     lines.append("|---|---|")
     for name in sorted(role_sets):
         lines.append(f"| `{name}` | {', '.join(role_sets[name])} |")
+    lines += ["", "### Salary payouts (decision D4)", ""]
+    lines.append("Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests "
+                 "to an employee, their status queries) are shown only to `SALARY_ROLES` and to whoever created "
+                 "them, whatever the DocType rights above: " + ", ".join(SALARY_DOCTYPES) + ". Employee M-Pesa "
+                 "Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement "
+                 "Summary leave those rows out for everyone else.")
     lines += ["", "### Report roles", ""]
     lines.append("| Report | Roles |")
     lines.append("|---|---|")

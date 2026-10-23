@@ -418,3 +418,71 @@ class TestRolesPermissions(IntegrationTestCase):
                     except Exception as e:
                         failed.append(f"{user} {label}: {type(e).__name__}: {e}")
         self.assertEqual(failed, [])
+
+    # ------------------------------------------------------------ salary payouts (decision D4)
+    def _raw(self, values, owner):
+        """A record as the payout code leaves it, without its validations (they need full fixtures)."""
+        doc = frappe.get_doc(values)
+        doc.flags.ignore_validate = doc.flags.ignore_links = doc.flags.ignore_mandatory = True
+        doc.insert(ignore_permissions=True)
+        frappe.db.set_value(doc.doctype, doc.name, "owner", owner, update_modified=False)
+        return doc.name
+
+    def test_salary_payouts_only_for_hr_and_the_pay_roles(self):
+        hr = user_for(M.HM)
+        salary = {
+            "B2C Disbursement Request": self._raw({"doctype": "B2C Disbursement Request", "amount": 1500,
+                                                   "party_type": "Employee", "party": "HR-EMP-X",
+                                                   "phone_number": "254708374149", "mpesa_settings": t.SETTINGS}, hr),
+            "Mpesa B2B Payment Request": self._raw({"doctype": "Mpesa B2B Payment Request", "amount": 1500,
+                                                    "employee": "HR-EMP-X", "mpesa_settings": t.SETTINGS}, hr),
+            "M-Pesa Payment Schedule": self._raw({"doctype": "M-Pesa Payment Schedule", "title": "T payroll",
+                                                  "company": t.COMPANY, "purpose": "Payroll"}, hr),
+        }
+        supplier = self._raw({"doctype": "B2C Disbursement Request", "amount": 1500, "party_type": "Supplier",
+                              "party": "X", "phone_number": "254708374149", "mpesa_settings": t.SETTINGS}, hr)
+        for role in (M.AU, M.AM, M.MV):
+            user = user_for(role)
+            for doctype, name in salary.items():
+                if not frappe.has_permission(doctype, "read", user=user):
+                    continue  # the role reads none of this DocType anyway
+                self.assertFalse(frappe.has_permission(doctype, "read", doc=name, user=user), f"{role} {doctype}")
+                with self.as_user(user):
+                    self.assertNotIn(name, frappe.get_list(doctype, filters={"name": name}, pluck="name"), role)
+            with self.as_user(user):
+                if frappe.has_permission("B2C Disbursement Request", "read"):
+                    self.assertIn(supplier, frappe.get_list("B2C Disbursement Request",
+                                                            filters={"name": supplier}, pluck="name"), role)
+        for role in (M.HM, M.MP, M.MM):
+            user = user_for(role)
+            for doctype, name in salary.items():
+                if frappe.has_permission(doctype, "read", user=user):
+                    self.assertTrue(frappe.has_permission(doctype, "read", doc=name, user=user), f"{role} {doctype}")
+        own = self._raw({"doctype": "B2C Disbursement Request", "amount": 900, "party_type": "Employee",
+                         "party": "HR-EMP-Y", "phone_number": "254708374149", "mpesa_settings": t.SETTINGS},
+                        user_for(M.AU))
+        self.assertTrue(frappe.has_permission("B2C Disbursement Request", "read", doc=own, user=user_for(M.AU)))
+        self.assertFalse(frappe.has_permission("Employee M-Pesa Account", "read", user=user_for(M.AU)))
+        self.assertFalse(frappe.has_permission("Employee M-Pesa Account", "read", user=user_for(M.MV)))
+
+    def test_salary_lines_stay_out_of_the_reports(self):
+        from mpsa_suite.mpsa_suite.report.b2c_disbursement_summary import b2c_disbursement_summary as summary
+        from mpsa_suite.mpsa_suite.report.m_pesa_payments_due import m_pesa_payments_due as due
+
+        hr = user_for(M.HM)
+        schedule = self._raw({"doctype": "M-Pesa Payment Schedule", "title": "T payroll lines", "company": t.COMPANY,
+                              "purpose": "Payroll", "lines": [{"planned_date": frappe.utils.nowdate(),
+                                                               "party_type": "Employee", "party": "HR-EMP-X",
+                                                               "amount": 1200, "status": "Planned"}]}, hr)
+        payroll = self._raw({"doctype": "B2C Payment Disbursement", "company": t.COMPANY, "party_type": "Employee",
+                             "posting_date": frappe.utils.nowdate(), "payment_type": "Mpesa Disbursement",
+                             "references": [{"party_type": "Employee", "party": "HR-EMP-X",
+                                             "allocated_amount": 1200}]}, hr)
+        with self.as_user(user_for(M.AU)):
+            self.assertNotIn(schedule, {r.parent for r in due._rows({"show": "All"})})
+        with self.as_user(user_for(M.MP)):
+            self.assertIn(schedule, {r.parent for r in due._rows({"show": "All"})})
+        with self.as_user(user_for(M.AM)):
+            self.assertNotIn(payroll, str(summary.get_data({})))
+        with self.as_user(user_for(M.HM)):
+            self.assertIn(payroll, str(summary.get_data({})))

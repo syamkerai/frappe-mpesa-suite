@@ -118,7 +118,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | B2C Disbursement Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
 | B2C Payment Disbursement | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
-| Employee M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` | `rRep` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` | `rwcaRepmh` | `rwcaRep` |  |  |  |
+| Employee M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` | `rRep` |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
 | M-Pesa Payment Schedule | `rwcdRepmh` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
@@ -149,6 +149,11 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | `CONFIG_ROLES` | System Manager, M-Pesa Manager |
 | `FINANCE_ROLES` | System Manager, M-Pesa Manager, Accounts Manager, Accounts User |
 | `PAYOUT_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer |
+| `SALARY_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer, HR Manager, HR User |
+
+### Salary payouts (decision D4)
+
+Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES` and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else.
 
 ### Report roles
 

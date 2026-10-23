@@ -327,3 +327,85 @@ def test_switched_off_or_administrator_is_not_checked(mc, monkeypatch):
     frappe.session.user = "payer@example.com"
     monkeypatch.setattr(module, "enabled", lambda: False)
     module.check(doc(owner="payer@example.com"))
+
+
+# ---------------------------------------------------------------- salary payouts (D4)
+@pytest.fixture
+def sal(env):
+    _, frappe = env
+    module = importlib.import_module("mpsa_suite.salary_privacy")
+    frappe.db.escape = lambda value: "'" + str(value).replace("'", "''") + "'"
+    frappe.session.user = "clerk@example.com"
+    return module, frappe
+
+
+class SalaryDoc(fake_frappe._dict):
+    def is_new(self):
+        return False
+
+
+@pytest.mark.parametrize("roles,expected", [
+    ({"HR Manager"}, True), ({"HR User"}, True), ({"M-Pesa Payer"}, True), ({"M-Pesa Manager"}, True),
+    ({"Accounts Manager"}, False), ({"Accounts User"}, False), ({"M-Pesa Viewer"}, False),
+    ({"Employee"}, False),  # reads only its own slip in HRMS
+])
+def test_who_sees_salary(sal, roles, expected):
+    module, frappe = sal
+    frappe.user_roles = roles
+    assert module.can_see_salary() is expected
+
+
+def test_administrator_sees_salary(sal):
+    module, frappe = sal
+    frappe.user_roles = set()
+    assert module.can_see_salary("Administrator")
+
+
+def test_query_condition_hides_salary_rows_but_keeps_the_users_own(sal):
+    module, frappe = sal
+    frappe.user_roles = {"Accounts User"}
+    condition = module.query_condition("clerk@example.com", doctype="B2C Disbursement Request")
+    assert "party_type, '') != 'Employee'" in condition and "owner = 'clerk@example.com'" in condition
+    assert module.query_condition("clerk@example.com", doctype="Supplier") == ""
+    frappe.user_roles = {"HR User"}
+    assert module.query_condition("clerk@example.com", doctype="B2C Disbursement Request") == ""
+
+
+@pytest.mark.parametrize("doc,salary", [
+    (dict(doctype="B2C Disbursement Request", party_type="Employee"), True),
+    (dict(doctype="B2C Disbursement Request", party_type="Supplier", reference_doctype="Salary Slip"), True),
+    (dict(doctype="B2C Disbursement Request", party_type="Supplier"), False),
+    (dict(doctype="Mpesa B2B Payment Request", employee="HR-EMP-1"), True),
+    (dict(doctype="Mpesa B2B Payment Request", supplier="ACME"), False),
+    (dict(doctype="M-Pesa Payment Schedule", purpose="Payroll", lines=[]), True),
+    (dict(doctype="M-Pesa Payment Schedule", purpose="General", lines=[dict(party_type="Employee")]), True),
+    (dict(doctype="M-Pesa Payment Schedule", purpose="General", lines=[dict(party_type="Supplier")]), False),
+    (dict(doctype="B2C Payment Disbursement", party_type="", references=[dict(reference_doctype="Salary Slip")]), True),
+    (dict(doctype="B2C Payment Disbursement", party_type="Supplier", references=[dict(party_type="Supplier")]), False),
+])
+def test_has_permission_hides_salary_documents(sal, doc, salary):
+    module, frappe = sal
+    frappe.user_roles = {"Accounts Manager"}
+    record = SalaryDoc(doc, owner="hr@example.com")
+    assert module.has_permission(record, "read") is (not salary)
+    assert module.has_permission(SalaryDoc(doc, owner="clerk@example.com"), "read") is True  # own record
+    frappe.user_roles = {"HR Manager"}
+    assert module.has_permission(record, "read") is True
+
+
+def test_salary_hooks_cover_every_salary_doctype():
+    import ast
+    from pathlib import Path
+
+    from mpsa_suite import permission_matrix as M
+
+    source = (Path(__file__).resolve().parents[2] / "mpsa_suite" / "hooks.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    listed = next(ast.literal_eval(n.value) for n in tree.body
+                  if isinstance(n, ast.Assign) and n.targets[0].id == "_SALARY_DOCTYPES")
+    assert tuple(listed) == M.SALARY_DOCTYPES
+    assert 'permission_query_conditions = {dt: "mpsa_suite.salary_privacy.query_condition"' in source
+    assert 'has_permission = {dt: "mpsa_suite.salary_privacy.has_permission"' in source
+    text = (Path(__file__).resolve().parents[2] / "mpsa_suite" / "salary_privacy.py").read_text(encoding="utf-8")
+    for doctype in M.SALARY_DOCTYPES:
+        assert f'"{doctype}":' in text, doctype

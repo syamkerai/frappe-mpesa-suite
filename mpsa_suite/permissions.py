@@ -43,6 +43,16 @@ ADMIN_ROLES = (
     "M-Pesa Manager",
 )
 
+# See salary payouts (decision D4): those who read Salary Slips in HRMS (HR User, HR Manager) and
+# those who send or administer payouts. Employee is not here: it reads only its own slip.
+SALARY_ROLES = (
+    "System Manager",
+    "M-Pesa Manager",
+    "M-Pesa Payer",
+    "HR Manager",
+    "HR User",
+)
+
 # See and change Daraja secrets and suite settings, approve what only an M-Pesa admin may.
 CONFIG_ROLES = (
     "System Manager",

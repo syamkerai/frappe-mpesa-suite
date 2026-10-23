@@ -12,6 +12,7 @@ The Problem column says why a line cannot be paid by the person looking at it no
 import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate, nowdate
 
+from mpsa_suite import salary_privacy
 from mpsa_suite.money_out import owed
 from mpsa_suite.money_out import schedule as s
 from mpsa_suite.wallet import balances
@@ -74,6 +75,11 @@ def _rows(filters) -> list:
         where.append("((l.route IN %(b2c_routes)s AND p.b2c_settings = %(pay_from)s)"
                      " OR (l.route NOT IN %(b2c_routes)s AND p.b2b_settings = %(pay_from)s))")
         values.update(pay_from=filters.get("pay_from"), b2c_routes=s.B2C_ROUTES)
+    if not salary_privacy.can_see_salary():
+        # salary payouts (decision D4): their own schedules only
+        where.append("((IFNULL(p.purpose, '') != 'Payroll' AND IFNULL(l.party_type, '') != 'Employee'"
+                     " AND IFNULL(l.reference_doctype, '') != 'Salary Slip') OR p.owner = %(user)s)")
+        values["user"] = frappe.session.user
     fields = ", ".join(f"l.`{f}`" for f in s.LINE_FIELDS)
     return frappe.db.sql(
         f"""
