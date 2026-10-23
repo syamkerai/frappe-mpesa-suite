@@ -1096,3 +1096,10 @@ b2b_pay_first_then_entry.
 - Bench tests: requests use the test company (ERPNext's v15 test setup makes another company
   the default); commits inside the code under test are replaced, so each test really rolls
   back; leftovers an interrupted run committed for the test supplier are removed first.
+
+**Review fixes (round 2)**
+- A change for B2C users: B2C, like B2B, no longer pays a further advance on a Purchase Order
+  that has any invoice, even one for part of the order. Pay the Purchase Invoice instead: an
+  advance still on its order is taken off what it owes. The release C bench test that paid a
+  second advance on a partly invoiced order now expects this refusal.
+- Bench test fix: an empty Accounting Entry status reads back as "", not None.

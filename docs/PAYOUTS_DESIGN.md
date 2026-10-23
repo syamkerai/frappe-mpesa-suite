@@ -338,6 +338,7 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
 - b2c_disbursement_request.validate_still_owed: the same addition.
 - Review round 1: for a Purchase Invoice both guards also take owed.order_advances(dn, for_update=True) off what it owes, read before the document row, as left_to_pay does.
 - Review round 1: both guards refuse a Purchase Order with per_billed > 0 (owed.billed_order, the same message as document_problems). Paying the order's invoice does not change the order's advance_paid, so without this B2C could pay an order whose invoice B2B already paid.
+- Review round 2: kept strict. A further B2C advance on a partly invoiced order is refused too (a change from release C, noted in SUITE_CHANGES); paying only its unbilled part is not built.
 
 10. UI
 - NEW public/js/purchase_invoice.js: M-Pesa > "Pay via M-Pesa (B2B)".

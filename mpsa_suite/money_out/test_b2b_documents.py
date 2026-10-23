@@ -629,7 +629,8 @@ class TestB2BDocuments(IntegrationTestCase):
         doc.entry_status = "Entry Made"
         doc.save()
         row = frappe.db.get_value(B2B, req.name, ["status", "transaction_id", "entry_status"], as_dict=True)
-        self.assertEqual((row.status, row.transaction_id, row.entry_status), ("Initiated", None, None))
+        # an empty Select reads back as ""
+        self.assertEqual((row.status, row.transaction_id, row.entry_status or None), ("Initiated", None, None))
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
 
     def test_a_cancelled_request_that_may_have_paid_cannot_be_deleted(self):

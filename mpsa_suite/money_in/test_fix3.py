@@ -371,7 +371,10 @@ class TestFix3(IntegrationTestCase):
         self.assertEqual(booked_docstatus(d1, frappe.get_doc(REF, row)), 1)
         d2 = self._disbursement("D2", docstatus=0, transaction_to_pay_against="Purchase Order")
         self._row(d2, 1, po.name, 100000, doctype="Purchase Order", party=supplier, row_docstatus=0)
-        self._check(d2)  # the next advance on the 300,000 the order still owes
+        # D1 is booked, so it is not "awaiting accounting" (checked first). The order has an
+        # invoice now: B2C, like B2B, pays the invoice instead of a further advance.
+        with self.assertRaisesRegex(frappe.ValidationError, "already has invoices"):
+            self._check(d2)
 
     # ------------------------------------------------------------ P3: reversal of an STK-booked receipt
     def _reversal_result(self, register: str) -> tuple[str, str | None]:
