@@ -9,6 +9,7 @@ replaced for the whole test, so each test rolls back; the jobs the code queues a
 test. Unit coverage is in tests/unit/test_schedule.py.
 """
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -52,6 +53,20 @@ def _user(email: str, roles: tuple) -> None:
         return
     frappe.get_doc({"doctype": "User", "email": email, "first_name": email.split("@")[0], "send_welcome_email": 0,
                     "roles": [{"role": r} for r in roles]}).insert(ignore_permissions=True)
+
+
+@contextmanager
+def _roles_checked():
+    """v15's frappe.only_for lets everyone through while flags.in_test is set (v16's does not), so
+    a refusal by role is seen only with it off. Saved and put back by hand: patch.object would
+    delete the key from frappe's _dict on exit and leave in_test off for the rest of the run."""
+    flags = frappe.local.flags
+    was = flags.in_test
+    flags.in_test = False
+    try:
+        yield
+    finally:
+        flags.in_test = was
 
 
 class TestPaymentSchedule(IntegrationTestCase):
@@ -338,7 +353,8 @@ class TestPaymentSchedule(IntegrationTestCase):
         self._send(self._pay(first.lines))
         sent = frappe.db.get_value(LINE, first.lines[0].name, "*", as_dict=True)
         second = frappe.get_doc(SCHEDULE, self._schedule((1000, None, 1)).name)
-        second.append("lines", {**{f: sent[f] for f in schedule.EDITABLE}, "name": sent.name})
+        # with the derived fields too: Frappe checks the account's Dynamic Link before validate
+        second.append("lines", {**{f: sent[f] for f in (*schedule.EDITABLE, *schedule.DERIVED)}, "name": sent.name})
         frappe.set_user(PREPARER)
         try:
             self.assertRaisesRegex(frappe.ValidationError, f"is a line of {first.name}: it cannot be moved",
@@ -357,7 +373,8 @@ class TestPaymentSchedule(IntegrationTestCase):
         frappe.db.set_value(B2B, name, "send_started_on", now_datetime(), update_modified=False)
         frappe.set_user(PAYER)  # M-Pesa Payer has cancel on the request
         try:
-            self.assertRaises(frappe.PermissionError, frappe.get_doc(B2B, name).cancel)
+            with _roles_checked():
+                self.assertRaises(frappe.PermissionError, frappe.get_doc(B2B, name).cancel)
         finally:
             frappe.set_user("Administrator")
         self.assertEqual(frappe.db.get_value(B2B, name, "docstatus"), 1)
