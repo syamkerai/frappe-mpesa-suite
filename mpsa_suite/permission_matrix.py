@@ -38,7 +38,6 @@ HU = "HR User"
 SU = "Sales User"
 PM = "Purchase Manager"
 PU = "Purchase User"
-EM = "Employee"  # ERPNext's smallest role that reads Company (every page with a Company filter needs it)
 
 # Column order of the matrix in the doc.
 ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
@@ -153,14 +152,14 @@ REPORTS = {
 }
 
 # Role Profiles the suite creates once (never changed after; see access.ensure_role_profiles).
-# On Frappe 15 a user's Role Profile REPLACES all their roles, so each is a complete job, with an
-# ERPNext role that reads Company (Accounts User, Sales User or Employee).
+# On Frappe 15 a user's Role Profile REPLACES all their roles, so each is a complete job: the work
+# profiles carry the ERPNext role whose documents that job opens (Accounts User, Sales User).
 ROLE_PROFILES = {
     "M-Pesa Finance Clerk": (AU, MC, MV),
     "M-Pesa Paying Officer": (AU, MP, MV),
     "M-Pesa Approver": (AU, MM, MV),
     "M-Pesa Cashier": (SU, MC),
-    "M-Pesa Auditor": (MV, EM),
+    "M-Pesa Auditor": (MV,),
 }
 
 # ---------------------------------------------------------------- endpoints

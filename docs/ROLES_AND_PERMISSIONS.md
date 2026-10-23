@@ -95,14 +95,15 @@ Checked and found sound (no change):
 roles**, so give a profile only to people whose whole job it describes; for everyone else tick
 the M-Pesa role in the user's Roles list. Frappe 16 allows several profiles per user.
 
-**Every M-Pesa user also holds an ERPNext role.** The suite's roles grant M-Pesa records only.
-ERPNext's own records stay under ERPNext's roles: Company, customers, suppliers, invoices,
-Payment Requests and Entries, Mode of Payment. Frappe refuses pages and report rows that show
-a record the user cannot read. ERPNext lets Employee, Accounts User, Sales User, Purchase User,
-Stock User and Projects User read Company. Finance staff hold Accounts User, cashiers Sales User,
-and a read-only M-Pesa Viewer at least Employee. Each Role Profile below includes one. The payouts
-browser check met this: a user with only M-Pesa Payer was refused on Company on the M-Pesa
-Payments Due page.
+**ERPNext records stay under ERPNext's roles.** The suite's roles grant M-Pesa records: Company,
+customers, suppliers, invoices, Payment Requests and Entries and Mode of Payment keep ERPNext's own
+permissions, and Frappe refuses a page or report row that shows a record the user cannot read
+(G14). Every desk user can pick a Company in a filter (Frappe's automatic Desk User role holds
+`select` on it), and the bench tests replay the M-Pesa Payments Due page's server calls for a
+user with only M-Pesa Payer without a refusal. ERPNext's own documents, and the four upstream
+reports that show them, need the ERPNext role of that job: Accounts User for finance staff, Sales
+User for cashiers; the work Role Profiles include it. ERPNext's Employee role is not a general
+base role: ERPNext removes it from any user not linked to an Employee record.
 
 ## 4. Who may do what
 
@@ -166,7 +167,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | M-Pesa Paying Officer | Accounts User, M-Pesa Payer, M-Pesa Viewer |
 | M-Pesa Approver | Accounts User, M-Pesa Manager, M-Pesa Viewer |
 | M-Pesa Cashier | Sales User, M-Pesa Collector |
-| M-Pesa Auditor | M-Pesa Viewer, Employee |
+| M-Pesa Auditor | M-Pesa Viewer |
 
 ### Whitelisted endpoints
 
@@ -343,8 +344,8 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 4. Assign roles: User > (the person) > Roles: tick the M-Pesa roles from step 1. Use a Role
    Profile (M-Pesa Finance Clerk, Paying Officer, Approver, Cashier, Auditor) only for people who
-   have no other roles on Frappe 15. Everyone also keeps (or gets) an ERPNext role that reads Company
-   (section 3: Accounts User, Sales User or at least Employee). Each user must log out and in again.
+   have no other roles on Frappe 15. Finance staff also keep Accounts User and cashiers Sales User
+   (section 3) for the ERPNext documents their work opens. Each user must log out and in again.
 5. M-Pesa Suite Settings > Permissions > **Check Permissions**: read the differences. Anyone
    listed under "the site grants, beyond the suite" (with the number of users) loses that right on
    reset unless step 3/4 gave them the matching M-Pesa role.
@@ -357,7 +358,7 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 | Role | Must work | Must be refused |
 |---|---|---|
-| M-Pesa Viewer (with Employee) | M-Pesa workspace; lists of STK, C2B, B2C, B2B, reversals; M-Pesa Payments Due; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
+| M-Pesa Viewer | M-Pesa workspace; lists of STK, C2B, B2C, B2B, reversals; M-Pesa Payments Due; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
 | Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Refresh Balances on M-Pesa Payments Due; Transaction Status Query from the C2B register list | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; opening Mpesa Settings |
 | M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); Pay Selected on M-Pesa Payments Due for a line someone else prepared; submit a B2C disbursement; retry a failed B2C | Pay Selected on a line they prepared or last changed (maker-checker on); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |

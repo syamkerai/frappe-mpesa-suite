@@ -1216,8 +1216,12 @@ the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`)
   email of Mpesa Settings below them. The browser no longer reads those fields.
 - Form buttons that ran for anyone who could read (balance query, STK re-send, B2C disbursement
   helpers and status) and helpers open to every logged-in user now check permissions.
-- The suite roles get the DocType and report rights their jobs need (Payer on B2C, Collector on STK,
-  Manager everywhere, Viewer read-only).
+- The suite roles get the DocType rights their jobs need (Payer on B2C, Collector on STK, Manager
+  everywhere, Viewer read-only). Below M-Pesa Manager, Mpesa Settings can be picked in a Link field
+  but not opened, listed or found in the sidebar.
+- Frappe refuses a report row whose Link column the reader cannot read: M-Pesa Payments Due's
+  hidden Currency column is now Data, so Payers and Viewers see their lines on Frappe 15 too. The
+  four upstream reports show ERPNext documents and stay with the ERPNext roles that read them.
 
 **Decided by the user**
 - Only M-Pesa Payer, M-Pesa Manager and System Manager send money (B2C, B2B, reversals, retries,

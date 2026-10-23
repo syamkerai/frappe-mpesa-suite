@@ -283,12 +283,6 @@ class TestRolesPermissions(IntegrationTestCase):
                     except frappe.PermissionError as e:
                         self.fail(f"{role} on {report}: {e}")
 
-    def test_role_profiles_read_company(self):
-        """Every page with a Company filter needs read on Company; each profile carries a role that has it."""
-        for profile, roles in M.ROLE_PROFILES.items():
-            user = _user(f"{frappe.scrub(profile)}@{DOMAIN}", roles)
-            self.assertTrue(frappe.has_permission("Company", "read", user=user), profile)
-
     # ------------------------------------------------------------ site side
     def test_role_profiles_exist(self):
         for name, roles in M.ROLE_PROFILES.items():
