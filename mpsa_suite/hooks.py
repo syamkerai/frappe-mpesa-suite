@@ -255,6 +255,10 @@ override_doctype_dashboards = {
 # exempt linked doctypes from being automatically cancelled
 #
 # auto_cancel_exempted_doctypes = ["Auto Repeat"]
+# A Paid B2B request links its Payment / Journal Entry. Cancelling the entry from the desk must not
+# offer "Cancel All" (a Paid request cannot be cancelled); b2b_entries.allow_cancel lets the entry
+# go. A Purchase Invoice or Order a request links then gets Frappe's plain "is linked" refusal.
+auto_cancel_exempted_doctypes = ["Mpesa B2B Payment Request"]
 
 # Ignore links to specified DocTypes when deleting documents
 # -----------------------------------------------------------

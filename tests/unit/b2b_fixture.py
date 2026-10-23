@@ -244,7 +244,8 @@ def site(monkeypatch):
             frappe.db.savepoint = lambda name: env.log.append(("savepoint", name))
             frappe.db.rollback = lambda save_point=None: env.log.append(("rollback", save_point))
             env = fake_frappe._dict(frappe=frappe, log=[], locks=[], inserted=[], fail_insert=None, alerts=[],
-                                    fed=[], b2c=[], b2c_paid=[], meta_fields={}, denied=set(), users=[])
+                                    fed=[], b2c=[], b2c_paid=[], meta_fields={}, denied=set(), users=[],
+                                    busy_keys=set())
             frappe.db.sql = SQL(frappe, env.log)
             plain_get_value = frappe.db.get_value
 
@@ -272,7 +273,9 @@ def site(monkeypatch):
             common = importlib.import_module("mpsa_suite.money_in.common")
 
             @contextlib.contextmanager
-            def named_lock(key, timeout=10):
+            def named_lock(key, timeout=10, busy=None):
+                if key in env.busy_keys:  # another worker holds it past the timeout
+                    raise frappe.ValidationError(busy or f"Could not acquire lock {key}")
                 if key not in env.locks:  # held until commit; re-entering is a no-op
                     env.locks.append(key)
                     env.log.append(("lock", key))

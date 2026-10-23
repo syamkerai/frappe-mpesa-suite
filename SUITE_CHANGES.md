@@ -1014,8 +1014,9 @@ backfill, and old rows get their state in after_migrate.
   Mode of Payment no longer swaps it), on the M-Pesa completion date, with the receipt as its
   reference and without the charge, so it reconciles with the payout's statement line. It is
   booked as Administrator, so a restricted Integration User does not stop it.
-- If the invoice was paid or put on hold before M-Pesa confirmed, the money is booked as an
-  unallocated advance, marked "Needs Checking" and the Notify Role is alerted.
+- If the invoice was paid (all or part of it) or put on hold before M-Pesa confirmed, what it
+  cannot take is booked as an unallocated advance, marked "Needs Checking" and the Notify Role
+  is alerted.
 - The new Accounting Entry section says where each Paid payment stands: Entry Not Made, Draft
   Entry, Needs Checking or Entry Made, with a note in plain words. The list shows "Paid, no
   entry", "Paid, draft entry", "Paid, check entry" or "Paid". The M-Pesa workspace has a
@@ -1050,3 +1051,48 @@ additions to the money-out, statement, supplier account and B2C guard tests; the
 SQLite). Bench tests for the booking routes in `mpsa_suite/money_out/test_b2b_documents.py`.
 Not yet run on the v15 and v16 benches. Not built: the Sandbox Lab scenarios b2b_pay_order and
 b2b_pay_first_then_entry.
+
+**Review fixes (round 1)**
+- B2C's guards (disbursement submit and retry) take off an advance still on the invoice's orders,
+  as the B2B check does. A B2B advance on an order followed by a B2C payment of the invoice made
+  from it, without Get Advances, is refused.
+- A request is not counted against itself as an advance still on its own order (a draft moved
+  from the order to its invoice, or Make Entry booking an order's payout on that invoice).
+- The Result marks the request (entry_attempted_on), not the booking job. A job that is lost or
+  fails before it commits (a lock timeout, Redis down) is booked by the next sweep.
+- A possible double payment and a payment after the request was cancelled are always alerted.
+  Only a failed automatic booking and the reminder share the once-per-request alert.
+- When staff cancel or delete a request's entry, the request switches to "Make the entry later"
+  and says so. The sweep no longer books it again on the same document.
+- A second payer on a document that is being paid is told "Another payment for ... is being sent
+  or booked. Try again in a minute." instead of a lock name.
+- The desk's Cancel on a Payment or Journal Entry a request links no longer offers "Cancel All"
+  (which failed on the Paid request): `auto_cancel_exempted_doctypes`. A Purchase Invoice or
+  Order a request links gets Frappe's plain "is linked" refusal.
+- The request's company always follows its invoice or order (Frappe fills a new request's
+  company from the user's default). "Pay via M-Pesa (B2B)" passes the company too. Sending also
+  refuses a stored company that is not the document's.
+- Sandbox Lab b2b_pay ticks the earlier-payouts box for its own test supplier, and its check
+  reads the Accounting Entry state (Payment or Journal Entry).
+- An invoice paid in part another way before the Result (a bank payment, a debit note) is no
+  longer booked silently as "Entry Made": the part it cannot take stays an unallocated advance,
+  the request shows "Needs Checking" with the reason, gets a comment and the Notify Role is
+  alerted. The same when Make Entry leaves part of a payment off the chosen invoice or order. A
+  request linked to a document stays "Needs Checking" while any of it is unallocated; only a
+  request with no document is "Entry Made" as a supplier advance.
+- B2C refuses to pay a Purchase Order that already has invoices (disbursement submit and retry),
+  as B2B does: paying an invoice does not change its order's advance paid, so the order would
+  still look unpaid. Its invoices are paid instead.
+- A save after submit (a form opened before the Result, the API, a script) keeps what the server
+  wrote: status, the ack and Result fields, the receipt and the Accounting Entry fields.
+- A cancelled request that may have reached M-Pesa (Initiated, Paid, Unknown, or with an ack or
+  receipt) cannot be deleted: it is the record of that payment.
+- A manager can cancel an Initiated request whose Result never came, after checking the
+  statement, as for Unknown. A Result that comes later is still recorded and counts.
+- A Result that meets a deadlock or a lock held past MariaDB's wait is recorded again from a job
+  (up to 5 tries) instead of being lost. A Result handler error now logs the Result itself, so it
+  can be replayed by hand.
+- Sandbox Lab b2b_pay skips with the reason when sending is refused at submit.
+- Bench tests: requests use the test company (ERPNext's v15 test setup makes another company
+  the default); commits inside the code under test are replaced, so each test really rolls
+  back; leftovers an interrupted run committed for the test supplier are removed first.

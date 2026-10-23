@@ -517,18 +517,24 @@ def retry(monkeypatch):
             disb = importlib.import_module(DISB_MODULE)
 
             @contextlib.contextmanager
-            def named_lock(key, timeout=10):
+            def named_lock(key, timeout=10, busy=None):
                 if key not in frappe.locks_held:  # held until commit; re-entering is a no-op
                     frappe.locks_held.append(key)
                     frappe.row_locks_before.append(list(frappe.db.locks))
+                    frappe.busy.append(busy)
                 yield
 
-            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], b2b=[], owed=50000)
+            frappe.busy = []
+            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], b2b=[], advances=[], owed=50000)
             owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
 
             def b2b_open(doctype, name, exclude=None, for_update=False):
                 frappe.calls.append(("b2b_open", doctype, name, for_update, list(frappe.locks_held)))
                 return [fake_frappe._dict(o) for o in env.b2b]
+
+            def order_advances(pi, for_update=False, exclude_request=None):
+                frappe.calls.append(("order_advances", pi, for_update, list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.advances]
 
             def open_payouts(doctype, name, exclude_parent=None, exclude_requests=None):
                 frappe.calls.append(("open_payouts", doctype, name, exclude_parent, exclude_requests,
@@ -549,6 +555,7 @@ def retry(monkeypatch):
             monkeypatch.setattr(disb, "current_outstanding", current_outstanding)
             monkeypatch.setattr(mod, "paid_without_entry", paid_without_entry)
             monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
+            monkeypatch.setattr(owed_mod, "order_advances", order_advances)
             env.use_real_outstanding = lambda: monkeypatch.setattr(
                 disb, "current_outstanding", real_current_outstanding
             )
@@ -663,11 +670,36 @@ def test_retry_sends_when_the_document_still_owes_it(retry):
         ("open_payouts", "Purchase Invoice", "PI-1", None, None, [key]),
         ("paid_without_entry", "Purchase Invoice", "PI-1", [key]),
         ("b2b_open", "Purchase Invoice", "PI-1", True, [key]),  # B2B counts too, under the same lock
+        ("order_advances", "PI-1", True, [key]),  # and the invoice's order advances, before its row (R4)
         ("current_outstanding", "Purchase Invoice", "PI-1", True, [key]),
     ]
     # the document lock before the request's row lock, in the order a disbursement submit takes them
     assert retry.frappe.row_locks_before == [[]]
     assert retry.frappe.db.locks == [(REQ, "B2C-1")]
+    assert retry.frappe.busy == ["Another payment for Purchase Invoice PI-1 is being sent or booked. "
+                                 "Try again in a minute."]
+
+
+def test_retry_refused_by_an_advance_still_on_the_invoices_order(retry):
+    # a B2B advance on PO-1; the invoice made from it (without Get Advances) still owes 50,000
+    request = retry.failed()
+    retry.advances = [{"kind": "advance", "name": "PO-1", "amount": 50000,
+                       "label": "advance still on PO-1 50,000 (allocate it with Get Advances first)"}]
+    _refused(retry, request, "PI-1 owes 50000.0, less advance still on PO-1 50,000 .*; retrying would pay 50000.0")
+
+
+def test_retry_refused_once_the_order_has_invoices(retry):
+    # the failed payout was an advance on PO-1; PI-1 was made from PO-1 since (B2B may have paid it)
+    request = retry.failed(doctype="Purchase Order", reference="PO-1")
+    retry.frappe.db.table("Purchase Order")["PO-1"] = {"name": "PO-1", "per_billed": 100}
+    _refused(retry, request, "PO-1 already has invoices: pay the Purchase Invoice instead.")
+
+
+def test_retry_of_another_document_does_not_ask_about_order_advances(retry):
+    request = retry.failed(doctype="Expense Claim", reference="EC-1")
+    request.retry_failed_payment()
+    assert len(retry.sends) == 1
+    assert not [c for c in retry.frappe.calls if c[0] in ("b2b_open", "order_advances")]
 
 
 def test_retry_reads_the_status_a_concurrent_retry_committed(retry):

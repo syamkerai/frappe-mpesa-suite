@@ -7,6 +7,18 @@ from frappe.model.document import Document
 from ....money_out.b2b import send_b2b, validate_request
 from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
 
+# Written only by the server (the send, the ack, the Result, the booking), with db writes. The
+# money checks rely on them, so a save after submit never changes them.
+SERVER_FIELDS = (
+    "status", "conversation_id", "originator_conversation_id", "response_code", "response_description",
+    "error_code", "error_message", "queue_timed_out", "result_code", "result_desc", "transaction_id",
+    "trans_completed_time", "receiver_public_name", "receiver_name_mismatch", "debit_party_charges",
+    "debit_account_balance", "payment_entry", "journal_entry", "entry_status", "entry_note",
+    "entry_attempted_on", "entry_alerted_on",
+)
+# A request in one of these states may have reached M-Pesa.
+MAY_HAVE_PAID = ("Initiated", "Paid", "Unknown")
+
 
 class MpesaB2BPaymentRequest(Document):
     """Pay a supplier's paybill or till from an M-Pesa shortcode. Submitting sends it."""
@@ -25,12 +37,32 @@ class MpesaB2BPaymentRequest(Document):
     def on_submit(self):
         send_b2b(self.name)  # sending checks everything once more (check_ready_to_send)
 
+    def before_update_after_submit(self):
+        """A save after submit (a form opened before the Result, the API, a script) writes back
+        what the database holds for the server's fields. Frappe does not enforce read only on
+        the server, and a changed status, receipt or entry would fool the double-payment checks.
+        Locking read, so a value committed after this transaction's snapshot is seen too."""
+        fields = [f for f in SERVER_FIELDS if self.meta.has_field(f)]
+        current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
+        if current:
+            self.update({f: current.get(f) for f in fields})
+
     def before_cancel(self):
         if self.status in ("Not Initiated", "Failed"):
             return
-        if self.status == "Unknown":
-            # The payment may have gone through: only an admin who has checked the
-            # statement may cancel (and so allow a new request).
+        if self.status in ("Unknown", "Initiated"):
+            # The payment may have gone through (an Initiated one whose Result never came): only
+            # an admin who has checked the statement may cancel, and so allow a new request. A
+            # Result that comes later is still recorded, and counts against the document.
             require(ADMIN_ROLES)
             return
         frappe.throw(f"A B2B payment that is {self.status} cannot be cancelled")
+
+    def on_trash(self):
+        """A cancelled request that may have reached M-Pesa is the only record of that money:
+        a Paid one keeps counting against its document, and a late Result needs it to match."""
+        if self.status in MAY_HAVE_PAID or self.get("conversation_id") or self.get("transaction_id"):
+            frappe.throw(
+                f"{self.name} was sent to M-Pesa ({self.status}). It is the record of that payment and cannot "
+                "be deleted."
+            )

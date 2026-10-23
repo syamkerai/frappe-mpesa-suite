@@ -171,6 +171,18 @@ def test_order_advance_already_moved_onto_the_invoice_is_not_taken_off_twice(env
     assert left(env).parts == [] and left(env).left == 7000
 
 
+def test_the_request_being_checked_is_left_out_of_its_orders_advance_too(env):
+    # a request first linked to PO-7, now checked against the invoice made from it (a draft moved
+    # over, or Make Entry): it must not count against itself as an advance still on the order
+    env.pi(outstanding_amount=10000)
+    env.frappe.db.table("Purchase Invoice Item")["PII-1"] = {
+        "name": "PII-1", "parent": "PINV-1", "parenttype": PI, "purchase_order": "PO-7"}
+    env.request(purchase_order="PO-7", amount=10000, transaction_id="RCPT1", entry_mode="Make the entry later")
+    assert [(p.kind, p.amount) for p in left(env).parts] == [("advance", 10000)] and left(env).left == 0
+    result = left(env, exclude_request="MB2B-1")
+    assert (result.parts, result.left) == ([], 10000)
+
+
 def test_the_request_being_checked_is_left_out_and_left_is_never_negative(env):
     env.pi(outstanding_amount=3000)
     env.request(purchase_invoice="PINV-1", amount=4000, status="Initiated")
@@ -199,6 +211,16 @@ def test_lock_key_is_b2cs(env):
     with env.owed.doc_lock(PI, "PINV-1"):
         pass
     assert env.locks == ["b2c-pay:Purchase Invoice:PINV-1"]
+
+
+def test_a_second_payer_waiting_on_the_lock_is_told_why(env):
+    # a B2B submit holds the document's lock through its call to M-Pesa (Risks)
+    env.pi()
+    env.busy_keys.add("b2c-pay:Purchase Invoice:PINV-1")
+    with pytest.raises(env.frappe.ValidationError,
+                       match="Another payment for Purchase Invoice PINV-1 is being sent or booked. Try again in a "
+                             "minute."):
+        env.b2b.validate_request(draft(env), at_submit=True)
 
 
 def test_locking_reads_payouts_before_the_document_row(env):
@@ -328,6 +350,23 @@ def test_a_typed_supplier_must_be_the_invoices(env):
     env.pi()
     with pytest.raises(env.frappe.ValidationError, match="PINV-1 belongs to ACME, not Other Ltd."):
         env.b2b.validate_request(draft(env, supplier="Other Ltd"))
+
+
+def test_the_company_follows_the_invoice(env):
+    # Frappe fills a new request's company from the user's default (ERPNext's v15 test site
+    # makes another company the default): the invoice's company wins
+    env.pi()
+    doc = draft(env, company="Wind Power LLC")
+    env.b2b.validate_request(doc)
+    assert doc.company == "Astral"
+
+
+def test_send_refuses_a_request_whose_company_is_not_the_invoices(env):
+    # only server code (flags.ignore_validate) can store one; the shortcode pays for Astral
+    env.pi(company="Other Co")
+    env.request("MB2B-SRV", status="Not Initiated", transaction_id=None, purchase_invoice="PINV-1", amount=1000)
+    with pytest.raises(env.frappe.ValidationError, match="PINV-1 belongs to Other Co, not Astral."):
+        env.b2b.check_ready_to_send(env.frappe.get_doc(b2b_fixture.B2B, "MB2B-SRV"))
 
 
 def test_amount_above_what_is_left_names_the_breakdown(env):

@@ -4,7 +4,10 @@ database (ERPNext v15 and v16).
 A shortcode of its own (600777, its own Bank Account and M-Pesa Charges Account) and a supplier
 with an approved Supplier M-Pesa Account. Nothing reaches Safaricom: post() is replaced, and
 Results are handed to handle_result the way Safaricom posts them; the booking job it enqueues is
-run in the test. Each test is rolled back. Unit coverage is in tests/unit/test_b2b_owed.py and
+run in the test. Each test is rolled back: commits made by the code under test (the Result's
+Integration Request log, the sweep) are replaced for the whole test, so nothing one test does is
+seen by the next. Requests are made with the test company: ERPNext's v15 test setup makes
+another company the site default. Unit coverage is in tests/unit/test_b2b_owed.py and
 tests/unit/test_b2b_entries.py.
 """
 
@@ -124,14 +127,20 @@ class TestB2BDocuments(IntegrationTestCase):
         frappe.db.set_value("Item", t.ITEM, "is_purchase_item", 1)
         cls.expense = _account(EXPENSE, "Expense", "Profit and Loss")
         cls.cost_center = frappe.get_cached_value("Company", t.COMPANY, "cost_center")
+        # Requests an interrupted run committed would show as earlier payouts to the test supplier
+        # (it exists only for these tests).
+        frappe.db.delete(B2B, {"supplier": cls.supplier})
         frappe.db.commit()  # fixtures stay; each test rolls back to here
 
     def setUp(self):
         frappe.set_user("Administrator")
         frappe.local.mpesa_suite_bank_accounts = None
         self.tag = frappe.generate_hash(length=8)
+        self._no_commit = patch.object(frappe.db, "commit")
+        self._no_commit.start()
 
     def tearDown(self):
+        self._no_commit.stop()
         frappe.set_user("Administrator")
         frappe.db.rollback()
         frappe.local.mpesa_suite_bank_accounts = None
@@ -166,7 +175,7 @@ class TestB2BDocuments(IntegrationTestCase):
         return po
 
     def _request(self, amount, send=True, **values):
-        doc = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": amount,
+        doc = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": amount, "company": t.COMPANY,
                               "remarks": f"T {self.tag}", **values})
         doc.insert()
         if send:
@@ -181,8 +190,8 @@ class TestB2BDocuments(IntegrationTestCase):
             doc.submit()
         return post
 
-    def _pay(self, name, charge="Business Pay Bill Charge|KES|2.00") -> str:
-        """Safaricom's Paid Result for the request, then the booking job it enqueues."""
+    def _pay(self, name, charge="Business Pay Bill Charge|KES|2.00", book=True) -> str:
+        """Safaricom's Paid Result for the request, then the booking job it enqueues (``book``)."""
         row = frappe.db.get_value(B2B, name, ["conversation_id", "originator_conversation_id"], as_dict=True)
         receipt = self._receipt()
         result = {
@@ -200,7 +209,8 @@ class TestB2BDocuments(IntegrationTestCase):
             b2b.handle_result(result, name)
         jobs = [c for c in enqueue.call_args_list if c.args and c.args[0].endswith("b2b.book_payment_entry")]
         self.assertEqual(len(jobs), 1)
-        b2b.book_payment_entry(name)
+        if book:
+            b2b.book_payment_entry(name)
         return receipt
 
     def _entries(self, receipt) -> list:
@@ -228,6 +238,10 @@ class TestB2BDocuments(IntegrationTestCase):
 
     def _outstanding(self, pi) -> float:
         return flt(frappe.db.get_value(PI, pi, "outstanding_amount"))
+
+    def _alerts(self, alert, text) -> list:
+        """What a patched supplier_accounts._alert was told that mentions ``text``."""
+        return [c.args[0] for c in alert.call_args_list if text in c.args[0]]
 
     def _bank_payment(self, pi, amount) -> str:
         """The invoice paid another way (a bank Payment Entry) while M-Pesa was paying it."""
@@ -296,13 +310,33 @@ class TestB2BDocuments(IntegrationTestCase):
         pi = self._invoice(4000)
         req = self._request(4000, purchase_invoice=pi.name)
         self._bank_payment(pi.name, 4000)
-        receipt = self._pay(req.name)
+        frappe.db.set_value(B2B, req.name, "entry_alerted_on", now_datetime())  # an earlier alert went out
+        with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
+            receipt = self._pay(req.name)
         (pe,) = self._entries(receipt)
         self.assertEqual((self._refs(pe.name), flt(pe.unallocated_amount)), ([], 4000))
         state = self._state(req.name)
         self.assertEqual(state.entry_status, "Needs Checking")
         self.assertIn("could no longer take this payment (nothing is left to pay on it)", state.entry_note)
-        self.assertTrue(state.entry_alerted_on)
+        # a possible double payment is always alerted, whatever was alerted before
+        self.assertEqual(len(self._alerts(alert, "Check that the supplier was not paid twice.")), 1)
+
+    def test_invoice_paid_in_part_by_bank_before_the_result_needs_checking(self):
+        pi = self._invoice(10000)
+        req = self._request(10000, purchase_invoice=pi.name)
+        self._bank_payment(pi.name, 4000)  # staff paid part of it by bank meanwhile
+        with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
+            receipt = self._pay(req.name)
+        (pe,) = self._entries(receipt)
+        self.assertEqual((self._refs(pe.name), flt(pe.unallocated_amount)), ([(PI, pi.name, 6000, None)], 4000))
+        state = self._state(req.name)
+        self.assertEqual(state.entry_status, "Needs Checking")
+        self.assertIn("could take only KES 6,000 of this payment, so KES 4,000 is an unallocated", state.entry_note)
+        self.assertEqual(len(self._alerts(alert, "Check that the supplier was not paid twice.")), 1)
+
+        b2b_entries.refresh_entries()  # the sweep keeps it, and the note that says why
+        self.assertEqual(self._state(req.name).entry_status, "Needs Checking")
+        self.assertEqual(self._state(req.name).entry_note, state.entry_note)
 
     def test_invoice_put_on_hold_after_sending_is_not_allocated(self):
         pi = self._invoice(4000)
@@ -312,6 +346,15 @@ class TestB2BDocuments(IntegrationTestCase):
         (pe,) = self._entries(receipt)
         self.assertEqual(self._refs(pe.name), [])
         self.assertIn("(it is on hold)", self._state(req.name).entry_note)
+
+    def test_the_request_takes_the_invoices_company(self):
+        other = frappe.db.get_value("Company", {"name": ["!=", t.COMPANY]}, "name", order_by="creation asc")
+        if not other:
+            self.skipTest("only one company on this site")
+        pi = self._invoice(4000)
+        # what Frappe fills from the user's default company on a new request
+        req = self._request(4000, send=False, purchase_invoice=pi.name, company=other)
+        self.assertEqual(req.company, t.COMPANY)
 
     def test_supplier_put_on_hold_stops_the_submit_before_any_http_call(self):
         pi = self._invoice(4000)
@@ -380,6 +423,55 @@ class TestB2BDocuments(IntegrationTestCase):
                                purchase_invoice=pi.name)
         self.assertTrue(self._request(6000, send=False, purchase_invoice=pi.name).name)
 
+    def _invoice_from_order_without_advances(self, po):
+        from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_invoice
+
+        pi = make_purchase_invoice(po)
+        pi.bill_no = f"B2B-{self.tag}-{frappe.generate_hash(length=4)}"
+        pi.allocate_advances_automatically = 0
+        pi.set("advances", [])
+        pi.insert()
+        pi.submit()
+        return pi
+
+    def test_b2c_disbursement_takes_off_a_b2b_advance_on_the_invoices_order(self):
+        po = self._order(10000)
+        self._pay(self._request(10000, purchase_order=po.name).name)  # booked on the order
+        pi = self._invoice_from_order_without_advances(po.name)
+        self.assertEqual(self._outstanding(pi.name), 10000)  # Get Advances not pressed
+        disbursement = frappe.get_doc({
+            "doctype": DISB, "name": f"_T-B2CPD-ADV-{self.tag}", "payment_type": "Mpesa Disbursement",
+            "references": [{"reference_doctype": PI, "reference_name": pi.name, "allocated_amount": 10000,
+                            "party_type": "Supplier", "party": self.supplier}]})
+        self.assertRaisesRegex(frappe.ValidationError, f"less advance still on {po.name}",
+                               disbursement.validate_no_double_payout)
+
+    def test_b2c_disbursement_refuses_an_order_that_has_invoices(self):
+        po = self._order(10000)
+        pi = self._invoice_from_order_without_advances(po.name)
+        self._pay(self._request(10000, purchase_invoice=pi.name).name)  # B2B paid the invoice
+        self.assertEqual(flt(frappe.db.get_value(PO, po.name, "advance_paid")), 0)  # the order does not show it
+        disbursement = frappe.get_doc({
+            "doctype": DISB, "name": f"_T-B2CPD-PO-{self.tag}", "payment_type": "Mpesa Disbursement",
+            "references": [{"reference_doctype": PO, "reference_name": po.name, "allocated_amount": 10000,
+                            "party_type": "Supplier", "party": self.supplier}]})
+        self.assertRaisesRegex(frappe.ValidationError, f"{po.name} already has invoices",
+                               disbursement.validate_no_double_payout)
+
+    def test_make_entry_moves_an_order_payout_onto_the_invoice_made_from_it(self):
+        po = self._order(10000)
+        req = self._request(10000, purchase_order=po.name, entry_mode="Make the entry later")
+        receipt = self._pay(req.name)
+        pi = self._invoice_from_order_without_advances(po.name)
+        # the payout must not count against itself as an advance still on the order
+        b2b_entries.make_entry(req.name, PI, purchase_invoice=pi.name)
+        (pe,) = self._entries(receipt)
+        self.assertEqual(self._refs(pe.name), [(PI, pi.name, 10000, None)])
+        state = self._state(req.name)
+        self.assertEqual((state.entry_status, state.purchase_invoice, state.purchase_order),
+                         ("Entry Made", pi.name, None))
+        self.assertEqual(self._outstanding(pi.name), 0)
+
     # ------------------------------------------------------------ pay first, make the entry later
     def _paid_later(self, **values):
         req = self._request(4000, supplier=self.supplier, entry_mode="Make the entry later", **values)
@@ -437,6 +529,12 @@ class TestB2BDocuments(IntegrationTestCase):
 
     def test_draft_entry_keeps_the_invoice_blocked_until_submitted(self):
         frappe.db.set_value("Mpesa Settings", SETTINGS, "submit_b2c_accounting_entries", 0)
+        try:
+            self._draft_entry_keeps_the_invoice_blocked()
+        finally:  # the rollback undoes it too; never left for the next test
+            frappe.db.set_value("Mpesa Settings", SETTINGS, "submit_b2c_accounting_entries", 1)
+
+    def _draft_entry_keeps_the_invoice_blocked(self):
         pi = self._invoice(10000)
         req = self._request(4000, purchase_invoice=pi.name)
         receipt = self._pay(req.name)
@@ -464,6 +562,28 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual(b2b_entries.refresh_entry_now(req.name)["entry_status"], "Entry Not Made")
         self.assertIsNone(self._state(req.name).payment_entry)
         self.assertEqual(self._line(receipt).status, "Unreconciled")
+        self.assertEqual(frappe.db.get_value(B2B, req.name, "entry_mode"), "Make the entry later")
+
+    def test_a_cancelled_automatic_entry_is_not_booked_again_by_the_sweep(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, purchase_invoice=pi.name)
+        receipt = self._pay(req.name)
+        (pe,) = self._entries(receipt)
+        frappe.get_doc(PE, pe.name).cancel()  # it went to the wrong invoice, say
+        b2b_entries.refresh_entries()
+        self.assertEqual(self._entries(receipt), [])  # left to Make Entry
+        state = self._state(req.name)
+        self.assertEqual((state.entry_status, state.payment_entry), ("Entry Not Made", None))
+        self.assertEqual(frappe.db.get_value(B2B, req.name, "entry_mode"), "Make the entry later")
+
+    def test_desk_cancel_of_an_entry_does_not_offer_to_cancel_the_request(self):
+        from frappe.desk.form.linked_with import get_submitted_linked_docs
+
+        pi = self._invoice(10000)
+        req = self._request(4000, purchase_invoice=pi.name)
+        (pe,) = self._entries(self._pay(req.name))
+        linked = get_submitted_linked_docs(PE, pe.name)["docs"]
+        self.assertNotIn(req.name, [d["name"] for d in linked])  # hooks.auto_cancel_exempted_doctypes
 
     # ------------------------------------------------------------ guards
     def test_a_second_entry_for_the_receipt_is_refused(self):
@@ -499,6 +619,42 @@ class TestB2BDocuments(IntegrationTestCase):
         req.save()
         self._send(req)
         self.assertEqual(frappe.db.get_value(B2B, req.name, "status"), "Initiated")
+
+    def test_a_save_after_submit_keeps_what_the_server_wrote(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, purchase_invoice=pi.name)
+        doc = frappe.get_doc(B2B, req.name)
+        doc.status = "Failed"  # it would stop counting against the invoice
+        doc.transaction_id = "TFORGED001"
+        doc.entry_status = "Entry Made"
+        doc.save()
+        row = frappe.db.get_value(B2B, req.name, ["status", "transaction_id", "entry_status"], as_dict=True)
+        self.assertEqual((row.status, row.transaction_id, row.entry_status), ("Initiated", None, None))
+        self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
+
+    def test_a_cancelled_request_that_may_have_paid_cannot_be_deleted(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, send=False, purchase_invoice=pi.name)
+        self._send(req, answer=(None, "unknown"))  # no answer from M-Pesa
+        req = frappe.get_doc(B2B, req.name)
+        req.cancel()  # an admin checked the statement
+        self.assertRaisesRegex(frappe.ValidationError, "is the record of that payment", frappe.delete_doc, B2B,
+                               req.name)
+        self.assertTrue(frappe.db.exists(B2B, req.name))
+        draft = self._request(1000, send=False, purchase_invoice=pi.name)
+        frappe.delete_doc(B2B, draft.name)  # never sent: may go
+        self.assertFalse(frappe.db.exists(B2B, draft.name))
+
+    def test_a_manager_can_cancel_an_initiated_request_whose_result_never_came(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, purchase_invoice=pi.name)
+        frappe.get_doc(B2B, req.name).cancel()  # Administrator, after checking the statement
+        self.assertEqual(owed.left_to_pay(PI, pi.name).left, 10000)
+        with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
+            self._pay(req.name)  # the Result comes after all: recorded, never booked
+        self.assertEqual(self._state(req.name).entry_status, "Needs Checking")
+        self.assertEqual(len(self._alerts(alert, "M-Pesa paid this after the request was cancelled")), 1)
+        self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
 
     # ------------------------------------------------------------ B2B and B2C see each other
     def test_open_b2c_payout_counts_against_a_b2b_request(self):
@@ -563,13 +719,14 @@ class TestB2BDocuments(IntegrationTestCase):
         req.cancel()  # an admin checked the statement and found nothing (yet)
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 10000)
 
-        receipt = self._pay(req.name)  # then the Result arrives: the money left
+        with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
+            receipt = self._pay(req.name)  # then the Result arrives: the money left
         row = frappe.db.get_value(B2B, req.name, ["docstatus", "status", "transaction_id"], as_dict=True)
         self.assertEqual((row.docstatus, row.status, row.transaction_id), (2, "Paid", receipt))
         self.assertEqual(self._entries(receipt), [])
         state = self._state(req.name)
         self.assertEqual(state.entry_status, "Needs Checking")
-        self.assertTrue(state.entry_alerted_on)
+        self.assertEqual(len(self._alerts(alert, "M-Pesa paid this after the request was cancelled")), 1)
         self.assertEqual(self._line(receipt).status, "Unreconciled")  # its line and charge are still made
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)  # and it counts against the invoice
 
@@ -589,11 +746,23 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertTrue(state.entry_note.startswith("Could not book automatically: Accounting Period is closed."))
         self.assertEqual(self._entries(receipt), [])
 
-        with patch.object(frappe.db, "commit"):
-            b2b_entries.refresh_entries()
+        b2b_entries.refresh_entries()
         (pe,) = self._entries(receipt)
         self.assertEqual((pe.docstatus, self._state(req.name).entry_status), (1, "Entry Made"))
         self.assertEqual(self._line(receipt).status, "Reconciled")
+
+    def test_a_lost_booking_job_is_booked_by_the_sweep(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, purchase_invoice=pi.name)
+        receipt = self._pay(req.name, book=False)  # the job never ran (a lock timeout, Redis down)
+        state = self._state(req.name)
+        self.assertEqual((state.entry_status, state.entry_note), ("Entry Not Made", "Booking the entry…"))
+        self.assertTrue(frappe.db.get_value(B2B, req.name, "entry_attempted_on"))  # set by the Result
+
+        b2b_entries.refresh_entries()
+        (pe,) = self._entries(receipt)
+        self.assertEqual((pe.docstatus, self._state(req.name).entry_status), (1, "Entry Made"))
+        self.assertEqual(self._refs(pe.name), [(PI, pi.name, 4000, None)])
 
     def _paid_row(self, receipt, **values) -> str:
         name = f"_T-MB2B-{frappe.generate_hash(length=8)}"
@@ -609,8 +778,7 @@ class TestB2BDocuments(IntegrationTestCase):
         legacy = self._paid_row(self._receipt())  # paid before this release: never tried
         old = self._paid_row(self._receipt(), entry_status="Entry Not Made", entry_attempted_on=now_datetime(),
                              creation=add_to_date(now_datetime(), days=-40))  # outside the 30 days
-        with patch.object(frappe.db, "commit"):
-            b2b_entries.refresh_entries()
+        b2b_entries.refresh_entries()
         for name in (legacy, old):
             receipt = frappe.db.get_value(B2B, name, "transaction_id")
             self.assertEqual(self._entries(receipt), [])
@@ -628,7 +796,6 @@ class TestB2BDocuments(IntegrationTestCase):
                                           {"account": self.gl, "credit_in_account_currency": 500}]})
         je.insert()
         je.submit()  # what Bank Reconciliation's Create Voucher makes
-        with patch.object(frappe.db, "commit"):
-            b2b_entries.refresh_entries()
+        b2b_entries.refresh_entries()
         state = self._state(name)
         self.assertEqual((state.journal_entry, state.entry_status), (je.name, "Entry Made"))

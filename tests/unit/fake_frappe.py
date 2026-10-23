@@ -24,6 +24,14 @@ class DoesNotExistError(Exception):
     pass
 
 
+class QueryDeadlockError(Exception):
+    pass
+
+
+class QueryTimeoutError(Exception):
+    pass
+
+
 class _dict(dict):
     def __getattr__(self, key):
         return self.get(key)
@@ -147,6 +155,8 @@ def build():
     frappe.ValidationError = ValidationError
     frappe.PermissionError = PermissionError_
     frappe.DoesNotExistError = DoesNotExistError
+    frappe.QueryDeadlockError = QueryDeadlockError
+    frappe.QueryTimeoutError = QueryTimeoutError
     frappe._dict = _dict
     frappe._seq = itertools.count(1)
     frappe.db = FakeDB(frappe)

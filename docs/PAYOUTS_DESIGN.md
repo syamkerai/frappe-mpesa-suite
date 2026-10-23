@@ -229,7 +229,7 @@ R10. Every handler respects its existing Suite switch. Mpesa Settings.submit_b2c
 - validate_against_invoice stays as an alias of the new document check, for the existing tests.
 - check_ready_to_send(doc): non-mutating, used by send_b2b right after lock_for_send. It runs require(PAYOUT_ROLES), check_before_send, _check_settings on the stored values, supplier_hold, document_problems and the locked left_to_pay check. It only throws, and always before post(). This is defence in depth for server code that uses flags.ignore_validate.
 - send_b2b: lock_for_send, then check_ready_to_send, then unchanged.
-- handle_result: unchanged, except the Paid db_set also writes entry_status "Entry Not Made" and entry_note "Booking the entry…". The existing enqueue of book_payment_entry stays (same dotted name, so queued jobs and the sandbox lab keep working).
+- handle_result: unchanged, except the Paid db_set also writes entry_status "Entry Not Made" and entry_note "Booking the entry…", and (review round 1) entry_attempted_on, so a booking job that is lost or fails before it commits is still booked by the sweep. The existing enqueue of book_payment_entry stays (same dotted name, so queued jobs and the sandbox lab keep working).
 - book_payment_entry(name) = b2b_entries.book_automatically(name), then statement.after_payout.
 - amount_left(doctype, name): whitelisted; checks read permission. Returns supplier, company, eligible Mpesa Settings (use_b2b=1, company, initiator set), the left_to_pay parts and left, document_problems, supplier_hold, earlier_payouts and the default approved account.
 
@@ -237,7 +237,9 @@ R10. Every handler respects its existing Suite switch. Mpesa Settings.submit_b2c
 - validate: unchanged.
 - before_submit: require(PAYOUT_ROLES); validate_request(self, at_submit=True); status = "Not Initiated".
 - on_submit: send_b2b (Phase 2: skip when flags.mpesa_send_later).
-- before_cancel: unchanged.
+- before_cancel: unchanged. (Review round 1: an Initiated request may be cancelled by ADMIN_ROLES, as an Unknown one, for a Result that never came; Phase 1 has no B2B status query. A later Result is recorded as R2 says.)
+- (Review round 1) before_update_after_submit: the server-written fields (status, ack and Result fields, transaction_id, payment_entry, journal_entry, entry_*) are read back from the database with a locking read, as B2C does for its rows. Frappe does not enforce read_only on the server.
+- (Review round 1) on_trash: refused for a request that may have reached M-Pesa (Initiated, Paid, Unknown, or a conversation_id or transaction_id). A cancelled Paid request keeps counting (R2), and a late Result needs the row to match.
 
 6. supplier_accounts.check_before_send
 When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa account" unless allow_one_off_b2b is on, and then require(ADMIN_ROLES). Today it returns early.
@@ -255,9 +257,10 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
   - Submitted, but crediting another GL or another amount than the payout: Needs Checking, "ACC-PAY-… pays from <GL> for <amt>; the M-Pesa line is <amt> on <GL>, so it will not reconcile."
   - Submitted with unallocated money while the document still owes: Needs Checking, "KES r is not allocated: allocate it to PINV-… (Get Advances or Payment Reconciliation)."
   - Otherwise Entry Made. When the document owes 0 the note is "KES r is an unallocated supplier advance".
+  - (Review round 1) For a request linked to a document, unallocated money while the document owes 0 is Needs Checking, not Entry Made: the document took the money some other way (a possible double payment). The note booking wrote, which names the reason, is kept while it names the same amount. Entry Made with an unallocated supplier advance is only for requests with no document.
 - set_entry(doc, state, note, entry): db_set, logging to the Error Log only when the note changes.
 - refresh_entry(doc):
-  - If the linked entry is cancelled or missing: clear the link and add a comment "Payment Entry X was cancelled".
+  - If the linked entry is cancelled or missing: clear the link and add a comment "Payment Entry X was cancelled". (Review round 1: the request also switches to "Make the entry later", so the sweep does not book the same allocation again.)
   - Classify, link the found entry, set the state.
   - If the state changed: statement.after_payout(B2B, name).
 - book_automatically(name):
@@ -291,6 +294,7 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
     - PI: cancelled, on_hold, a return, or outstanding ≤ 0;
     - PO: closed, on hold, fully billed (per_billed ≥ 100), or owed ≤ 0.
     The PE is then an unallocated supplier advance, the state is Needs Checking and notify_role gets an alert (possible double payment).
+  - (Review round 1) The same when the document can take only part of the payout: the problem "<dn> could take only KES a of this payment, so KES r is an unallocated supplier advance. Check that the supplier was not paid twice." gives Needs Checking, a comment and an alert, in book_automatically and in Make Entry.
   - cap = PI outstanding_amount, or PO (rounded_total or grand_total) − advance_paid.
   - alloc = flt(min(amount, cap), 2).
   - If the template has allocate_payment_based_on_payment_terms: one row per Payment Schedule term ordered by due_date then idx. Each takes min(flt(payment_amount − paid_amount, 2), flt(outstanding, 2), remaining), with payment_term set. Terms ≤ 0.1 are skipped (F3).
@@ -332,6 +336,8 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
 9. B2C sees B2B
 - b2c_payment_disbursement.validate_no_double_payout: inside the existing named lock, for Purchase Invoice and Purchase Order, others += owed.b2b_open(dt, dn, for_update=True).
 - b2c_disbursement_request.validate_still_owed: the same addition.
+- Review round 1: for a Purchase Invoice both guards also take owed.order_advances(dn, for_update=True) off what it owes, read before the document row, as left_to_pay does.
+- Review round 1: both guards refuse a Purchase Order with per_billed > 0 (owed.billed_order, the same message as document_problems). Paying the order's invoice does not change the order's advance_paid, so without this B2C could pay an order whose invoice B2B already paid.
 
 10. UI
 - NEW public/js/purchase_invoice.js: M-Pesa > "Pay via M-Pesa (B2B)".
@@ -602,10 +608,14 @@ SANDBOX LAB AND LIVE
 
 - Stricter checks at submit and send will refuse things that pass today. Examples: a Payer submitting a one-off paybill an admin saved; an amount above what is left once B2C payouts, draft entries and order advances are counted; a supplier or invoice on hold; a Mpesa Settings record of another company. This is intended, but the Sandbox Lab and the unit fixtures (b2b_row without an account) must be updated, and staff need to be told.
 - On a direct submit, the per-document lock and the request row lock are held through the Daraja HTTP call, because the inline send is unchanged. A second payer on the same document waits up to 10 seconds and then gets 'Could not acquire lock'. Nothing is sent twice, but the message must say another payment for that document is being sent.
+  - Built (review round 1): the message is "Another payment for <doctype> <name> is being sent or booked. Try again in a minute." (owed.doc_lock, and B2C's guards on the same key).
+  - Review round 1, checked on v15 and v16: the locks are not in fact held through the call. post() first logs the request with Frappe's create_request_log, which commits. That commit ends the submit's transaction before requests.post: its row locks go, and the per-document lock is released with it (named_lock releases after commit). The request is then committed as submitted and Not Initiated, so it already counts as open for every other payer. A second payer waits only while the checks before the send run.
+  - Should a later Frappe stop committing there, the locks would be held through the call. A Result that meets a lock held past MariaDB's lock wait, or a deadlock, is recorded again from a job (b2b.handle_result, up to 5 tries), and its payload goes to the Error Log if it never is. Its booking job may time out on the document lock; the Result's entry_attempted_on lets the sweep book it within 15 minutes.
 - Existing gap on the direct path, not fixed in Phase 1: if the worker process dies after post() and before commit, the submit rolls back and the record of the send is lost. Only the Phase 2 schedule path gets the committed send_started_on marker.
+  - Review round 1: the submit itself is committed by create_request_log before the call (above), so what is lost is the ack. The request stays Not Initiated (it counts as open, but anyone may cancel it), and its Result is not matched (only an Unknown request is matched by ref); it is kept as "Mpesa B2B Result (unmatched)". Phase 2's marker turns such a request into Unknown.
 - The hand-built Payment Entry skips get_payment_entry extras: early-payment discounts and Payment Request allocation. It copies only header accounting dimensions. Sites relying on these need a check on v15 and v16.
 - Term-based invoices and orders depend on ERPNext keeping Payment Schedule paid_amount and outstanding current. Hand-edited schedules can leave part of the payment unallocated. That is safe, but the invoice stays partly unpaid until someone allocates the rest.
-- When the document can no longer take the money at booking time (paid elsewhere, put on hold, closed), the payout is booked as an unallocated supplier advance and marked Needs Checking with an alert. The books stay right, but a real double payment to the supplier is only caught if staff act on the alert.
+- When the document can no longer take the money at booking time (paid elsewhere, put on hold, closed), or can take only part of it (review round 1), what it cannot take is booked as an unallocated supplier advance and marked Needs Checking with an alert. The books stay right, but a real double payment to the supplier is only caught if staff act on the alert.
 - Paid requests from before this release are only classified, never booked automatically. Staff must clear any old 'Paid, no Payment Entry' cases with Make Entry.
 - Entries post on the M-Pesa completion date. A closed Accounting Period or a frozen-accounts date (v15 Accounts Settings acc_frozen_upto, v16 Company accounts_frozen_till_date) makes booking fail. The request then shows Entry Not Made with ERPNext's message, and an admin must open the period. There is deliberately no date override.
 - Entries staff make outside Make Entry reconcile only when they carry the receipt, use the payout's GL and exclude the KES 2 charge. The sweep flags a mismatch as Needs Checking but cannot fix it. A Payment Entry made by hand without the receipt, after a failed automatic booking, can still be followed by a successful retry. That retry is caught as an unallocated advance with an alert, not silently.

@@ -52,6 +52,16 @@ def test_reference_row_is_capped_and_the_rest_stays_unallocated(env):
     assert env.entries.reference_rows(PI, "PINV-1", 4000, cap=2500)[0][0]["allocated_amount"] == 2500
 
 
+def test_what_the_document_cannot_take_is_a_possible_double_payment(env):
+    # PINV-1 owed 10,000; 4,000 was paid by bank (or a debit note made) while M-Pesa paid 10,000
+    env.pi(outstanding_amount=6000)
+    rows, problem = env.entries.reference_rows(PI, "PINV-1", 10000)
+    assert [r["allocated_amount"] for r in rows] == [6000]
+    assert problem == ("PINV-1 could take only KES 6,000 of this payment, so KES 4,000 is an unallocated supplier "
+                       "advance. Check that the supplier was not paid twice.")
+    assert env.entries.reference_rows(PI, "PINV-1", 6000)[1] is None  # it takes it all
+
+
 def test_order_takes_its_total_less_advances(env):
     env.po(rounded_total=20000, advance_paid=18000)
     assert env.entries.reference_rows(PO, "PO-1", 4000)[0][0]["allocated_amount"] == 2000
@@ -191,11 +201,31 @@ def test_classify_unallocated_while_the_invoice_still_owes(env):
 def test_classify_made(env):
     env.pi(outstanding_amount=0)
     env.request(purchase_invoice="PINV-1", transaction_id="R1")
-    env.pe("ACC-PAY-1", "R1", [(PI, "PINV-1", 3000)])  # the invoice owed 3,000; 1,000 is an advance
-    assert classify(env)[0::2] == ("Entry Made", "KES 1,000 is an unallocated supplier advance (Payment Entry ACC-PAY-1).")
-    env.frappe.db.table("Payment Entry Reference")["ACC-PAY-1-1"]["allocated_amount"] = 4000
-    env.frappe.db.table("Payment Entry")["ACC-PAY-1"]["unallocated_amount"] = 0
+    env.pe("ACC-PAY-1", "R1", [(PI, "PINV-1", 4000)])
     assert classify(env)[0::2] == ("Entry Made", "Booked on Payment Entry ACC-PAY-1.")
+
+
+def test_classify_part_left_off_the_document_needs_checking(env):
+    # the invoice owed 3,000 when this 4,000 was booked: the rest may pay it twice
+    env.pi(outstanding_amount=0)
+    env.request(purchase_invoice="PINV-1", transaction_id="R1")
+    env.pe("ACC-PAY-1", "R1", [(PI, "PINV-1", 3000)])
+    assert classify(env)[0::2] == ("Needs Checking", (
+        "PINV-1 has nothing left to pay, and KES 1,000 of this payment is not on it (Payment Entry ACC-PAY-1). "
+        "Check that the supplier was not paid twice. Then allocate the rest (Payment Reconciliation)."))
+    # the note booking wrote (it names why) is kept while it names this amount
+    written = ("PINV-1 could take only KES 3,000 of this payment, so KES 1,000 is an unallocated supplier advance. "
+               "Check that the supplier was not paid twice.")
+    row(env).update(entry_status="Needs Checking", entry_note=written)
+    assert classify(env)[2] == written
+    env.frappe.db.table("Payment Entry")["ACC-PAY-1"]["unallocated_amount"] = 600  # 400 allocated elsewhere since
+    assert classify(env)[2].startswith("PINV-1 has nothing left to pay, and KES 600 of this payment is not on it")
+
+
+def test_classify_an_advance_without_a_document_is_made(env):
+    env.request(transaction_id="R1")
+    env.pe("ACC-PAY-1", "R1", [])
+    assert classify(env)[0::2] == ("Entry Made", "KES 4,000 is an unallocated supplier advance (Payment Entry ACC-PAY-1).")
 
 
 def test_classify_an_order_advance_moved_to_the_invoice_is_still_made(env):
@@ -218,12 +248,24 @@ def test_classify_without_a_document(env):
 
 
 def test_refresh_clears_a_cancelled_entry_and_says_so(env):
-    env.request(purchase_invoice="PINV-1", transaction_id="R1", payment_entry="ACC-PAY-1", entry_status="Entry Made")
+    env.request(purchase_invoice="PINV-1", transaction_id="R1", payment_entry="ACC-PAY-1", entry_status="Entry Made",
+                entry_mode="Book automatically")
     env.pe("ACC-PAY-1", "R1", [(PI, "PINV-1", 4000)], docstatus=2)
     assert env.entries.refresh_entry(doc(env)) == "Entry Not Made"
     assert row(env)["payment_entry"] is None
-    assert (B2B, "MB2B-1", "Payment Entry ACC-PAY-1 was cancelled.") in env.frappe.comments
+    assert (B2B, "MB2B-1", "Payment Entry ACC-PAY-1 was cancelled. It is not booked again automatically: press "
+            "Make Entry.") in env.frappe.comments
+    # staff may have undone it because it went to the wrong invoice: it waits for Make Entry now
+    assert row(env)["entry_mode"] == "Make the entry later"
+    assert row(env)["entry_note"] == "Paid on 2026-10-17. Press Make Entry when you know what this paid for."
     assert env.fed == ["MB2B-1"]  # the line is looked at again
+
+
+def test_refresh_says_when_a_linked_entry_is_gone(env):
+    env.request(transaction_id="R1", journal_entry="ACC-JV-9", entry_status="Entry Made")
+    env.entries.refresh_entry(doc(env))
+    assert row(env)["journal_entry"] is None
+    assert any(c[2].startswith("Journal Entry ACC-JV-9 was deleted.") for c in env.frappe.comments)
 
 
 # ---------------------------------------------------------------- automatic booking
@@ -272,11 +314,14 @@ def test_book_automatically_waits_for_a_supplier_on_hold(env):
 
 
 def test_book_automatically_never_books_a_cancelled_request_and_alerts_once(env):
-    env.request(transaction_id="R1", docstatus=2, purchase_invoice="PINV-1")
+    # the Result wrote "Entry Not Made" and an earlier alert went out (the reminder, say)
+    env.request(transaction_id="R1", docstatus=2, purchase_invoice="PINV-1", entry_status="Entry Not Made",
+                entry_note="Booking the entry…", entry_alerted_on=b2b_fixture.NOW)
     env.entries.book_automatically("MB2B-1")
     env.entries.book_automatically("MB2B-1")
     assert env.inserted == [] and row(env)["entry_status"] == "Needs Checking"
-    assert len(env.alerts) == 1 and row(env)["entry_alerted_on"]
+    # always told, whatever was alerted before; once, when it becomes Needs Checking
+    assert len(env.alerts) == 1 and "M-Pesa paid this after the request was cancelled" in env.alerts[0][1]
 
 
 def test_book_automatically_links_an_entry_that_already_carries_the_receipt(env):
@@ -311,6 +356,40 @@ def test_book_automatically_after_the_invoice_was_paid_elsewhere_needs_checking(
     assert len(env.alerts) == 1 and any("paid twice" in c[2] for c in env.frappe.comments)
 
 
+def test_a_possible_double_payment_is_alerted_after_an_earlier_booking_failure(env):
+    # 1. booking fails (the period is closed): one alert, entry_alerted_on set
+    env.pi(outstanding_amount=10000)
+    env.request(purchase_invoice="PINV-1", transaction_id="R1")
+    env.fail_insert = env.frappe.ValidationError("Accounting Period is closed")
+    env.entries.book_automatically("MB2B-1")
+    assert len(env.alerts) == 1 and row(env)["entry_alerted_on"]
+    # 2. staff pay the invoice by hand meanwhile; 3. the period reopens and the sweep books again
+    env.frappe.db.table(PI)["PINV-1"]["outstanding_amount"] = 0
+    env.fail_insert = None
+    env.entries.book_automatically("MB2B-1")
+    assert row(env)["entry_status"] == "Needs Checking"
+    assert len(env.alerts) == 2 and "Check that the supplier was not paid twice." in env.alerts[1][1]
+
+
+def test_book_automatically_when_the_invoice_was_paid_in_part_elsewhere_needs_checking(env):
+    # PINV-1 owed 10,000; staff paid 4,000 by bank between send and Result
+    env.pi(outstanding_amount=6000)
+    env.request(purchase_invoice="PINV-1", transaction_id="R1", amount=10000, entry_status="Entry Not Made",
+                entry_note="Booking the entry…", entry_attempted_on=b2b_fixture.NOW, entry_alerted_on=b2b_fixture.NOW)
+    assert env.entries.book_automatically("MB2B-1") == "ACC-PAY-0001"
+    assert [r["allocated_amount"] for r in env.frappe.db.table("Payment Entry Reference").values()] == [6000]
+    note = ("PINV-1 could take only KES 6,000 of this payment, so KES 4,000 is an unallocated supplier advance. "
+            "Check that the supplier was not paid twice.")
+    assert (row(env)["entry_status"], row(env)["entry_note"]) == ("Needs Checking", note)
+    assert (B2B, "MB2B-1", note) in env.frappe.comments
+    assert env.alerts == [("MB2B-1", f"MB2B-1: {note}")]  # whatever was alerted before
+    assert len([e for e in env.frappe.errors if e[1].get("title") == "M-Pesa B2B entry needs checking"]) == 1
+    env.frappe.db.table(PI)["PINV-1"]["outstanding_amount"] = 0  # what ERPNext shows once it is submitted
+    env.entries.refresh_entries()  # the sweep keeps the state and the note, and logs nothing more
+    assert (row(env)["entry_status"], row(env)["entry_note"]) == ("Needs Checking", note)
+    assert len([e for e in env.frappe.errors if e[1].get("title") == "M-Pesa B2B entry needs checking"]) == 1
+
+
 def test_book_automatically_needs_a_paid_request(env):
     env.request(status="Initiated", transaction_id=None)
     assert env.entries.book_automatically("MB2B-1") is None and env.inserted == []
@@ -331,6 +410,10 @@ def test_make_entry_against_an_invoice_allocates_what_is_left(env):
     assert [r["allocated_amount"] for r in env.frappe.db.table("Payment Entry Reference").values()] == [3000]
     assert env.inserted == [("Payment Entry", "accounts@example.com", False)]  # the user's own permissions
     assert row(env)["purchase_invoice"] == "PINV-1" and env.fed == ["MB2B-1"]
+    note = ("PINV-1 could take only KES 3,000 of this payment, so KES 1,000 is an unallocated supplier advance. "
+            "Check that the supplier was not paid twice.")
+    assert row(env)["entry_note"] == note and (B2B, "MB2B-1", note) in env.frappe.comments
+    assert env.alerts == [("MB2B-1", f"MB2B-1: {note}")]
 
 
 def test_make_entry_against_an_order(env):
@@ -338,6 +421,19 @@ def test_make_entry_against_an_order(env):
     env.request(transaction_id="R1", entry_mode="Make the entry later")
     assert make(env, PO, purchase_order="PO-1")["entry_status"] == "Entry Made"
     assert row(env)["purchase_order"] == "PO-1"
+
+
+def test_make_entry_moves_an_order_payout_onto_the_invoice_made_from_it(env):
+    # paid first on PO-1 ("Make the entry later"), then PINV-1 was made from PO-1
+    env.po()
+    env.pi(outstanding_amount=10000)
+    env.frappe.db.table("Purchase Invoice Item")["PII-1"] = {
+        "name": "PII-1", "parent": "PINV-1", "parenttype": PI, "purchase_order": "PO-1"}
+    env.request(transaction_id="R1", purchase_order="PO-1", amount=10000, entry_mode="Make the entry later")
+    env.frappe.user_roles = {"Accounts Manager"}  # moving a payout to another document
+    assert make(env, PI, purchase_invoice="PINV-1")["entry_status"] == "Entry Made"
+    assert [r["allocated_amount"] for r in env.frappe.db.table("Payment Entry Reference").values()] == [10000]
+    assert (row(env)["purchase_invoice"], row(env)["purchase_order"]) == ("PINV-1", None)
 
 
 def test_make_entry_as_a_supplier_advance_fills_the_supplier(env):
@@ -468,6 +564,59 @@ def test_sweep_books_a_failed_booking_again_but_never_a_legacy_row(env, monkeypa
     assert ("commit",) in env.log
 
 
+def test_sweep_books_a_request_whose_booking_job_was_lost(env):
+    # the Result wrote the state and the marker; its job failed before it committed (a lock
+    # timeout) or never ran (Redis down)
+    env.pi(outstanding_amount=10000)
+    env.request(purchase_invoice="PINV-1", transaction_id="R1", entry_status="Entry Not Made",
+                entry_note="Booking the entry…", entry_attempted_on=b2b_fixture.NOW, entry_mode="Book automatically")
+    env.entries.refresh_entries()
+    assert env.inserted == [("Payment Entry", "Administrator", True)]
+    assert (row(env)["entry_status"], row(env)["payment_entry"]) == ("Entry Made", "ACC-PAY-0001")
+    assert env.fed == ["MB2B-1"]
+
+
+def test_sweep_gives_a_make_later_request_whose_job_was_lost_its_note(env):
+    env.request(transaction_id="R1", entry_status="Entry Not Made", entry_note="Booking the entry…",
+                entry_attempted_on=b2b_fixture.NOW, entry_mode="Make the entry later")
+    env.entries.refresh_entries()
+    assert env.inserted == []
+    assert row(env)["entry_note"] == "Paid on 2026-10-17. Press Make Entry when you know what this paid for."
+
+
+def test_sweep_never_books_again_an_entry_staff_cancelled(env):
+    # booked automatically on the wrong invoice; staff cancelled it to make it again by hand
+    env.pi(outstanding_amount=10000)
+    env.request(purchase_invoice="PINV-1", transaction_id="R1", payment_entry="ACC-PAY-1", entry_status="Entry Made",
+                entry_attempted_on=b2b_fixture.NOW, entry_mode="Book automatically")
+    env.pe("ACC-PAY-1", "R1", [(PI, "PINV-1", 4000)], docstatus=2)
+    env.entries.refresh_entries()
+    env.entries.refresh_entries()
+    assert env.inserted == []
+    assert (row(env)["entry_status"], row(env)["payment_entry"], row(env)["entry_mode"]) == (
+        "Entry Not Made", None, "Make the entry later")
+
+
+def test_a_second_payer_is_told_another_payment_is_being_sent(env):
+    env.pi()
+    env.request(transaction_id="R1", entry_mode="Make the entry later")
+    env.busy_keys.add("b2c-pay:Purchase Invoice:PINV-1")  # a B2B submit holds it through its call to M-Pesa
+    with pytest.raises(env.frappe.ValidationError,
+                       match="^Another payment for Purchase Invoice PINV-1 is being sent or booked. Try again in a "
+                             "minute.$"):
+        make(env, PI, purchase_invoice="PINV-1")
+    assert env.inserted == []
+
+
+def test_sweep_alerts_a_payment_after_cancel_whose_booking_job_was_lost(env):
+    env.request(transaction_id="R1", docstatus=2, purchase_invoice="PINV-1", entry_status="Entry Not Made",
+                entry_note="Booking the entry…", entry_attempted_on=b2b_fixture.NOW)
+    env.entries.refresh_entries()
+    env.entries.refresh_entries()
+    assert env.inserted == [] and row(env)["entry_status"] == "Needs Checking"
+    assert len(env.alerts) == 1 and "M-Pesa paid this after the request was cancelled" in env.alerts[0][1]
+
+
 def test_sweep_links_an_entry_made_by_hand(env):
     env.request(transaction_id="R1", entry_status="Entry Not Made", entry_attempted_on=b2b_fixture.NOW,
                 entry_mode="Make the entry later")
@@ -526,5 +675,6 @@ def test_an_entry_a_request_links_can_be_cancelled(env):
 def test_a_deleted_draft_stops_being_the_requests_entry(env):
     env.request(transaction_id="R1", payment_entry="ACC-PAY-1", entry_status="Draft Entry")
     env.entries.unlink_deleted(fake_frappe._dict(doctype="Payment Entry", name="ACC-PAY-1"))
-    assert row(env)["payment_entry"] is None
-    assert (B2B, "MB2B-1", "Payment Entry ACC-PAY-1 was deleted.") in env.frappe.comments
+    assert row(env)["payment_entry"] is None and row(env)["entry_mode"] == "Make the entry later"
+    assert (B2B, "MB2B-1", "Payment Entry ACC-PAY-1 was deleted. It is not booked again automatically: press "
+            "Make Entry.") in env.frappe.comments

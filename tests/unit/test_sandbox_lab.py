@@ -249,3 +249,71 @@ def test_rejected_answer_detection(env):
     assert env.fw.rejected({"ResultCode": 1, "ResultDesc": "Rejected"})
     assert not env.fw.rejected({"ResultCode": 0, "ResultDesc": "Accepted"})
     assert not env.fw.rejected({"_raw": "Internal Server Error"})
+
+
+# ---------------------------------------------------------------- B2B
+def test_b2b_pay_ticks_the_earlier_payouts_box_for_its_own_test_supplier(env, monkeypatch):
+    # earlier lab runs left supplier advances to the test supplier: submit would be refused
+    # until someone ticks that none of them paid the test invoice
+    env.frappe.db.table("Mpesa Settings")["SBX B2B"] = {"name": "SBX B2B"}
+    made = []
+
+    class Request(fake_frappe._dict):
+        def insert(self):
+            self.name = "MB2B-LAB"
+            made.append(dict(self))
+            return self
+
+        def submit(self):
+            made.append("submitted")
+
+    real_get_doc = env.frappe.get_doc
+    monkeypatch.setattr(env.frappe, "get_doc",
+                        lambda d, *a, **kw: Request(d) if isinstance(d, dict) else real_get_doc(d, *a, **kw))
+    run = make_run(env, ("b2b_pay", "Pending"), b2b_settings="SBX B2B", test_supplier="Lab Supplier", amount=10,
+                   test_purchase_invoice="PINV-LAB")
+    env.sc.start_b2b_pay(env.fw.Ctx(run, run.cases[0]))
+    assert made[0]["checked_earlier_payouts"] == 1 and made[0]["purchase_invoice"] == "PINV-LAB"
+    assert made[1] == "submitted"
+
+
+@pytest.mark.parametrize("values, minutes, status, text", [
+    ({"entry_status": "Entry Made", "payment_entry": "ACC-PAY-1"}, 1, "Passed", "booked by ACC-PAY-1 (Entry Made)"),
+    ({"entry_status": "Draft Entry", "payment_entry": "ACC-PAY-1"}, 1, "Passed", "(Draft Entry)"),
+    ({"entry_status": "Needs Checking", "payment_entry": "ACC-PAY-1", "entry_note": "KES 10 is not allocated"}, 1,
+     "Failed", "the entry needs checking: KES 10 is not allocated"),
+    ({"entry_status": "Entry Not Made", "entry_note": "Booking the entry…"}, 1, "Waiting", "waiting for the accounting"),
+    ({"entry_status": "Entry Not Made", "entry_note": "Could not book automatically: closed."}, 7, "Failed",
+     "no accounting entry after 6 minutes: Could not book automatically: closed."),
+])
+def test_b2b_pay_check_reads_the_accounting_entry(env, values, minutes, status, text):
+    env.frappe.db.table("Mpesa B2B Payment Request")["MB2B-LAB"] = {
+        "name": "MB2B-LAB", "status": "Paid", "transaction_id": "SBX1", "receiver_public_name": "600000 - LAB",
+        **values}
+    run = make_run(env, ("b2b_pay", "Waiting"))
+    ctx = env.fw.Ctx(run, run.cases[0])
+    ctx.state.update(request="MB2B-LAB", since=NOW - datetime.timedelta(minutes=minutes))
+    result, message = env.sc.check_b2b_pay(ctx)
+    assert result == status and text in message
+
+
+def test_b2b_pay_skips_when_sending_is_refused(env, monkeypatch):
+    # the test invoice has nothing left to pay (earlier runs paid it), the supplier is on hold...:
+    # refused at submit, before anything is sent
+    env.frappe.db.table("Mpesa Settings")["SBX B2B"] = {"name": "SBX B2B"}
+
+    class Request(fake_frappe._dict):
+        def insert(self):
+            self.name = "MB2B-LAB"
+            return self
+
+        def submit(self):
+            raise env.frappe.ValidationError("KES 10 is more than is left to pay.")
+
+    real_get_doc = env.frappe.get_doc
+    monkeypatch.setattr(env.frappe, "get_doc",
+                        lambda d, *a, **kw: Request(d) if isinstance(d, dict) else real_get_doc(d, *a, **kw))
+    run = make_run(env, ("b2b_pay", "Pending"), b2b_settings="SBX B2B", test_supplier="Lab Supplier", amount=10,
+                   test_purchase_invoice="PINV-LAB")
+    with pytest.raises(env.fw.Skip, match="^Could not send the B2B payment: KES 10 is more than is left to pay.$"):
+        env.sc.start_b2b_pay(env.fw.Ctx(run, run.cases[0]))

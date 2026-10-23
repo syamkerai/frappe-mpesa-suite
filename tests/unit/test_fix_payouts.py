@@ -126,7 +126,7 @@ def env(monkeypatch):
         frappe.qb = Q()
         mod = importlib.import_module(MODULE)
         common = importlib.import_module("mpsa_suite.money_in.common")
-        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10: contextlib.nullcontext())
+        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10, **kw: contextlib.nullcontext())
         Doc = _doc_class(frappe, mod)
         get_doc = frappe.get_doc
         frappe.get_doc = lambda d, *a, **kw: (

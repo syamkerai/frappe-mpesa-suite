@@ -41,10 +41,12 @@ def _ref(kwargs) -> str | None:
 
 
 def _run(handler, kwargs, title: str):
+    result = _result(kwargs)
     try:
-        handler(_result(kwargs), _ref(kwargs))
+        handler(result, _ref(kwargs))
     except Exception:
-        frappe.log_error(frappe.get_traceback(), title)
+        # with the Result itself, so one that could not be recorded can be replayed by hand
+        frappe.log_error(title=title, message=f"{frappe.get_traceback()}\nResult: {frappe.as_json(result)}")
         raise
     return ACCEPTED
 

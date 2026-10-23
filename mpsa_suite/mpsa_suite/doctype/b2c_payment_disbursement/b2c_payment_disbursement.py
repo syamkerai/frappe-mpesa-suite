@@ -140,9 +140,12 @@ class B2CPaymentDisbursement(Document):
 
         Runs under a per-document lock held until commit, and reads the other payouts with
         a locking read, so two disbursements submitted at the same moment cannot both pass.
+        B2B requests for an invoice or order count as other payouts; an invoice's order
+        advances (money_out.owed.order_advances) are taken off what it owes, and an order that
+        already has invoices is refused (they are paid instead).
         """
         from ....money_in.common import named_lock
-        from ....money_out.owed import DOC_FIELDS, b2b_open
+        from ....money_out.owed import DOC_FIELDS, b2b_open, billed_order, busy_message, order_advances
         from ..b2c_disbursement_request.b2c_disbursement_request import paid_without_entry
 
         rows = self._rows_to_send()
@@ -155,7 +158,7 @@ class B2CPaymentDisbursement(Document):
         for (doctype, name), allocated in sorted(totals.items()):
             if not doctype or not name:
                 continue
-            with named_lock(f"b2c-pay:{doctype}:{name}"):
+            with named_lock(f"b2c-pay:{doctype}:{name}", busy=busy_message(doctype, name)):
                 others = list(open_payouts(doctype, name, exclude_parent=self.name, exclude_requests=own_requests))
                 # Paid payouts nothing books (entry cancelled, Cancel All, or older than the
                 # retry window) are not in what the document owes; the retry guard counts them
@@ -176,8 +179,24 @@ class B2CPaymentDisbursement(Document):
                         ),
                         title=_("Duplicate Payout"),
                     )
-                owed = current_outstanding(doctype, name, for_update=True)
-                if owed is not None and flt(allocated, 2) > flt(owed, 2):
+                # An advance still on the invoice's orders (B2B, B2C or a bank entry) is not in its
+                # outstanding until Get Advances moves it over: taken off, as for B2B (R3).
+                advances = order_advances(name, for_update=True) if doctype == "Purchase Invoice" else []
+                owed = current_outstanding(doctype, name, for_update=True)  # the document row last (R4)
+                # an invoice made from the order may be paid already (B2B, bank): its advance_paid
+                # does not show that
+                billed = billed_order(name, for_update=True) if doctype == "Purchase Order" else None
+                if billed:
+                    frappe.throw(billed, title=_("Order Already Invoiced"))
+                advance = flt(sum(flt(a.amount) for a in advances), 2)
+                if owed is not None and flt(allocated, 2) > flt(flt(owed) - advance, 2):
+                    if advances:
+                        frappe.throw(
+                            _("{0} {1} owes {2}, less {3}; this disbursement allocates {4}.").format(
+                                doctype, name, flt(owed, 2), "; ".join(a.label for a in advances), flt(allocated, 2)
+                            ),
+                            title=_("Allocated More Than Outstanding"),
+                        )
                     frappe.throw(
                         _("{0} {1} owes {2}; this disbursement allocates {3}.").format(
                             doctype, name, flt(owed, 2), flt(allocated, 2)

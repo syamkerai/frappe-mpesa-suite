@@ -33,6 +33,8 @@ KINDS = ("Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entr
 RETRY_WINDOW_DAYS = 30
 MIN = owed.MIN
 money = owed.money
+# Ends every note about money the request's document could not take.
+PAID_TWICE = "Check that the supplier was not paid twice."
 
 
 # ---------------------------------------------------------------- reading
@@ -175,9 +177,25 @@ def classify(doc, entries, gl=None) -> tuple:
                 f"KES {money(entry.unallocated)} is not allocated: allocate it to {dn} "
                 "(Get Advances or Payment Reconciliation)."
             )
+        if dt:
+            # The request paid this document, which took the money (or part of it) some other way
+            # since: a possible double payment. It stays here until the rest is allocated.
+            return CHECK, entry, _not_taken_note(doc, entry, dn, label)
         if entry.doctype == PE:
             return MADE, entry, f"KES {money(entry.unallocated)} is an unallocated supplier advance ({label})."
     return MADE, entry, f"Booked on {label}."
+
+
+def _not_taken_note(doc, entry, dn, label) -> str:
+    """The note booking wrote (it says why the document could not take the money) while it
+    still names this amount; otherwise a plain one."""
+    note = cstr(doc.get("entry_note"))
+    if doc.get("entry_status") == CHECK and PAID_TWICE in note and f"KES {money(entry.unallocated)} " in note:
+        return note
+    return (
+        f"{dn} has nothing left to pay, and KES {money(entry.unallocated)} of this payment is not on it ({label}). "
+        f"{PAID_TWICE} Then allocate the rest (Payment Reconciliation)."
+    )
 
 
 def set_entry(doc, state: str, note, entry=None, log: bool = True) -> bool:
@@ -206,13 +224,25 @@ def _paid_on(doc):
     return getdate(doc.trans_completed_time) if doc.get("trans_completed_time") else getdate(doc.creation or nowdate())
 
 
+def unlink_entry(doc, field: str, doctype: str, name: str, what: str) -> None:
+    """The request's entry was cancelled or deleted. Staff may have undone it because it went to
+    the wrong document, so the payment is not booked again on its own: it waits for Make Entry."""
+    values = {field: None}
+    if (doc.get("entry_mode") or AUTO) == AUTO:
+        values["entry_mode"] = LATER
+    doc.db_set(values, update_modified=False)
+    doc.add_comment("Comment", f"{doctype} {name} {what}. It is not booked again automatically: press Make Entry.")
+
+
 def refresh_entry(doc, entries=None, feed: bool = True, log: bool = True) -> str:
     """Look again at the entries carrying the request's receipt and record what they show."""
     for field, doctype in (("payment_entry", PE), ("journal_entry", JE)):
         linked = doc.get(field)
-        if linked and frappe.db.get_value(doctype, linked, "docstatus") not in (0, 1):
-            doc.db_set(field, None, update_modified=False)
-            doc.add_comment("Comment", f"{doctype} {linked} was cancelled.")
+        if not linked:
+            continue
+        docstatus = frappe.db.get_value(doctype, linked, "docstatus")
+        if docstatus not in (0, 1):
+            unlink_entry(doc, field, doctype, linked, "was cancelled" if docstatus == 2 else "was deleted")
     if entries is None:
         entries = receipt_entries(doc.transaction_id)
     _, gl, _ = payout_account(doc.name)
@@ -248,12 +278,20 @@ def _peek(name: str):
     return dt, dn, cstr(values.transaction_id).strip()
 
 
+def _alert(doc, message: str) -> None:
+    """Tell notify_role now, whatever was sent before: a possible double payment (all or part of
+    the payout stayed off its document), or money paid after the request was cancelled."""
+    from .supplier_accounts import _alert as alert
+
+    alert(message, doc)
+
+
 def _alert_once(doc, message: str) -> None:
+    """Once per request (entry_alerted_on): a failed automatic booking, which the sweep retries,
+    and the reminder share it."""
     if doc.get("entry_alerted_on"):
         return
-    from .supplier_accounts import _alert
-
-    _alert(message, doc)
+    _alert(doc, message)
     doc.db_set("entry_alerted_on", now_datetime(), update_modified=False)
 
 
@@ -273,8 +311,8 @@ def book_automatically(name: str) -> str | None:
         if cint(doc.docstatus) == 2:
             # A Result after the request was cancelled: the money left, but nobody chose to pay it now.
             state, _, note = classify(doc, [])
-            set_entry(doc, state, note)
-            _alert_once(doc, f"{doc.name}: {note}")
+            if set_entry(doc, state, note):
+                _alert(doc, f"{doc.name}: {note}")
             return None
         reason = _not_automatic(doc)
         if reason:
@@ -323,11 +361,19 @@ def _book(doc, dt, dn) -> str | None:
         return None
     refresh_entry(doc, receipt_entries(doc.transaction_id), feed=False, log=not problem)
     if problem:
-        # The document took the money elsewhere since: a possible double payment.
-        set_entry(doc, CHECK, problem)
-        doc.add_comment("Comment", problem)
-        _alert_once(doc, f"{doc.name}: {problem}")
+        # The document took the money (or part of it) elsewhere since: a possible double payment.
+        # Always alerted, even after an earlier booking-failure alert (one entry per receipt: this
+        # runs once).
+        _not_taken(doc, problem)
     return pe.name
+
+
+def _not_taken(doc, problem: str) -> None:
+    """Part or all of the payout stayed off the document it was for: Needs Checking, a comment
+    and an alert."""
+    set_entry(doc, CHECK, problem)
+    doc.add_comment("Comment", problem)
+    _alert(doc, f"{doc.name}: {problem}")
 
 
 def remark_text(doc, dn=None, extra=None) -> str:
@@ -414,7 +460,8 @@ def build_payment_entry(doc, dt, dn, supplier: str, amount: float, cap=None, rem
 
 def reference_rows(dt, dn, amount: float, cap=None) -> tuple:
     """(rows, problem): how much of the payout the document takes, as Payment Entry references.
-    What it cannot take stays on the same entry, unallocated (an advance to the supplier)."""
+    What it cannot take stays on the same entry, unallocated (an advance to the supplier), and
+    ``problem`` says so: the document was paid (in part) another way, a possible double payment."""
     if not dt:
         return [], None
     values = owed.read_document(dt, dn, for_update=True)  # the document row, last (R4)
@@ -438,13 +485,20 @@ def reference_rows(dt, dn, amount: float, cap=None) -> tuple:
     if reason:
         return [], (
             f"{dn} could no longer take this payment ({reason}), so KES {money(amount)} is an unallocated "
-            "supplier advance. Check that the supplier was not paid twice."
+            f"supplier advance. {PAID_TWICE}"
         )
     if cap is not None:
         limit = min(limit, flt(cap))
     allocate = flt(min(flt(amount), limit), 2)
     if allocate <= MIN:
         return [], None
+    rest = flt(flt(amount) - allocate, 2)
+    problem = None
+    if rest > MIN:
+        problem = (
+            f"{dn} could take only KES {money(allocate)} of this payment, so KES {money(rest)} is an unallocated "
+            f"supplier advance. {PAID_TWICE}"
+        )
     template = values.get("payment_terms_template")
     if template and cint(frappe.db.get_value("Payment Terms Template", template, "allocate_payment_based_on_payment_terms")):
         rows, remaining = [], allocate
@@ -465,8 +519,8 @@ def reference_rows(dt, dn, amount: float, cap=None) -> tuple:
             rows.append({"reference_doctype": dt, "reference_name": dn, "allocated_amount": take,
                          "payment_term": term.payment_term})
             remaining = flt(remaining - take, 2)
-        return rows, None
-    return [{"reference_doctype": dt, "reference_name": dn, "allocated_amount": allocate}], None
+        return rows, problem
+    return [{"reference_doctype": dt, "reference_name": dn, "allocated_amount": allocate}], problem
 
 
 def build_journal_entry(doc, account: str, cost_center, remark: str):
@@ -549,9 +603,9 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
         entry.insert()
         if cint(submit) and frappe.has_permission(entry_doctype, "submit"):
             entry.submit()
-        refresh_entry(doc, receipt_entries(receipt), feed=False)
+        refresh_entry(doc, receipt_entries(receipt), feed=False, log=not problem)
         if problem:
-            set_entry(doc, CHECK, problem)
+            _not_taken(doc, problem)  # the document took only part of it: the rest is an advance
     statement.after_payout(B2B, name)  # the payout line is reconciled with the entry now
     return {"doctype": entry_doctype, "name": entry.name, "docstatus": cint(entry.docstatus),
             "entry_status": doc.get("entry_status")}
@@ -638,7 +692,8 @@ def entry_facts(name):
 def allow_cancel(doc, method=None) -> None:
     """Payment / Journal Entry on_cancel: the B2B request's link to it does not stop the cancel
     (Frappe refuses to cancel what a submitted document links). The next check clears the link,
-    and the payout counts against its document again (R8)."""
+    the payout counts against its document again (R8) and waits for Make Entry. The desk's
+    Cancel does not offer to cancel the request first: hooks.auto_cancel_exempted_doctypes."""
     linked = tuple(getattr(doc, "ignore_linked_doctypes", None) or ())
     if B2B not in linked:
         doc.ignore_linked_doctypes = (*linked, B2B)
@@ -650,8 +705,7 @@ def unlink_deleted(doc, method=None) -> None:
     if not frappe.get_meta(B2B).has_field(field):
         return
     for name in frappe.get_all(B2B, filters={field: doc.name}, pluck="name", order_by="creation asc"):
-        frappe.db.set_value(B2B, name, field, None, update_modified=False)
-        frappe.get_doc(B2B, name).add_comment("Comment", f"{doc.doctype} {doc.name} was deleted.")
+        unlink_entry(frappe.get_doc(B2B, name), field, doc.doctype, doc.name, "was deleted")
 
 
 # ---------------------------------------------------------------- the sweep and the upgrade
@@ -664,9 +718,10 @@ def refresh_entries(limit: int = 100) -> None:
     """Every 15 minutes: Paid requests whose entry is not made, not submitted or changed since.
 
     Each is looked at again (an entry staff made by hand, or one cancelled since, is found by its
-    receipt); a failed automatic booking is tried again for 30 days; notify_role is reminded once
-    when one still has no entry after Entry Reminder (Days). Requests Paid before this release
-    (never tried) are only looked at, never booked.
+    receipt); a failed or lost automatic booking is tried again for 30 days; notify_role is
+    reminded once when one still has no entry after Entry Reminder (Days). Requests Paid before
+    this release (no entry_attempted_on) are only looked at, never booked, and neither is a
+    request whose entry staff cancelled or deleted.
     """
     if not _ready():
         return
@@ -706,15 +761,20 @@ def _refresh_one(name: str, cutoff) -> None:
         if doc.status != "Paid" or not receipt:
             return
         entries = receipt_entries(receipt, for_update=True)
-        refresh_entry(doc, entries)
+        before = doc.get("entry_status")
+        refresh_entry(doc, entries)  # an entry cancelled or deleted since: "Make the entry later" now
+        if not entries and cint(doc.docstatus) == 2 and before != CHECK and doc.get("entry_status") == CHECK:
+            # Paid after it was cancelled, and the Result's job never ran: told here instead.
+            _alert(doc, f"{doc.name}: {doc.get('entry_note')}")
         if (
             not entries
-            and (doc.get("entry_mode") or AUTO) == AUTO
             and cint(doc.docstatus) == 1
-            and doc.get("entry_attempted_on")
+            and doc.get("entry_attempted_on")  # set by the Result: none on rows Paid before this release
             and getdate(doc.creation) >= cutoff
         ):
-            booked = bool(book_automatically(name))  # takes the same locks again: they are held
+            # Books only "Book automatically" requests (a lost or failed job is tried again); the
+            # others get their reason on the note. Takes the same locks again: they are held.
+            booked = bool(book_automatically(name))
         elif doc.get("entry_attempted_on"):
             # looked at again: to the back of the queue, so one stuck request cannot hold up the rest
             doc.db_set("entry_attempted_on", now_datetime(), update_modified=False)

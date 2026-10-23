@@ -15,6 +15,8 @@ frappe.ui.form.on("Purchase Invoice", {
 				() =>
 					frappe.new_doc("Mpesa B2B Payment Request", {
 						purchase_invoice: doc.name,
+						// the invoice's company, not the user's default one
+						company: doc.company,
 						remarks: [doc.name, doc.bill_no].filter(Boolean).join(" ").slice(0, 100),
 					}),
 				__("M-Pesa")

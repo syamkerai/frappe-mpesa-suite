@@ -15,6 +15,8 @@ frappe.ui.form.on("Purchase Order", {
 				() =>
 					frappe.new_doc("Mpesa B2B Payment Request", {
 						purchase_order: doc.name,
+						// the order's company, not the user's default one
+						company: doc.company,
 						remarks: __("Advance on {0}", [doc.name]).slice(0, 100),
 					}),
 				__("M-Pesa")

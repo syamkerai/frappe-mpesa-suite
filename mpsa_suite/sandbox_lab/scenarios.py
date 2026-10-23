@@ -648,22 +648,28 @@ def start_b2b_blocked(ctx):
 def start_b2b_pay(ctx):
     settings(ctx, "b2b_settings", "B2B Mpesa Settings")
     supplier = ctx.need("test_supplier", "Test Supplier")
+    # The lab pays its own test supplier again on every run: its earlier lab payouts (supplier
+    # advances) are known not to have paid the test invoice.
     doc = frappe.get_doc({"doctype": B2B, "mpesa_settings": ctx.run.b2b_settings, "supplier": supplier,
                           "purchase_invoice": ctx.run.test_purchase_invoice or None, "amount": amount(ctx),
-                          "remarks": "Sandbox lab"})
+                          "remarks": "Sandbox lab", "checked_earlier_payouts": 1})
     try:
         doc.insert()
     except frappe.ValidationError as e:
         raise Skip(f"Could not create the B2B payment: {e}. Give {supplier} an approved Supplier M-Pesa Account "
                    "(Party B 600000 from Test Credentials) and set the hold to 0 hours for the lab.")
-    doc.submit()
+    try:
+        doc.submit()  # every check runs again here, before anything is sent
+    except frappe.ValidationError as e:
+        raise Skip(f"Could not send the B2B payment: {e}")
     ctx.set_reference(B2B, doc.name)
     ctx.save(request=doc.name, since=now_datetime())
 
 
 def check_b2b_pay(ctx):
     row = frappe.db.get_value(B2B, ctx.state["request"], ["status", "result_desc", "error_message", "transaction_id",
-                                                          "payment_entry", "purchase_invoice", "receiver_public_name",
+                                                          "payment_entry", "journal_entry", "entry_status",
+                                                          "entry_note", "receiver_public_name",
                                                           "receiver_name_mismatch"], as_dict=True)
     if row.status in ("Failed", "Unknown"):
         return FAILED, f"{row.status}: {row.result_desc or row.error_message}"
@@ -671,11 +677,15 @@ def check_b2b_pay(ctx):
         return WAITING, f"Waiting for Safaricom's B2B result ({row.status})"
     ctx.save(receipt=row.transaction_id)
     note = f"; M-Pesa paid '{row.receiver_public_name}'" + (" (name did not match the account)" if row.receiver_name_mismatch else "")
-    if row.purchase_invoice and not row.payment_entry:
-        if ctx.minutes_since() > 6:
-            return FAILED, f"Paid ({row.transaction_id}) but no Payment Entry after 6 minutes" + note
-        return WAITING, "Paid; waiting for the Payment Entry"
-    return PASSED, f"Paid ({row.transaction_id})" + (f", booked by {row.payment_entry}" if row.payment_entry else "") + note
+    entry = row.payment_entry or row.journal_entry
+    if row.entry_status in ("Entry Made", "Draft Entry") and entry:
+        return PASSED, f"Paid ({row.transaction_id}), booked by {entry} ({row.entry_status})" + note
+    if row.entry_status == "Needs Checking":
+        return FAILED, f"Paid ({row.transaction_id}) but the entry needs checking: {row.entry_note}" + note
+    # the lab books automatically, so no entry yet means the booking job is late or failed
+    if ctx.minutes_since() > 6:
+        return FAILED, f"Paid ({row.transaction_id}) but no accounting entry after 6 minutes: {row.entry_note or ''}" + note
+    return WAITING, "Paid; waiting for the accounting entry"
 
 
 def start_b2b_replay(ctx):

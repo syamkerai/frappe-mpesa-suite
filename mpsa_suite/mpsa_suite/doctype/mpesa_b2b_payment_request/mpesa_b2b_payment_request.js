@@ -107,7 +107,14 @@ const mpsa_b2b = {
 			frm.mpsa_filling = true;
 			try {
 				if (r.supplier && frm.doc.supplier !== r.supplier) await frm.set_value("supplier", r.supplier);
-				if (r.company && !frm.doc.company) await frm.set_value("company", r.company);
+				// the company follows the document (the server does the same); a shortcode of
+				// another company no longer fits
+				if (r.company && frm.doc.company !== r.company) {
+					await frm.set_value("company", r.company);
+					if (frm.doc.mpesa_settings && !r.mpesa_settings.includes(frm.doc.mpesa_settings)) {
+						await frm.set_value("mpesa_settings", null);
+					}
+				}
 				if (!frm.doc.mpesa_settings && r.mpesa_settings.length === 1) {
 					await frm.set_value("mpesa_settings", r.mpesa_settings[0]);
 				}

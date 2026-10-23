@@ -12,7 +12,7 @@ the document, and what is left to pay with B2B, B2C, draft entries and order adv
 """
 
 import frappe
-from frappe.utils import cint, cstr, flt
+from frappe.utils import cint, cstr, flt, now_datetime
 
 from ..daraja import apis
 from ..daraja import money_out as daraja
@@ -26,6 +26,9 @@ B2B_DOCTYPE = "Mpesa B2B Payment Request"
 FINAL = ("Paid", "Failed")
 # When Paid: book the Payment Entry at once, or wait for Make Entry (b2b_entries).
 AUTO, LATER = "Book automatically", "Make the entry later"
+# A Result that meets a deadlock or a row lock held past MariaDB's lock wait is recorded again
+# from a job, this many tries in all: Safaricom may never send it again.
+RESULT_TRIES = 5
 
 
 def send_b2b(name: str) -> None:
@@ -55,7 +58,22 @@ def send_b2b(name: str) -> None:
     apply_ack(doc, data, error)
 
 
-def handle_result(result: dict, ref: str | None) -> None:
+def handle_result(result: dict, ref: str | None, attempt: int = 1) -> None:
+    """Safaricom's Result (the callback, or a job trying it again). Recording it is idempotent:
+    a Result already recorded changes nothing."""
+    try:
+        _record_result(result, ref)
+    except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+        frappe.db.rollback()  # met before the Result's log commits: nothing of it was kept
+        if attempt >= RESULT_TRIES:
+            frappe.log_error(title="M-Pesa B2B Result not recorded",
+                             message=f"ref {ref}\n{frappe.as_json(result)}\n{frappe.get_traceback()}")
+            raise
+        frappe.enqueue("mpsa_suite.money_out.b2b.handle_result", queue="short", timeout=300, result=result,
+                       ref=ref, attempt=attempt + 1)
+
+
+def _record_result(result: dict, ref: str | None) -> None:
     doc = find_request(B2B_DOCTYPE, result, ref)
     if not doc:
         log_callback({"Result": result}, "Mpesa B2B Result (unmatched)", B2B_DOCTYPE, ref, "Failed")
@@ -65,7 +83,12 @@ def handle_result(result: dict, ref: str | None) -> None:
 
     values = daraja.result_values(result)
     outcome = daraja.b2b_outcome(result)
-    entry = {"entry_status": "Entry Not Made", "entry_note": "Booking the entry…"} if outcome == "Paid" else {}
+    entry = {}
+    if outcome == "Paid":
+        # entry_attempted_on marks a request Paid since this release: the sweep books it if the job
+        # below is lost or fails before it commits (only rows Paid before the release have none)
+        entry = {"entry_status": "Entry Not Made", "entry_note": "Booking the entry…",
+                 "entry_attempted_on": now_datetime()}
     doc.db_set(
         {
             **entry,
@@ -139,16 +162,17 @@ def validate_request(doc, at_submit: bool = False) -> None:
 
 
 def _take_from_document(doc, dt: str, dn: str) -> None:
-    """Supplier and company come from the invoice or order; typed ones must agree."""
+    """Supplier and company come from the invoice or order. A typed supplier must agree. The
+    company always follows the document: Frappe fills a new request's company from the user's
+    default, so a different one says nothing about the pick. The shortcode must then pay for
+    the document's company (_check_settings)."""
     values = owed.read_document(dt, dn)
     if not values:
         frappe.throw(f"{dt} {dn} not found")
     if doc.supplier and doc.supplier != values.supplier:
         frappe.throw(f"{dn} belongs to {values.supplier}, not {doc.supplier}.")
-    if doc.company and values.company and doc.company != values.company:
-        frappe.throw(f"{dn} belongs to {values.company}, not {doc.company}.")
     doc.supplier = values.supplier
-    doc.company = doc.company or values.company
+    doc.company = values.company or doc.company
 
 
 def _check_fields(doc) -> None:
@@ -206,6 +230,8 @@ def _check_document(doc, dt: str, dn: str, for_update: bool = False) -> None:
         frappe.throw(problems[0])
     if doc.supplier and values.supplier != doc.supplier:
         frappe.throw(f"{dn} belongs to {values.supplier}, not {doc.supplier}.")
+    if values.get("company") and doc.company != values.company:  # only server code can get here
+        frappe.throw(f"{dn} belongs to {values.company}, not {doc.company or 'no company'}.")
     if flt(doc.amount) > result.left + 0.001:
         frappe.throw(f"KES {owed.money(doc.amount)} is more than is left to pay. {owed.explain(dn, result)}")
 

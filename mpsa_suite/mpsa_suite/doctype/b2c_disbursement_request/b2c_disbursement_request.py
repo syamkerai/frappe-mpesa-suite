@@ -63,10 +63,14 @@ class B2CDisbursementRequest(Document):
     def _document_lock(self):
         """The double-payout check's per-document lock (held until commit; re-entrant)."""
         from ....money_in.common import named_lock
+        from ....money_out.owed import busy_message
 
         if not self.reference_doctype or not self.reference_name:
             return contextlib.nullcontext()
-        return named_lock(f"b2c-pay:{self.reference_doctype}:{self.reference_name}")
+        return named_lock(
+            f"b2c-pay:{self.reference_doctype}:{self.reference_name}",
+            busy=busy_message(self.reference_doctype, self.reference_name),
+        )
 
     def validate_still_owed(self) -> None:
         """Refuse a retry the document no longer needs: a failed payout stops counting, so the
@@ -79,9 +83,11 @@ class B2CDisbursementRequest(Document):
         counts here however old, also once cancelled or once its entry was cancelled
         (``paid_without_entry``): a retry resends without anyone choosing the document again.
         A Paid payout that a row of this disbursement links (a row an amend copied from the
-        cancelled original, which is not sent again) is this disbursement's own.
+        cancelled original, which is not sent again) is this disbursement's own. B2B requests
+        for the document refuse it too, an invoice's order advances are taken off, and an order
+        that has invoices since is refused.
         """
-        from ....money_out.owed import DOC_FIELDS, b2b_open
+        from ....money_out.owed import DOC_FIELDS, b2b_open, billed_order, order_advances
         from ..b2c_payment_disbursement.b2c_payment_disbursement import (
             current_outstanding,
             open_payouts,
@@ -111,7 +117,12 @@ class B2CDisbursementRequest(Document):
                     ),
                     title=_("Duplicate Payout"),
                 )
-            owed = current_outstanding(dt, dn, for_update=True)
+            # an advance still on the invoice's orders is taken off, as on submit (R3)
+            advances = order_advances(dn, for_update=True) if dt == "Purchase Invoice" else []
+            owed = current_outstanding(dt, dn, for_update=True)  # the document row last (R4)
+            billed = billed_order(dn, for_update=True) if dt == "Purchase Order" else None
+            if billed:  # its invoices are paid instead (B2B may have paid them already)
+                frappe.throw(billed, title=_("Order Already Invoiced"))
             if owed is None:
                 return
             pending = sum(
@@ -120,6 +131,15 @@ class B2CDisbursementRequest(Document):
                 # a Salary Slip's owed already has every Paid payout taken off
                 if not (dt == "Salary Slip" and o.request_status == "Paid")
             )
+            advance = flt(sum(flt(a.amount) for a in advances), 2)
+            if advance and flt(flt(self.amount) + pending + advance, 2) > flt(owed, 2):
+                frappe.throw(
+                    _("{0} {1} owes {2}, less {3}; retrying would pay {4}, and {5} is still being paid for it.").format(
+                        dt, dn, flt(owed, 2), "; ".join(a.label for a in advances), flt(self.amount, 2),
+                        flt(pending, 2),
+                    ),
+                    title=_("Already Paid"),
+                )
             if flt(flt(self.amount) + pending, 2) > flt(owed, 2):
                 frappe.throw(
                     _("{0} {1} owes {2}; retrying would pay {3}, and {4} is still being paid for it.").format(

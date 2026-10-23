@@ -270,12 +270,13 @@ def compact(value) -> str:
 
 # ---------------------------------------------------------------- concurrency / users
 @contextmanager
-def named_lock(key: str, timeout: int = 10):
+def named_lock(key: str, timeout: int = 10, busy: str | None = None):
     """Cross-worker mutex (MariaDB GET_LOCK) for idempotent inserts keyed by receipt.
 
     Held until this transaction commits or rolls back, not just to the end of the block:
     released earlier, a second worker could take it, miss our uncommitted insert and
     insert a duplicate. Re-entering the same key in one transaction is a no-op.
+    ``busy``: the message when another worker still holds it after ``timeout`` seconds.
     """
     if frappe.db.db_type != "mariadb":
         yield
@@ -285,7 +286,7 @@ def named_lock(key: str, timeout: int = 10):
     if lock not in held:
         got = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (lock, timeout))[0][0]
         if not got:
-            frappe.throw(f"Could not acquire lock {lock}")
+            frappe.throw(busy or f"Could not acquire lock {lock}")
         if not held:
             # commit resets the rollback callbacks and vice versa, so exactly one runs
             frappe.db.after_commit.add(release_named_locks)

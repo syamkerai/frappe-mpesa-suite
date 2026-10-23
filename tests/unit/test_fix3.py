@@ -278,11 +278,13 @@ def payout(monkeypatch):
             common = importlib.import_module("mpsa_suite.money_in.common")
             disb = importlib.import_module(DISB_MODULE)
             owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
-            env = fake_frappe._dict(frappe=frappe, open=[], stale=[], b2b=[], owed=100000, calls=[], locks=[])
+            env = fake_frappe._dict(frappe=frappe, open=[], stale=[], b2b=[], advances=[], owed=100000, calls=[],
+                                    locks=[], busy=[])
 
             @contextlib.contextmanager
-            def named_lock(key, timeout=10):
+            def named_lock(key, timeout=10, busy=None):
                 env.locks.append(key)
+                env.busy.append(busy)
                 try:
                     yield
                 finally:
@@ -304,11 +306,16 @@ def payout(monkeypatch):
                 env.calls.append(("b2b_open", doctype, name, for_update, list(env.locks)))
                 return [fake_frappe._dict(o) for o in env.b2b]
 
+            def order_advances(pi, for_update=False, exclude_request=None):
+                env.calls.append(("order_advances", pi, for_update, list(env.locks)))
+                return [fake_frappe._dict(o) for o in env.advances]
+
             monkeypatch.setattr(common, "named_lock", named_lock)
             monkeypatch.setattr(disb, "open_payouts", open_payouts)
             monkeypatch.setattr(disb, "current_outstanding", current_outstanding)
             monkeypatch.setattr(req_mod, "paid_without_entry", paid_without_entry)
             monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
+            monkeypatch.setattr(owed_mod, "order_advances", order_advances)
 
             def disbursement(name, *rows):
                 doc = disb.B2CPaymentDisbursement()
@@ -355,7 +362,44 @@ def test_b2b_is_not_asked_about_for_other_documents(payout):
     doc = payout.disbursement("D-NEW", {"allocated_amount": 500, "reference_doctype": "Expense Claim",
                                         "reference_name": "EC-1"})
     doc.validate_no_double_payout()
-    assert not [c for c in payout.calls if c[0] == "b2b_open"]
+    assert not [c for c in payout.calls if c[0] in ("b2b_open", "order_advances")]
+
+
+def test_submit_takes_off_an_advance_still_on_the_invoices_order(payout):
+    # a B2B advance paid on PO-1, the invoice made from it without Get Advances: its outstanding
+    # still shows the whole 100,000, but 60,000 of it is already paid (R3, as for B2B)
+    payout.advances = [{"kind": "advance", "name": "PO-1", "amount": 60000,
+                        "label": "advance still on PO-1 60,000 (allocate it with Get Advances first)"}]
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 50000})
+    with pytest.raises(payout.frappe.ValidationError,
+                       match="PI-1 owes 100000.0, less advance still on PO-1 60,000 .*; this disbursement allocates "
+                             "50000.0"):
+        doc.validate_no_double_payout()
+    key = "b2c-pay:Purchase Invoice:PI-1"
+    calls = [c[0] for c in payout.calls]
+    # under the lock, and read before the invoice's row (R4)
+    assert ("order_advances", "PI-1", True, [key]) in payout.calls
+    assert calls.index("order_advances") < calls.index("current_outstanding")
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 40000})
+    doc.validate_no_double_payout()  # what is left
+
+
+def test_submit_refuses_an_order_that_already_has_invoices(payout):
+    # PI-1 made from PO-1 may be paid already (B2B, bank); PO-1's advance_paid does not show it
+    payout.frappe.db.table("Purchase Order")["PO-1"] = {"name": "PO-1", "per_billed": 40}
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 500, "reference_doctype": "Purchase Order",
+                                        "reference_name": "PO-1"})
+    with pytest.raises(payout.frappe.ValidationError,
+                       match="^PO-1 already has invoices: pay the Purchase Invoice instead.$"):
+        doc.validate_no_double_payout()
+    assert ("Purchase Order", "PO-1") in payout.frappe.db.locks  # a locking read, under the document lock
+    payout.frappe.db.table("Purchase Order")["PO-1"]["per_billed"] = 0
+    doc.validate_no_double_payout()  # not billed yet: an advance on the order
+
+
+def test_a_second_payer_is_told_another_payment_is_being_sent(payout):
+    payout.disbursement("D-NEW", {"allocated_amount": 500}).validate_no_double_payout()
+    assert payout.busy == ["Another payment for Purchase Invoice PI-1 is being sent or booked. Try again in a minute."]
 
 
 def test_amended_disbursement_counts_its_own_paid_payout_against_what_is_owed(payout):

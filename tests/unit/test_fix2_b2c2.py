@@ -446,10 +446,11 @@ def owed(frappe, monkeypatch):
         post = importlib.import_module(POST)
         common = importlib.import_module("mpsa_suite.money_in.common")
         disb = importlib.import_module(DISB_MODULE)
-        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10: contextlib.nullcontext())
+        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10, **kw: contextlib.nullcontext())
         monkeypatch.setattr(disb, "open_payouts", lambda doctype, name, **kw: [])
         owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
         monkeypatch.setattr(owed_mod, "b2b_open", lambda doctype, name, **kw: [])
+        monkeypatch.setattr(owed_mod, "order_advances", lambda pi, **kw: [])
 
         class Request(mod.B2CDisbursementRequest):
             doctype = REQ

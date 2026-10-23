@@ -70,10 +70,16 @@ def document_of(values) -> tuple:
 
 
 def doc_lock(dt: str, dn: str):
-    """The per-document lock B2C's guard takes too, held until commit."""
+    """The per-document lock B2C's guard takes too, held until commit. A B2B submit holds it
+    through the call to M-Pesa, so a second payer waits and may be told to try again."""
     from ..money_in.common import named_lock
 
-    return named_lock(f"b2c-pay:{dt}:{dn}")
+    return named_lock(f"b2c-pay:{dt}:{dn}", busy=busy_message(dt, dn))
+
+
+def busy_message(dt: str, dn: str) -> str:
+    """What a second payer (or booking job) is told when the document's lock stays taken."""
+    return f"Another payment for {dt} {dn} is being sent or booked. Try again in a minute."
 
 
 def read_document(dt: str, dn: str, for_update: bool = False):
@@ -104,8 +110,20 @@ def document_problems(dt: str, values) -> list:
         if values.get("status") in ORDER_CLOSED:
             problems.append(f"{name} is {values.status}.")
         if flt(values.get("per_billed"), 2) > 0:
-            problems.append(f"{name} already has invoices: pay the Purchase Invoice instead.")
+            problems.append(billed_message(name))
     return problems
+
+
+def billed_message(po: str) -> str:
+    return f"{po} already has invoices: pay the Purchase Invoice instead."
+
+
+def billed_order(po: str, for_update: bool = False) -> str | None:
+    """Why B2C may not pay this order: it already has invoices. Paying an invoice does not
+    change its order's advance_paid, so the order would still look unpaid (B2B refuses it in
+    document_problems)."""
+    per_billed = frappe.db.get_value("Purchase Order", po, "per_billed", for_update=for_update)
+    return billed_message(po) if flt(per_billed, 2) > 0 else None
 
 
 def supplier_hold(supplier) -> str | None:
@@ -263,9 +281,11 @@ def draft_entries(dt: str, dn: str, skip_receipts=(), for_update: bool = False) 
     ]
 
 
-def order_advance(po: str, for_update: bool = False) -> float:
+def order_advance(po: str, for_update: bool = False, exclude_request: str | None = None) -> float:
     """The order's advance not yet moved onto an invoice (F4): submitted entries still referencing
-    the order, plus its B2B and B2C payouts not yet booked."""
+    the order, plus its B2B and B2C payouts not yet booked. ``exclude_request``: the B2B request
+    being checked, which must not count against itself (a draft moved from the order to its
+    invoice, or Make Entry booking an order's payout on the invoice made from it)."""
     locking = _locking(for_update)
     entries = frappe.db.sql(
         f"""
@@ -288,7 +308,8 @@ def order_advance(po: str, for_update: bool = False) -> float:
         (po,),
     )
     total = sum(flt(r[0]) for r in entries)
-    total += sum(flt(r.allocated_amount) for r in b2b_open("Purchase Order", po, for_update=for_update))
+    total += sum(flt(r.allocated_amount)
+                 for r in b2b_open("Purchase Order", po, exclude=exclude_request, for_update=for_update))
     total += sum(flt(r.allocated_amount) for r in b2c_open("Purchase Order", po))
     return flt(total, 2)
 
@@ -305,12 +326,12 @@ def invoice_orders(pi: str) -> list:
     return sorted({cstr(r[0]).strip() for r in rows} - {""})
 
 
-def order_advances(pi: str, for_update: bool = False) -> list:
+def order_advances(pi: str, for_update: bool = False, exclude_request: str | None = None) -> list:
     """For each order on the invoice: its advance not yet moved onto an invoice. Get Advances on
     the invoice moves it over; until then the invoice's outstanding does not show it."""
     parts = []
     for po in invoice_orders(pi):
-        total = order_advance(po, for_update)
+        total = order_advance(po, for_update, exclude_request)
         if total > MIN:
             parts.append(
                 frappe._dict(
@@ -349,7 +370,7 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, fo
         parts.append(frappe._dict(kind="draft", name=entry.name, amount=entry.amount,
                                   label=f"draft {entry.doctype} {entry.name} {money(entry.amount)}"))
     if dt == "Purchase Invoice":
-        parts += order_advances(dn, for_update)
+        parts += order_advances(dn, for_update, exclude_request)
     owed = outstanding(dt, dn, for_update)  # last: the document row (R4)
     left = max(0.0, flt(owed - sum(flt(p.amount) for p in parts), 2))
     return frappe._dict(owed=owed, parts=parts, left=left)
