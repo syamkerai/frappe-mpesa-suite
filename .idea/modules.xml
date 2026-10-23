@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/frappe_mpsa_payments.iml" filepath="$PROJECT_DIR$/.idea/frappe_mpsa_payments.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/mpsa_suite.iml" filepath="$PROJECT_DIR$/.idea/mpsa_suite.iml" />
     </modules>
   </component>
 </project>

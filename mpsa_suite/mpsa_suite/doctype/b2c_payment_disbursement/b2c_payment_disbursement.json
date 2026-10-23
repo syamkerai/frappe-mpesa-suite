@@ -1,0 +1,348 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2023-10-30 11:38:30.870409",
+ "default_view": "List",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "payment_type_section",
+  "naming_series",
+  "payment_type",
+  "column_break_igvg",
+  "posting_date",
+  "payment_to",
+  "party_type",
+  "transaction_to_pay_against",
+  "section_break_ojka",
+  "paid_amount",
+  "source_exchange_rate",
+  "column_break_ukue",
+  "base_paid_amount",
+  "target_exchange_rate",
+  "section_break_rrbq",
+  "get_references",
+  "references",
+  "payment_status",
+  "status",
+  "column_break_oy1c",
+  "amended_from",
+  "payment_schedule",
+  "more_info_section",
+  "retry_count",
+  "column_break_rpjq",
+  "last_status_check"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "MPESA-B2C-.YYYY.-\nB2C-ACC-.YYYY.-"
+  },
+  {
+   "fieldname": "party_type",
+   "fieldtype": "Link",
+   "label": "Party Type",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.paid_to;",
+   "fieldname": "section_break_rrbq",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "Not Initiated",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "no_copy": 1,
+   "options": "\nNot Initiated\nInitiated\nPaid\nPartially Paid\nFailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_oy1c",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "B2C Payment Disbursement",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "payment_schedule",
+   "fieldtype": "Link",
+   "label": "Payment Schedule",
+   "options": "M-Pesa Payment Schedule",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "depends_on": "eval:doc.payment_schedule",
+   "description": "Made by Pay Selected for the phone lines of this M-Pesa Payment Schedule."
+  },
+  {
+   "default": "Mpesa Disbursement",
+   "fieldname": "payment_type",
+   "fieldtype": "Select",
+   "label": "Payment Type",
+   "options": "Mpesa Disbursement",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_igvg",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "now",
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Posting Date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "payment_to",
+   "fieldtype": "Section Break",
+   "label": "Payment To"
+  },
+  {
+   "depends_on": "eval: doc.docstatus == 0",
+   "fieldname": "get_references",
+   "fieldtype": "Button",
+   "label": "Get References"
+  },
+  {
+   "allow_bulk_edit": 1,
+   "allow_on_submit": 1,
+   "fieldname": "references",
+   "fieldtype": "Table",
+   "label": "References",
+   "options": "B2C Payment Disbursement Reference"
+  },
+  {
+   "depends_on": "eval:doc.party_type;",
+   "fieldname": "transaction_to_pay_against",
+   "fieldtype": "Link",
+   "label": "Transaction To Pay Against",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "fieldname": "payment_status",
+   "fieldtype": "Section Break",
+   "label": "Payment Status"
+  },
+  {
+   "fieldname": "section_break_ojka",
+   "fieldtype": "Section Break",
+   "label": "Amount"
+  },
+  {
+   "fieldname": "paid_amount",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Paid Amount"
+  },
+  {
+   "fieldname": "source_exchange_rate",
+   "fieldtype": "Float",
+   "hidden": 1,
+   "label": "Source Exchange Rate",
+   "precision": "9",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "column_break_ukue",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "base_paid_amount",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Paid Amount (KES)",
+   "options": "KES",
+   "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "target_exchange_rate",
+   "fieldtype": "Float",
+   "hidden": 1,
+   "label": "Target Exchange Rate",
+   "precision": "9",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "payment_type_section",
+   "fieldtype": "Section Break",
+   "label": "Type of Payment"
+  },
+  {
+   "fieldname": "more_info_section",
+   "fieldtype": "Section Break",
+   "label": "More Info",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Retry Count",
+   "no_copy": 1,
+   "print_hide": 1
+  },
+  {
+   "fieldname": "column_break_rpjq",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "last_status_check",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Last Status Check",
+   "no_copy": 1,
+   "print_hide": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [
+  {
+   "group": "B2C Requests",
+   "link_doctype": "B2C Disbursement Request",
+   "link_fieldname": "b2c_payment_disbursement"
+  },
+  {
+   "group": "Accounting Entries",
+   "link_doctype": "Journal Entry",
+   "link_fieldname": "b2c_payment_disbursement",
+   "parent_doctype": "Journal Entry",
+   "table_fieldname": "accounts"
+  },
+  {
+   "group": "Accounting Entries",
+   "link_doctype": "Payment Entry",
+   "link_fieldname": "b2c_payment_disbursement",
+   "parent_doctype": "Payment Entry",
+   "table_fieldname": "references"
+  }
+ ],
+ "modified": "2026-10-23 22:00:00.000000",
+ "modified_by": "a@d.com",
+ "module": "Mpsa Suite",
+ "name": "B2C Payment Disbursement",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "HR Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Payer",
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Viewer"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [
+  {
+   "color": "Gray",
+   "title": "Not Initiated"
+  },
+  {
+   "color": "Yellow",
+   "title": "Initiated"
+  },
+  {
+   "color": "Green",
+   "title": "Paid"
+  },
+  {
+   "color": "Orange",
+   "title": "Partially Paid"
+  },
+  {
+   "color": "Red",
+   "title": "Failed"
+  }
+ ],
+ "track_changes": 1,
+ "track_seen": 1
+}

@@ -29,12 +29,12 @@ REF = "B2C Payment Disbursement Reference"
 REQ = "B2C Disbursement Request"
 PE, PER = "Payment Entry", "Payment Entry Reference"
 JE, JEA = "Journal Entry", "Journal Entry Account"
-RESP = "frappe_mpsa_payments.services.b2c_response_service"
-POST = "frappe_mpsa_payments.services.b2c_postprocess_service"
-JOURNAL = "frappe_mpsa_payments.accounting.journal_service"
-PATCH = "frappe_mpsa_payments.frappe_mpsa_payments.patches.relink_b2c_reference_rows"
-REQ_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_disbursement_request.b2c_disbursement_request"
-DISB_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
+RESP = "mpsa_suite.services.b2c_response_service"
+POST = "mpsa_suite.services.b2c_postprocess_service"
+JOURNAL = "mpsa_suite.accounting.journal_service"
+PATCH = "mpsa_suite.mpsa_suite.patches.relink_b2c_reference_rows"
+REQ_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+DISB_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
 
 
 @contextlib.contextmanager
@@ -135,7 +135,7 @@ def book(frappe):
 
     journal = types.ModuleType(JOURNAL)
     journal.create_journal_entry = create_journal_entry
-    payment = types.ModuleType("frappe_mpsa_payments.accounting.payment_entry_service")
+    payment = types.ModuleType("mpsa_suite.accounting.payment_entry_service")
     payment.create_payment_entry_for_doc = create_payment_entry_for_doc
     with _stub_modules(**{journal.__name__: journal, payment.__name__: payment}):
         frappe.db.sql = _entry_sql(frappe)
@@ -409,11 +409,11 @@ class ProgrammingError(Exception):
 @pytest.fixture
 def owed(frappe, monkeypatch):
     sends, queries = [], []
-    b2c_api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.b2c")
+    b2c_api = types.ModuleType("mpsa_suite.mpsa_suite.api.b2c")
     b2c_api.make_b2c_payment_request = sends.append
     query_builder = types.ModuleType("frappe.query_builder")
     query_builder.DocType = lambda name: None
-    payment = types.ModuleType("frappe_mpsa_payments.accounting.payment_entry_service")
+    payment = types.ModuleType("mpsa_suite.accounting.payment_entry_service")
     payment.create_payment_entry_for_doc = lambda *a, **kw: None
     with _stub_modules(**{b2c_api.__name__: b2c_api, "frappe.query_builder": query_builder,
                           payment.__name__: payment}):
@@ -425,7 +425,7 @@ def owed(frappe, monkeypatch):
         # paid: what the read through the rows returns; by_request: the read from the requests
         env = fake_frappe._dict(frappe=frappe, sends=sends, queries=queries, paid=[], by_request=[],
                                 erpnext_tables=True)
-        frappe.get_installed_apps = lambda: ["frappe", "erpnext", "frappe_mpsa_payments"]
+        frappe.get_installed_apps = lambda: ["frappe", "erpnext", "mpsa_suite"]
 
         def sql(query, values=None, as_dict=False, **kw):
             q = " ".join(query.split())
@@ -444,10 +444,13 @@ def owed(frappe, monkeypatch):
         frappe.db.sql = sql
         mod = importlib.import_module(REQ_MODULE)
         post = importlib.import_module(POST)
-        common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+        common = importlib.import_module("mpsa_suite.money_in.common")
         disb = importlib.import_module(DISB_MODULE)
-        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10: contextlib.nullcontext())
+        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10, **kw: contextlib.nullcontext())
         monkeypatch.setattr(disb, "open_payouts", lambda doctype, name, **kw: [])
+        owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
+        monkeypatch.setattr(owed_mod, "b2b_open", lambda doctype, name, **kw: [])
+        monkeypatch.setattr(owed_mod, "order_advances", lambda pi, **kw: [])
 
         class Request(mod.B2CDisbursementRequest):
             doctype = REQ
@@ -477,7 +480,7 @@ def owed(frappe, monkeypatch):
 
 
 def _without_erpnext(env):
-    env.frappe.get_installed_apps = lambda: ["frappe", "frappe_mpsa_payments"]
+    env.frappe.get_installed_apps = lambda: ["frappe", "mpsa_suite"]
     env.erpnext_tables = False
 
 

@@ -33,10 +33,10 @@ def env(monkeypatch):
         frappe.get_cached_doc = lambda doctype, *a, **kw: frappe.get_doc(doctype, doctype)
         mods = fake_frappe._dict(
             frappe=frappe,
-            common=importlib.import_module("frappe_mpsa_payments.money_in.common"),
-            booking=importlib.import_module("frappe_mpsa_payments.money_in.booking"),
-            sales_order=importlib.import_module("frappe_mpsa_payments.money_in.sales_order"),
-            reversal=importlib.import_module("frappe_mpsa_payments.money_out.reversal"),
+            common=importlib.import_module("mpsa_suite.money_in.common"),
+            booking=importlib.import_module("mpsa_suite.money_in.booking"),
+            sales_order=importlib.import_module("mpsa_suite.money_in.sales_order"),
+            reversal=importlib.import_module("mpsa_suite.money_out.reversal"),
             logged=[],
         )
         for mod in (mods.booking, mods.sales_order):

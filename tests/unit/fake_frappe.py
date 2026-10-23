@@ -24,6 +24,14 @@ class DoesNotExistError(Exception):
     pass
 
 
+class QueryDeadlockError(Exception):
+    pass
+
+
+class QueryTimeoutError(Exception):
+    pass
+
+
 class _dict(dict):
     def __getattr__(self, key):
         return self.get(key)
@@ -68,6 +76,9 @@ class FakeDB:
 
     def has_column(self, doctype, column):
         return (doctype, column) in self.columns
+
+    def table_exists(self, doctype, cached=True):
+        return True  # every table exists here (they are made on first use)
 
     def _rows(self, doctype, filters):
         rows = self.table(doctype)
@@ -134,6 +145,9 @@ class FakeDoc:
     def check_permission(self, ptype="read"):
         return True
 
+    def get_doc_before_save(self):
+        return None  # as Frappe gives for a document not yet saved
+
     def insert(self, ignore_permissions=False):
         if not self._row.get("name"):
             self._row["name"] = f"{self.doctype[:4].upper()}-{next(self._frappe._seq)}"
@@ -147,6 +161,8 @@ def build():
     frappe.ValidationError = ValidationError
     frappe.PermissionError = PermissionError_
     frappe.DoesNotExistError = DoesNotExistError
+    frappe.QueryDeadlockError = QueryDeadlockError
+    frappe.QueryTimeoutError = QueryTimeoutError
     frappe._dict = _dict
     frappe._seq = itertools.count(1)
     frappe.db = FakeDB(frappe)
@@ -187,6 +203,7 @@ def build():
 
     frappe.throw = throw
     frappe.only_for = only_for
+    frappe.get_roles = lambda user=None: sorted(frappe.user_roles)
     frappe.get_doc = get_doc
     frappe.get_cached_doc = get_cached_doc
     frappe.whitelist = whitelist
@@ -269,7 +286,7 @@ def uninstall(saved):
             sys.modules.pop(key, None)
         else:
             sys.modules[key] = module
-    for key in [k for k in sys.modules if k.startswith("frappe_mpsa_payments.") and "daraja.guard" not in k
+    for key in [k for k in sys.modules if k.startswith("mpsa_suite.") and "daraja.guard" not in k
                 and "daraja.money_out" not in k and "utils.phone" not in k and "gateway.signing" not in k]:
         sys.modules.pop(key, None)
 

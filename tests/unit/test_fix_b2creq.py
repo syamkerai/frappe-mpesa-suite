@@ -28,10 +28,10 @@ REF = "B2C Payment Disbursement Reference"
 REQ = "B2C Disbursement Request"
 PE, PER = "Payment Entry", "Payment Entry Reference"
 JE, JEA = "Journal Entry", "Journal Entry Account"
-POST = "frappe_mpsa_payments.services.b2c_postprocess_service"
-REQ_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_disbursement_request.b2c_disbursement_request"
-DISB_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
-CONNECTOR = "frappe_mpsa_payments.connectors.mpesa.b2c_connector"
+POST = "mpsa_suite.services.b2c_postprocess_service"
+REQ_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+DISB_MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
+CONNECTOR = "mpsa_suite.connectors.mpesa.b2c_connector"
 
 
 @contextlib.contextmanager
@@ -132,9 +132,9 @@ def book():
               "b2c_payment_disbursement": disb.name}],
         )
 
-    journal = types.ModuleType("frappe_mpsa_payments.accounting.journal_service")
+    journal = types.ModuleType("mpsa_suite.accounting.journal_service")
     journal.create_journal_entry = create_journal_entry
-    payment = types.ModuleType("frappe_mpsa_payments.accounting.payment_entry_service")
+    payment = types.ModuleType("mpsa_suite.accounting.payment_entry_service")
     payment.create_payment_entry_for_doc = create_payment_entry_for_doc
     try:
         with _stub_modules(**{journal.__name__: journal, payment.__name__: payment}):
@@ -482,7 +482,7 @@ def _salary_paid_sql(frappe):
 def retry(monkeypatch):
     frappe, saved = fake_frappe.install()
     sends = []
-    b2c_api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.b2c")
+    b2c_api = types.ModuleType("mpsa_suite.mpsa_suite.api.b2c")
     b2c_api.make_b2c_payment_request = lambda name: sends.append(
         (name, dict(frappe.db.table(REQ)[name]), list(frappe.locks_held))
     )
@@ -513,17 +513,28 @@ def retry(monkeypatch):
             frappe.db.get_value = get_value
             frappe.db.sql = _salary_paid_sql(frappe)
             mod = importlib.import_module(REQ_MODULE)
-            common = importlib.import_module("frappe_mpsa_payments.money_in.common")
+            common = importlib.import_module("mpsa_suite.money_in.common")
             disb = importlib.import_module(DISB_MODULE)
 
             @contextlib.contextmanager
-            def named_lock(key, timeout=10):
+            def named_lock(key, timeout=10, busy=None):
                 if key not in frappe.locks_held:  # held until commit; re-entering is a no-op
                     frappe.locks_held.append(key)
                     frappe.row_locks_before.append(list(frappe.db.locks))
+                    frappe.busy.append(busy)
                 yield
 
-            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], owed=50000)
+            frappe.busy = []
+            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], b2b=[], advances=[], owed=50000)
+            owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
+
+            def b2b_open(doctype, name, exclude=None, for_update=False):
+                frappe.calls.append(("b2b_open", doctype, name, for_update, list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.b2b]
+
+            def order_advances(pi, for_update=False, exclude_request=None):
+                frappe.calls.append(("order_advances", pi, for_update, list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.advances]
 
             def open_payouts(doctype, name, exclude_parent=None, exclude_requests=None):
                 frappe.calls.append(("open_payouts", doctype, name, exclude_parent, exclude_requests,
@@ -543,6 +554,8 @@ def retry(monkeypatch):
             monkeypatch.setattr(disb, "open_payouts", open_payouts)
             monkeypatch.setattr(disb, "current_outstanding", current_outstanding)
             monkeypatch.setattr(mod, "paid_without_entry", paid_without_entry)
+            monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
+            monkeypatch.setattr(owed_mod, "order_advances", order_advances)
             env.use_real_outstanding = lambda: monkeypatch.setattr(
                 disb, "current_outstanding", real_current_outstanding
             )
@@ -619,6 +632,13 @@ def test_retry_refused_while_another_disbursement_awaits_accounting(retry):
     _refused(retry, request, "D-2")
 
 
+def test_retry_refused_while_a_b2b_request_pays_the_document(retry):
+    # an Initiated M-Pesa B2B request for the same invoice (B2C's guard sees B2B, R3)
+    request = retry.failed()
+    retry.b2b = [{"parent": "MB2B-26-10-000001", "allocated_amount": 50000, "request_status": "Initiated"}]
+    _refused(retry, request, "awaiting accounting: MB2B-26-10-000001")
+
+
 def test_retry_refused_by_an_old_paid_payout_nothing_booked(retry):
     # D-2's payout is older than the accounting retry window, so open_payouts no longer lists
     # it, but no entry books it and the invoice still shows the full amount owed
@@ -649,11 +669,37 @@ def test_retry_sends_when_the_document_still_owes_it(retry):
     assert retry.frappe.calls == [
         ("open_payouts", "Purchase Invoice", "PI-1", None, None, [key]),
         ("paid_without_entry", "Purchase Invoice", "PI-1", [key]),
+        ("b2b_open", "Purchase Invoice", "PI-1", True, [key]),  # B2B counts too, under the same lock
+        ("order_advances", "PI-1", True, [key]),  # and the invoice's order advances, before its row (R4)
         ("current_outstanding", "Purchase Invoice", "PI-1", True, [key]),
     ]
     # the document lock before the request's row lock, in the order a disbursement submit takes them
     assert retry.frappe.row_locks_before == [[]]
     assert retry.frappe.db.locks == [(REQ, "B2C-1")]
+    assert retry.frappe.busy == ["Another payment for Purchase Invoice PI-1 is being sent or booked. "
+                                 "Try again in a minute."]
+
+
+def test_retry_refused_by_an_advance_still_on_the_invoices_order(retry):
+    # a B2B advance on PO-1; the invoice made from it (without Get Advances) still owes 50,000
+    request = retry.failed()
+    retry.advances = [{"kind": "advance", "name": "PO-1", "amount": 50000,
+                       "label": "advance still on PO-1 50,000 (allocate it with Get Advances first)"}]
+    _refused(retry, request, "PI-1 owes 50000.0, less advance still on PO-1 50,000 .*; retrying would pay 50000.0")
+
+
+def test_retry_refused_once_the_order_has_invoices(retry):
+    # the failed payout was an advance on PO-1; PI-1 was made from PO-1 since (B2B may have paid it)
+    request = retry.failed(doctype="Purchase Order", reference="PO-1")
+    retry.frappe.db.table("Purchase Order")["PO-1"] = {"name": "PO-1", "per_billed": 100}
+    _refused(retry, request, "PO-1 already has invoices: pay the Purchase Invoice instead.")
+
+
+def test_retry_of_another_document_does_not_ask_about_order_advances(retry):
+    request = retry.failed(doctype="Expense Claim", reference="EC-1")
+    request.retry_failed_payment()
+    assert len(retry.sends) == 1
+    assert not [c for c in retry.frappe.calls if c[0] in ("b2b_open", "order_advances")]
 
 
 def test_retry_reads_the_status_a_concurrent_retry_committed(retry):
@@ -766,6 +812,7 @@ def connector(monkeypatch):
     try:
         frappe.db.commit = lambda: None
         frappe.after_commit = []
+        frappe.get_meta = lambda doctype: types.SimpleNamespace(has_field=lambda field: True)
         mod = importlib.import_module(CONNECTOR)
         monkeypatch.setattr(mod, "update_integration_request", lambda *a, **kw: None)
         monkeypatch.setattr(mod, "create_request_log", lambda **kw: fake_frappe._dict(name="IR-1"))

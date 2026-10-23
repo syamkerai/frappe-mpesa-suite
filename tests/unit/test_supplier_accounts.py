@@ -26,7 +26,7 @@ def env():
         frappe.db.table("Mpesa Settings")["Astral 600999"] = {
             "name": "Astral 600999", "business_shortcode": "600999", "till_number": "5123456",
         }
-        sa = importlib.import_module("frappe_mpsa_payments.money_out.supplier_accounts")
+        sa = importlib.import_module("mpsa_suite.money_out.supplier_accounts")
         yield fake_frappe._dict(frappe=frappe, sa=sa)
     finally:
         fake_frappe.uninstall(saved)
@@ -110,7 +110,7 @@ def test_clerk_without_manager_role_cannot_approve(env):
 
 
 def test_manager_approval_starts_hold(env):
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.frappe.session.user = "boss@example.com"
     doc = new_account(env)
     env.sa.approve(doc)
@@ -120,7 +120,7 @@ def test_manager_approval_starts_hold(env):
 
 def test_zero_hold_is_usable_at_once(env):
     env.frappe.db.table(SUITE)[SUITE]["supplier_account_hold_hours"] = 0
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.frappe.session.user = "boss@example.com"
     doc = new_account(env)
     env.sa.approve(doc)
@@ -205,6 +205,20 @@ def test_tampered_destination_blocks_send(env):
     doc.receiver_shortcode = "999999"
     with pytest.raises(env.frappe.ValidationError, match="does not match"):
         env.sa.check_before_send(doc)
+
+
+def test_send_without_an_account_is_refused_unless_one_offs_are_on(env):
+    # a one-off destination an admin saved: a Payer may not send it, nor anyone with the switch off (R7)
+    doc = request(env, docstatus=1)
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    with pytest.raises(env.frappe.ValidationError, match="Pick the supplier's approved M-Pesa account"):
+        env.sa.check_before_send(doc)
+    env.frappe.db.table(SUITE)[SUITE]["allow_one_off_b2b"] = 1
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with pytest.raises(env.frappe.PermissionError):
+        env.sa.check_before_send(doc)
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    env.sa.check_before_send(doc)  # switch on and a manager: sent as typed
 
 
 # ---------------------------------------------------------------- after payment

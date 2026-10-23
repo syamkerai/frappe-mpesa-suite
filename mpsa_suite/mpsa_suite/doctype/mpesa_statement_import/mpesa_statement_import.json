@@ -1,0 +1,279 @@
+{
+ "actions": [],
+ "creation": "2026-10-22 21:30:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "statement_file",
+  "mpesa_settings",
+  "column_break_main",
+  "status",
+  "error",
+  "statement_section",
+  "shortcode",
+  "account_name",
+  "sub_account",
+  "bank_account",
+  "column_break_statement",
+  "period_from",
+  "period_to",
+  "opening_balance",
+  "closing_balance",
+  "total_paid_in",
+  "total_withdrawn",
+  "result_section",
+  "rows_read",
+  "lines_made",
+  "lines_found",
+  "column_break_result",
+  "entries_made",
+  "reconciled",
+  "left_for_staff",
+  "skipped",
+  "tie_out_section",
+  "tie_out"
+ ],
+ "fields": [
+  {
+   "fieldname": "statement_file",
+   "fieldtype": "Attach",
+   "label": "Statement File",
+   "reqd": 1,
+   "description": "The per-account export from the M-PESA Org Portal: ORG_&lt;shortcode&gt;_&lt;Account&gt;_All_&lt;date&gt;.xls (also .xlsx or .csv with the same layout)."
+  },
+  {
+   "fieldname": "mpesa_settings",
+   "fieldtype": "Link",
+   "label": "Mpesa Settings",
+   "options": "Mpesa Settings",
+   "description": "Found from the file's Short Code when empty."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Not Imported\nQueued\nImporting\nImported\nFailed",
+   "default": "Not Imported",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1,
+   "depends_on": "eval:doc.status=='Failed'"
+  },
+  {
+   "fieldname": "statement_section",
+   "fieldtype": "Section Break",
+   "label": "Statement"
+  },
+  {
+   "fieldname": "shortcode",
+   "fieldtype": "Data",
+   "label": "Short Code",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "account_name",
+   "fieldtype": "Data",
+   "label": "Account",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sub_account",
+   "fieldtype": "Data",
+   "label": "Sub-Account",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "bank_account",
+   "fieldtype": "Link",
+   "label": "Bank Account",
+   "options": "Bank Account",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_statement",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "period_from",
+   "fieldtype": "Datetime",
+   "label": "From",
+   "read_only": 1
+  },
+  {
+   "fieldname": "period_to",
+   "fieldtype": "Datetime",
+   "label": "To",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "opening_balance",
+   "fieldtype": "Currency",
+   "label": "Opening Balance",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "closing_balance",
+   "fieldtype": "Currency",
+   "label": "Closing Balance",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_paid_in",
+   "fieldtype": "Currency",
+   "label": "Total Paid In",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_withdrawn",
+   "fieldtype": "Currency",
+   "label": "Total Withdrawn",
+   "options": "KES",
+   "read_only": 1
+  },
+  {
+   "fieldname": "result_section",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "rows_read",
+   "fieldtype": "Int",
+   "label": "Rows Read",
+   "read_only": 1
+  },
+  {
+   "fieldname": "lines_made",
+   "fieldtype": "Int",
+   "label": "Lines Made",
+   "read_only": 1
+  },
+  {
+   "fieldname": "lines_found",
+   "fieldtype": "Int",
+   "label": "Lines Already There",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_result",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "entries_made",
+   "fieldtype": "Int",
+   "label": "Entries Made",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reconciled",
+   "fieldtype": "Int",
+   "label": "Rows Reconciled",
+   "read_only": 1
+  },
+  {
+   "fieldname": "left_for_staff",
+   "fieldtype": "Int",
+   "label": "Left for Staff",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped",
+   "fieldtype": "Int",
+   "label": "Skipped",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tie_out_section",
+   "fieldtype": "Section Break",
+   "label": "Tie-Out"
+  },
+  {
+   "fieldname": "tie_out",
+   "fieldtype": "Small Text",
+   "label": "Tie-Out",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-22 21:30:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "Mpesa Statement Import",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0,
+ "autoname": "MSI-.YY.-.MM.-.####",
+ "naming_rule": "Expression (old style)",
+ "title_field": "account_name",
+ "description": "Import an M-PESA Org Portal account statement (one account per file: Utility, MMF/Working...).",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Viewer",
+   "read": 1,
+   "write": 0,
+   "create": 0,
+   "delete": 0,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ]
+}

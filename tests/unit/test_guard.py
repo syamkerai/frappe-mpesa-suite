@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from frappe_mpsa_payments.daraja.guard import (
+from mpsa_suite.daraja.guard import (
     DEFAULT_SAFARICOM_IPS,
     callback_url_problems,
     daraja_id,
@@ -17,7 +17,7 @@ from frappe_mpsa_payments.daraja.guard import (
     truncate_reference,
 )
 
-APP = Path(__file__).resolve().parents[2] / "frappe_mpsa_payments"
+APP = Path(__file__).resolve().parents[2] / "mpsa_suite"
 
 # The 12 IPs Daraja publishes (GettingStarted, "Callback and IP Whitelisting").
 PUBLISHED_IPS = [
@@ -95,7 +95,7 @@ def test_stk_amount_daraja_maximum():
 @pytest.mark.parametrize(
     "url,sandbox,expected",
     [
-        ("https://erp.example.com/api/method/frappe_mpsa_payments.money_out.api.b2b_result?ref=MB2B-1&t=ab12", False, []),
+        ("https://erp.example.com/api/method/mpsa_suite.money_out.api.b2b_result?ref=MB2B-1&t=ab12", False, []),
         ("http://erp.example.com/api/method/x.confirmation", True, []),  # sandbox may use HTTP
         ("http://erp.example.com/api/method/x.confirmation", False, ["production callback URLs must use HTTPS"]),
         ("https://erp.example.com/api/method/x.balance_query_callback", False, ["query"]),
@@ -149,9 +149,9 @@ def test_names_id_matches_exactly_in_json_and_logged_dict():
 
 # Upstream endpoint names the app no longer sends; kept so results for requests (or Pull
 # registrations) made with the old URL still land.
-_SETTINGS_MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings"
+_SETTINGS_MODULE = "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings"
 LEGACY_CALLBACKS = {
-    "frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api.balance_query_callback",
+    "mpsa_suite.mpsa_suite.api.m_pesa_api.balance_query_callback",
     f"{_SETTINGS_MODULE}.process_balance_info",
     f"{_SETTINGS_MODULE}.pull_transaction_callback",
 }
@@ -168,13 +168,26 @@ def _safaricom_callbacks():
                 yield f"{module}.{node.name}"
 
 
-def test_app_no_longer_sends_legacy_callback_urls():
-    literals = {
-        node.value
-        for path in APP.rglob("*.py")
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+def _lookup_table_nodes(tree) -> set:
+    """Nodes of hooks.py's override_whitelisted_methods: old paths that still arrive, not URLs we send."""
+    return {
+        id(node)
+        for stmt in tree.body
+        if isinstance(stmt, ast.Assign) and any(getattr(t, "id", None) == "override_whitelisted_methods" for t in stmt.targets)
+        for node in ast.walk(stmt.value)
     }
+
+
+def test_app_no_longer_sends_legacy_callback_urls():
+    literals = set()
+    for path in APP.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _lookup_table_nodes(tree) if path == APP / "hooks.py" else set()
+        literals |= {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip
+        }
     assert not any(legacy in text for legacy in LEGACY_CALLBACKS for text in literals)
 
 

@@ -21,9 +21,9 @@ import fake_frappe
 PARENT = "B2C Payment Disbursement"
 REF = "B2C Payment Disbursement Reference"
 REQ = "B2C Disbursement Request"
-MODULE = "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
+MODULE = "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement"
 REF_MODULE = (
-    "frappe_mpsa_payments.frappe_mpsa_payments.doctype.b2c_payment_disbursement_reference."
+    "mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement_reference."
     "b2c_payment_disbursement_reference"
 )
 
@@ -125,8 +125,8 @@ def env(monkeypatch):
         frappe.db.sql = _fake_sql(frappe)
         frappe.qb = Q()
         mod = importlib.import_module(MODULE)
-        common = importlib.import_module("frappe_mpsa_payments.money_in.common")
-        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10: contextlib.nullcontext())
+        common = importlib.import_module("mpsa_suite.money_in.common")
+        monkeypatch.setattr(common, "named_lock", lambda key, timeout=10, **kw: contextlib.nullcontext())
         Doc = _doc_class(frappe, mod)
         get_doc = frappe.get_doc
         frappe.get_doc = lambda d, *a, **kw: (
@@ -137,7 +137,7 @@ def env(monkeypatch):
             frappe=frappe,
             mod=mod,
             ref_mod=importlib.import_module(REF_MODULE),
-            payouts=importlib.import_module("frappe_mpsa_payments.utils.payouts"),
+            payouts=importlib.import_module("mpsa_suite.utils.payouts"),
             Doc=Doc,
         )
     finally:
