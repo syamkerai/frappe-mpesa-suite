@@ -47,7 +47,8 @@ bench --site <site> install-app mpsa_suite
 bench --site <site> migrate
 ```
 
-Requires ERPNext; HRMS is optional (Salary Slip, Expense Claim and Employee Advance payouts).
+Requires ERPNext and HRMS (`required_apps`): salaries are paid from Payroll Entries and Salary Slips;
+Expense Claim and Employee Advance payouts too.
 
 Uninstalling mpsa_suite would drop every M-Pesa table and delete the settings with their secrets,
 so it is refused unless the site's config has `mpsa_allow_uninstall: 1`.

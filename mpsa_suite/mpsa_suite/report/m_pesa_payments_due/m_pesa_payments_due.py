@@ -6,14 +6,15 @@ lines, Utility for B2C phone lines).
 
 Ticked lines are paid with Pay Selected (money_out.schedule.prepare_payment, then
 confirm_payment after the 5-second confirm step), or moved to another day with Move Date.
-The Problem column says why a line cannot be paid by the person looking at it now.
+The Problem column says why a line cannot be paid by the person looking at it now. Employee and
+salary lines are shown only to who may see salaries (money_out.salary_access): who reads Salary
+Slips, who pays or administers them, and the schedule's creator.
 """
 
 import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate, nowdate
 
-from mpsa_suite import salary_privacy
-from mpsa_suite.money_out import owed
+from mpsa_suite.money_out import owed, salary_access
 from mpsa_suite.money_out import schedule as s
 from mpsa_suite.wallet import balances
 
@@ -66,6 +67,9 @@ def _rows(filters) -> list:
     elif show == IN_PROGRESS:
         where.append("l.status IN %(in_progress)s")
         values["in_progress"] = s.IN_PROGRESS
+    hidden = salary_access.report_condition("l.", "p.")
+    if hidden:
+        where.append(hidden)  # what each employee is paid is for who may see salaries (decision D4)
     for field, column in (("company", "p.company"), ("route", "l.route"), ("schedule", "l.parent")):
         if filters.get(field):
             where.append(f"{column} = %({field})s")
@@ -75,11 +79,6 @@ def _rows(filters) -> list:
         where.append("((l.route IN %(b2c_routes)s AND p.b2c_settings = %(pay_from)s)"
                      " OR (l.route NOT IN %(b2c_routes)s AND p.b2b_settings = %(pay_from)s))")
         values.update(pay_from=filters.get("pay_from"), b2c_routes=s.B2C_ROUTES)
-    if not salary_privacy.can_see_salary():
-        # salary payouts (decision D4): their own schedules only
-        where.append("((IFNULL(p.purpose, '') != 'Payroll' AND IFNULL(l.party_type, '') != 'Employee'"
-                     " AND IFNULL(l.reference_doctype, '') != 'Salary Slip') OR p.owner = %(user)s)")
-        values["user"] = frappe.session.user
     fields = ", ".join(f"l.`{f}`" for f in s.LINE_FIELDS)
     return frappe.db.sql(
         f"""

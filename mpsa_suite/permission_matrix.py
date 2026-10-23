@@ -69,11 +69,11 @@ DOCTYPES = {
         MP: "rRep", MV: "rRep",
     },
     # payouts Phase 3: HR proposes an employee's payee account; an M-Pesa Manager approves it (submit;
-    # never who entered it, party_accounts.approve). Salary data (D4): no Accounts roles, no Viewer.
+    # never who entered it, party_accounts.approve). Salary data (D4): no Accounts roles, no Viewer, and
+    # no Payer either (Phase 3 review: the payer sees the destination on the line it pays).
     "Employee M-Pesa Account": {
         SM: ALL, MM: ALL,
         HM: "rwcaRepmh", HU: "rwcaRep",
-        MP: "rRep",
     },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
@@ -144,7 +144,7 @@ SECRET_FIELDS = {
 }
 
 # Salary payouts (decision D4): rows that pay an employee are hidden from everyone outside
-# permissions.SALARY_ROLES but their creator (salary_privacy, registered in hooks.py).
+# permissions.SALARY_ROLES but their creator (money_out.salary_access, registered in hooks.py).
 SALARY_DOCTYPES = (
     "M-Pesa Payment Schedule",
     "B2C Payment Disbursement",
@@ -377,10 +377,14 @@ def render_markdown(role_sets: dict) -> str:
         lines.append(f"| `{name}` | {', '.join(role_sets[name])} |")
     lines += ["", "### Salary payouts (decision D4)", ""]
     lines.append("Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests "
-                 "to an employee, their status queries) are shown only to `SALARY_ROLES` and to whoever created "
-                 "them, whatever the DocType rights above: " + ", ".join(SALARY_DOCTYPES) + ". Employee M-Pesa "
-                 "Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement "
-                 "Summary leave those rows out for everyone else.")
+                 "to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave "
+                 "read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the "
+                 "DocType rights above: " + ", ".join(SALARY_DOCTYPES) + ". Employee M-Pesa Account is closed to "
+                 "other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those "
+                 "rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` "
+                 "(`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in "
+                 "hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on "
+                 "every site.")
     lines += ["", "### Report roles", ""]
     lines.append("| Report | Roles |")
     lines.append("|---|---|")

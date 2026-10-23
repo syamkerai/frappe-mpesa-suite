@@ -4,12 +4,12 @@ app_publisher = "Astral Industries Limited"
 app_description = "M-Pesa C2B, STK, B2C, B2B, bank feeds and reconciliation (Frappe/ERPNext v15 + v16)"
 app_email = "finance@astralind.com"
 app_license = "agpl-3.0"
-# required_apps = ["erpnext", "hrms", "lending"]
 
 # Apps
 # ------------------
 
-# required_apps = []
+# Salaries are paid from HRMS Payroll Entries and Salary Slips: both sites run HRMS.
+required_apps = ["erpnext", "hrms"]
 
 
 fixtures = [
@@ -154,8 +154,9 @@ before_uninstall = "mpsa_suite.uninstall_guard.before_uninstall"
 
 # Permissions
 # -----------
-# Salary payouts (net pay, phone, bank account) only for HR roles and those who send or
-# administer payouts (decision D4, mpsa_suite/salary_privacy.py)
+# Salaries (what each employee is paid, to which phone or bank account) only for who may read
+# Salary Slips, who pays or administers them, and the record's creator (decision D4,
+# money_out.salary_access)
 _SALARY_DOCTYPES = (
     "M-Pesa Payment Schedule",
     "B2C Payment Disbursement",
@@ -163,8 +164,8 @@ _SALARY_DOCTYPES = (
     "Mpesa B2B Payment Request",
     "Mpesa B2C Status Query",
 )
-permission_query_conditions = {dt: "mpsa_suite.salary_privacy.query_condition" for dt in _SALARY_DOCTYPES}
-has_permission = {dt: "mpsa_suite.salary_privacy.has_permission" for dt in _SALARY_DOCTYPES}
+permission_query_conditions = {dt: "mpsa_suite.money_out.salary_access.query_conditions" for dt in _SALARY_DOCTYPES}
+has_permission = {dt: "mpsa_suite.money_out.salary_access.has_permission" for dt in _SALARY_DOCTYPES}
 
 # DocType Class
 # ---------------
@@ -205,9 +206,12 @@ doc_events = {
         "before_validate": "mpsa_suite.money_in.payment_request.before_validate",
         "before_insert": "mpsa_suite.money_in.payment_request.before_insert",
     },
-    # HRMS: no cancel while M-Pesa salaries of the payroll are paid or on their way
+    # HRMS: no cancel while M-Pesa salaries of the payroll (or of the slip) are paid or on their way
     "Payroll Entry": {
         "before_cancel": "mpsa_suite.money_out.payroll.before_cancel",
+    },
+    "Salary Slip": {
+        "before_cancel": "mpsa_suite.money_out.payroll.slip_before_cancel",
     },
 }
 

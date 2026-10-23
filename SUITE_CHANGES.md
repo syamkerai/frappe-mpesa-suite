@@ -1049,7 +1049,7 @@ backfill, and old rows get their state in after_migrate.
 Tests: unit tests for every rule (`tests/unit/test_b2b_owed.py`, `test_b2b_entries.py`, and
 additions to the money-out, statement, supplier account and B2C guard tests; their SQL runs on
 SQLite). Bench tests for the booking routes in `mpsa_suite/money_out/test_b2b_documents.py`.
-Not yet run on the v15 and v16 benches. Not built: the Sandbox Lab scenarios b2b_pay_order and
+Passed on the v15 and v16 benches (with the review fixes). Not built: the Sandbox Lab scenarios b2b_pay_order and
 b2b_pay_first_then_entry.
 
 **Review fixes (round 1)**
@@ -1173,7 +1173,7 @@ Tests: `tests/unit/test_schedule.py` (the date rule on every route with the site
 the schedule-line check, saved-line rules, double planning and direct payments, maker-checker on
 and off, the token, the summary, confirm to send to Result to booking, Plan Again, Move Date,
 Close, the sweep, balances, the report). Bench tests in
-`mpsa_suite/money_out/test_payment_schedule.py`, not yet run on the v15 and v16 benches. Not
+`mpsa_suite/money_out/test_payment_schedule.py`, passed on the v15 and v16 benches. Not
 built: the write-off of balances under KES 1 (decision 5, optional); B2C phone lines, employees
 and payroll (Phase 3).
 
@@ -1199,10 +1199,10 @@ and payroll (Phase 3).
 
 Design: [docs/PAYOUTS_DESIGN.md](docs/PAYOUTS_DESIGN.md), Phase 3 and "Rules every flow keeps".
 Salaries go to employees' banks through the bank's paybill (B2B) and to their phones (B2C), so
-bulk salaries need no bank file. HRMS is optional: on a site without it nothing below about
-Payroll Entries or Salary Slips appears or runs, and the app installs and works as before. No
-patch: the new DocType and fields come from JSON, the HRMS-only fields from after_migrate, the
-new setting's default from the Suite settings backfill.
+bulk salaries need no bank file. HRMS is required (hooks.py `required_apps = ["erpnext", "hrms"]`;
+both sites run it). No patch: the new DocType and fields come from JSON, the HRMS fields from
+after_migrate (also run by after_install), the new setting's default from the Suite settings
+backfill.
 
 **Employee M-Pesa Account** (MEA-#####, Employee > M-Pesa, M-Pesa workspace)
 - An employee's approved destination: a **Phone (B2C)** (the Safaricom line in their name) or a
@@ -1241,7 +1241,8 @@ new setting's default from the Suite settings backfill.
 - A phone line follows its B2C payout: Sending, Sent, Paid (with its receipt and whether the
   salary entry is made), Failed or Unknown (a Transaction Status check settles it). A failed line
   is planned again with Plan Again; the B2C disbursement's own Retry is refused for it. A line
-  whose payout was never made within an hour (a lost job) is failed by the 5-minute sweep.
+  still Sending an hour after Pay Selected (a lost job) is failed by the 5-minute sweep only when
+  nothing can have been sent (see the review fixes below).
 - The M-Pesa Payments Due report shows phone lines too, with a card for the shortcode's Utility
   balance beside the Working one, and filters by route B2C Phone.
 
@@ -1253,7 +1254,9 @@ new setting's default from the Suite settings backfill.
   left out with the reason (no approved account, several and none default, withheld, left, more
   than B2C pays at once, no shortcode picked). The Payroll Entry's Connections show it.
 - At most one live (not closed) schedule per payroll, and none while a bank or cash entry not
-  made by M-Pesa exists for it (HRMS's Make Bank Entry), so a salary is never paid both ways.
+  made by M-Pesa exists for it (HRMS's Make Bank Entry). Every payment of one of its salaries
+  checks that again (see the review fixes below): HRMS offers Make Bank Entry until a bank entry
+  references the payroll, and its entry may be a draft or name no employee.
 - The button needs read on the Payroll Entry (HRMS gives it to HR Managers) and a finance role
   that may create a schedule (Accounts User or Manager, M-Pesa Manager). That person is the
   lines' preparer, so someone else pays them.
@@ -1289,9 +1292,56 @@ Tests: `tests/unit/test_employee_accounts.py`, `tests/unit/test_salary_entry.py`
 `tests/unit/test_payroll_schedule.py` (employee lines and their checks, both routes through Pay
 Selected, the date rule and maker-checker on the B2C path, the number lock, partial failures, the
 line following its B2C payout, Plan Again, the lost-job sweep, the Payroll Entry button and its
-exclusions, the cancel guard, B2C's guard seeing B2B, the Utility card, a site without HRMS).
+exclusions, the cancel guard, B2C's guard seeing B2B, the Utility card). HRMS is required
+(`required_apps`), so nothing is tested for a site without it.
 Bench tests in `mpsa_suite/money_out/test_payroll_payouts.py` (a 4-employee payroll paid by B2B
 and B2C with employee-wise accounting on and off, never booked twice, a failed phone salary
+planned again, the cancel guard): 357 bench tests pass on v15 (HRMS 15.64.5) and v16 (HRMS 16.52.0)
+after review round 1. Not built: "Phone
+(B2C)" on Supplier M-Pesa Account (optional); Sandbox Lab scenarios for employees.
+
+### Payouts Phase 3 review fixes (round 1)
+
+**Never paid both by bank and by M-Pesa**
+- A salary is not paid by M-Pesa while its Payroll Entry has a bank or cash entry not made by
+  M-Pesa, draft or submitted, whether or not it names the employee: checked on the schedule form,
+  at Pay Selected, at a B2B salary's submit and send, by B2C's guards (submit and retry) and by
+  the job that makes a scheduled B2C payout and its send. M-Pesa's own salary entries are tagged
+  with their payout and do not count.
+
+**A scheduled B2C payout is sent once (R1)**
+- The job commits the B2C Disbursement Request, submitted but not sent, with its row's link, then
+  sends it: the send commits a "Send Started On" marker on the request (new hidden field) before
+  the call and checks the date, the row's and line's own payout and the approved phone again.
+- The 5-minute sweep makes a marked request still Not Initiated after 10 minutes Status Unknown
+  (a Transaction Status check settles it; its line is Unknown). The hour rule fails a line only
+  when its row has no payout or its payout never started.
+- Only an M-Pesa or Accounts Manager cancels a scheduled B2C payout that may have reached M-Pesa,
+  and it keeps its status (Status Unknown when its send began); its line is then Unknown and only
+  a manager plans it again. A Paid one is never cancelled or deleted. A cancelled disbursement
+  sends nothing, a row is paid by one payout only, and a request typed by hand for a scheduled
+  row is refused.
+- B2C's guards take off lines a payment schedule plans for the document (R3), so a planned salary
+  is paid by Pay Selected, not by a disbursement made by hand.
+
+**Who approves, who pays, who sees**
+- An M-Pesa account is approved by someone other than who created it, who entered or last
+  changed its details (new field "Details Entered By", checked again at submit, where the details
+  are cleaned and checked again too), and, for an employee's account, the employee. One phone or
+  bank account is approved for one employee only.
+- Nobody pays themselves (the employee's User ID): refused at Pay Selected and on a B2B request.
+  A payment to an employee with no Salary Slip, which nothing caps, is submitted and paid by an
+  M-Pesa or Accounts Manager.
+- Salaries are shown only to who may read Salary Slips (HR Manager, HR User or a role given read
+  on Salary Slip), pay them (M-Pesa Payer, Manager) or manage: payroll schedules and schedules
+  with employee lines, B2B requests to employees and the report's employee lines. M-Pesa Viewer
+  and M-Pesa Payer no longer read Employee M-Pesa Accounts.
+- A Salary Slip cannot be cancelled while an M-Pesa payment of it is Paid (also a cancelled one)
+  or on its way: an amended slip would show its whole net pay as unpaid again.
+
+Tests: `tests/unit/test_fix_payroll.py`, `tests/unit/test_employee_accounts.py`,
+`tests/unit/test_fix3.py`, `tests/unit/test_fix_b2creq.py`, `tests/unit/test_fix_payouts.py`.
+
 planned again, the cancel guard; the employee B2B and approval tests also run on a site without
 HRMS), not yet run on the v15 and v16 benches. Not built: "Phone (B2C)" on Supplier M-Pesa
 Account (optional); Sandbox Lab scenarios for employees.
@@ -1323,6 +1373,9 @@ the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`)
 - Frappe refuses a report row whose Link column the reader cannot read: M-Pesa Payments Due's
   hidden Currency column is now Data, so Payers and Viewers see their lines on Frappe 15 too. The
   four upstream reports show ERPNext documents and stay with the ERPNext roles that read them.
+- A save of a submitted B2C payout through the form or the API keeps the status, send marker and
+  result M-Pesa gave it. Before, any role that could edit it (Accounts and HR roles too) could save
+  a scheduled payout as Failed or never sent, and the schedule would pay it again.
 
 **Decided by the user**
 - Only M-Pesa Payer, M-Pesa Manager and System Manager send money (B2C, B2B, reversals, retries,
@@ -1338,6 +1391,8 @@ the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`)
   whoever created the record: payroll schedules and their lines, B2C payouts and B2B requests to an
   employee, their status queries, Employee M-Pesa Accounts, and the salary rows of M-Pesa Payments
   Due and B2C Disbursement Summary. Accounts roles and M-Pesa Viewer see supplier payouts only.
+  One rule in `money_out/salary_access.py` (payouts Phase 3's and this one, unified when merging
+  it); a role a site gave read on Salary Slip sees them too.
 
 **A site's own permission rules (Custom DocPerm)**
 - Frappe uses them instead of the app's rules. Trident and Astral both have them on seven M-Pesa

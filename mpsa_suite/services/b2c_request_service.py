@@ -32,11 +32,17 @@ def validate_b2c_amount_and_party(doc) -> None:
 def create_b2c_request(doc_name: str) -> dict:
     """
     Create and send a B2C Request.
-    1) Loads the Disbursement Request.
+    1) Loads the Disbursement Request and checks it may be sent (ready_to_send).
     2) Picks the right connector via factory.
     3) Builds the callback URL.
     4) Dispatches the B2C payment request and returns the raw JSON.
     """
+    return send(ready_to_send(doc_name))
+
+
+def ready_to_send(doc_name: str):
+    """The request, once every check before its send passed (only throws, before anything leaves):
+    submitted, not sent yet, amount and number, a payment schedule's rules, the shortcode."""
     # Row lock: two workers (submit + retry, or a double click) cannot both send.
     frappe.db.get_value(B2C_REQUEST_DOCTYPE, doc_name, "name", for_update=True)
     doc = frappe.get_doc(B2C_REQUEST_DOCTYPE, doc_name)
@@ -54,6 +60,11 @@ def create_b2c_request(doc_name: str) -> dict:
     if not doc.mpesa_settings:
         frappe.throw(f"Select the Mpesa Settings to pay from on {doc_name}")
     apis.require(doc.mpesa_settings, apis.B2C)
+    return doc
+
+
+def send(doc) -> dict:
+    """Post a checked request (ready_to_send) to M-Pesa; the connector records the ack."""
     provider = "Mpesa"
     settings_name = doc.mpesa_settings
 

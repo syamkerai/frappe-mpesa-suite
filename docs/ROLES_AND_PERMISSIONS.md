@@ -41,7 +41,7 @@ Separation of duties the code enforces:
 - **Salary payouts** (each employee's net pay, phone and bank account) are visible to
   `SALARY_ROLES` only: HR User and HR Manager, who read Salary Slips in HRMS, and M-Pesa Payer,
   M-Pesa Manager and System Manager, who send or administer them; and to whoever created the
-  record (D4, `salary_privacy.py`).
+  record (D4, `money_out/salary_access.py`).
 
 ## 2. Audit findings, ranked
 
@@ -63,6 +63,7 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | G12 | Info | Workspace, charts and number cards are public. Their data goes through `frappe.get_list`, so each user sees only what their permissions allow; links hide DocTypes the user cannot read. The `Payment Gateway` DocType in this app's folder comes from upstream and belongs to the payments app: left as it is, never reset by the suite. | `workspace/m_pesa`, `dashboard_chart/*`, `number_card/*` | No change |
 | G14 | Medium | **Reports refuse readers of their Link columns.** Frappe drops or refuses every report row whose Link column points at a document the reader cannot read (`frappe.desk.query_report.get_filtered_data`), but only once the report has rows. M-Pesa Payments Due had a hidden Currency Link, which a Payer or Viewer cannot read on Frappe 15, so their main screen failed as soon as a line existed. The four upstream reports link to Payment Request and Entry, invoices, Customer and Mode of Payment, which only Accounts (and for some, Sales) roles read; upstream lists Sales User on two of them and HR Manager on B2C Disbursement Summary, roles that cannot read all those links. | `m_pesa_payments_due.py` columns; the upstream report JSON | Fixed for Payments Due (the column is Data). The suite roles stay off the upstream reports (their users reach them through Accounts User / Sales User). The upstream Sales User / HR Manager listing is left as it was: a follow-up decides between dropping those roles and changing the columns |
 | G15 | **High** | **Salary data shown to roles that cannot read Salary Slips** (found in the payouts Phase 3 review). Payroll schedules and their lines in M-Pesa Payments Due, B2C payouts and B2B requests to employees, their status queries and Employee M-Pesa Accounts showed each employee's net pay, phone and bank account to Accounts User, Accounts Manager and M-Pesa Viewer. | the five payout DocTypes, Employee M-Pesa Account, the two reports | Fixed after decision D4: row-level `has_permission` and `permission_query_conditions` hooks, Employee M-Pesa Account rights, and filters in M-Pesa Payments Due and B2C Disbursement Summary |
+| G16 | **High** | **A submitted B2C payout's M-Pesa answer could be rewritten by its preparers** (found merging payouts Phase 3). Its status, send marker and result fields allow on submit, so the Result can save them, and Frappe does not enforce read only on the server: any role with write (Accounts User and Manager, HR User and Manager) could save a scheduled payout as Failed, or clear its send marker, and the payment schedule would then treat it as never sent and plan it again: a second payment of the same salary or bill. | `b2c_disbursement_request.py` | Fixed: `before_update_after_submit` writes back what the database holds for those fields on every save that checked permissions (form, API); the Result saves with `ignore_permissions` and keeps its values. The B2B request already did this |
 | G13 | Info | Supplier M-Pesa Account grants share to Accounts User, M-Pesa Payer and Purchase Manager. Frappe 15 and 16 let a user share only rights they hold, and approving needs `ADMIN_ROLES` on the server, so sharing cannot approve an account. | `supplier_m_pesa_account.json` | No change (payouts Phase 3 mirrors this DocType) |
 
 Checked and found sound (no change):
@@ -76,7 +77,8 @@ Checked and found sound (no change):
 - **The 70 old paths** in `override_whitelisted_methods` map to the same function under the new name
   with the same guest setting (R4 tests); they inherit every check of their target.
 - **B2B, reversals, supplier accounts, Make Entry**: role and document checks at submit and again at
-  send; secrets never leave the server; `before_update_after_submit` restores server-owned fields.
+  send; secrets never leave the server; `before_update_after_submit` restores server-owned fields
+  (on B2C requests too since G16).
 - **Sandbox Lab**: needs the `mpesa_sandbox_lab` site switch, `ADMIN_ROLES` and sandbox records only.
 
 ## 3. Target model
@@ -123,7 +125,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | B2C Disbursement Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
 | B2C Payment Disbursement | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
-| Employee M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` | `rRep` |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
+| Employee M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
 | M-Pesa Payment Schedule | `rwcdRepmh` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
@@ -158,7 +160,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 ### Salary payouts (decision D4)
 
-Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES` and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else.
+Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` (`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on every site.
 
 ### Report roles
 

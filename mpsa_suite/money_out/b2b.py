@@ -14,7 +14,8 @@ A request may instead pay an employee, never both: to the employee's approved ba
 account (Employee M-Pesa Account), optionally for a Salary Slip (HRMS), which it may not pay past
 what the slip has left (B2B, B2C and planned lines counted, under the slip's lock). A salary is
 booked with a salary Journal Entry that clears the Payroll Entry's payroll payable
-(money_out.salary_entries); a payment to an employee with no slip waits for Make Entry.
+(money_out.salary_entries); a payment to an employee with no slip waits for Make Entry, and only
+a manager sends it (nothing caps its amount). Nobody sends a payment to themselves.
 
 A request made by the payment schedule (money_out.schedule) is submitted by Pay Selected but not
 sent then: send_deferred sends it from a job, after committing its send_started_on marker, and
@@ -287,6 +288,7 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
         frappe.throw("Pay a supplier or an employee, not both.")
     if cstr(doc.get("purchase_invoice")).strip() or cstr(doc.get("purchase_order")).strip():
         frappe.throw("A payment to an employee cannot pay a Purchase Invoice or Purchase Order.")
+    _check_payer(doc, at_submit)
     slip = salary_slip(doc)
     if slip:
         _take_from_slip(doc, slip)
@@ -303,6 +305,16 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
                 _check_slip(doc, slip, for_update=True)
         else:
             _check_slip(doc, slip)
+
+
+def _check_payer(doc, sending: bool) -> None:
+    """Nobody pays themselves; and a payment with no Salary Slip, which nothing caps, is submitted
+    and sent by a manager (ADMIN_ROLES) only."""
+    problem = employee_accounts.own_payment_problem(doc.employee)
+    if problem:
+        frappe.throw(problem, frappe.PermissionError)
+    if sending and not salary_slip(doc) and not employee_accounts.is_manager():
+        frappe.throw(employee_accounts.NO_SLIP, frappe.PermissionError)
 
 
 def _take_from_slip(doc, slip: str) -> None:
@@ -461,6 +473,7 @@ def check_ready_to_send(doc) -> None:
 def _check_employee_ready(doc) -> None:
     if cstr(doc.get("supplier")).strip() or owed.document_of(doc) != (None, None):
         frappe.throw("Pay a supplier or an employee, not both.")
+    _check_payer(doc, sending=True)
     employee_accounts.check_before_send(doc)
     if not doc.mpesa_settings:
         frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")

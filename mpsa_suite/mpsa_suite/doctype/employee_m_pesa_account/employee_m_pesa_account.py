@@ -17,6 +17,9 @@ class EmployeeMPesaAccount(Document):
             party_accounts.validate_account(self)
 
     def before_submit(self):
+        # validate() above runs only on drafts: the details as submitted are cleaned and checked
+        # again, and a change made in this submit makes its author unable to approve it
+        party_accounts.validate_account(self)
         party_accounts.approve(self)
 
     def on_submit(self):

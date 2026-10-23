@@ -84,6 +84,21 @@ def _fake_sql(frappe):
                 if r.get("docstatus") in submitted and r.get("status") == "Paid"
                 and r.get("reference_doctype") == "Salary Slip" and r.get("reference_name") == name
             )
+        if "FROM `tabM-Pesa Payment Schedule Line`" in q:
+            return []  # nothing planned on a payment schedule
+        if q.startswith("SELECT DISTINCT je.name FROM `tabJournal Entry` je"):
+            # owed.payroll_bank_entries: live bank / cash entries of the payroll not made by M-Pesa
+            (payroll_entry,) = values
+            found = set()
+            for row in db.table("Journal Entry Account").values():
+                je = db.table("Journal Entry").get(row["parent"]) or {}
+                tagged = any(r.get("b2c_payment_disbursement") or r.get("mpesa_b2b_payment_request")
+                             for r in db.table("Journal Entry Account").values() if r["parent"] == row["parent"])
+                if (je.get("docstatus", 0) < 2 and je.get("voucher_type") in ("Bank Entry", "Cash Entry")
+                        and row.get("reference_type") == "Payroll Entry"
+                        and row.get("reference_name") == payroll_entry and not tagged):
+                    found.add(row["parent"])
+            return [(n,) for n in sorted(found)]
         if "FROM `tabJournal Entry Account` jea" in q:
             payroll_entry, employee = values
             skip_b2c = "b2c_payment_disbursement" in q
@@ -428,8 +443,26 @@ def test_salary_slip_paid_by_payroll_bank_entry_refuses_b2c(env, monkeypatch):
     _bank_entry(env, "JV-ACCRUAL", 45123.40, voucher_type="Journal Entry")
     _bank_entry(env, "JV-OTHER", 45123.40, employee="EMP-2")
     assert env.mod.salary_slip_paid("SS-1", "EMP-1", "PE-1") == 45123.40
-    with pytest.raises(env.frappe.ValidationError, match="owes 0.0"):
+    # the payroll has bank entries not made by M-Pesa (a draft too): refused before what is owed
+    with pytest.raises(env.frappe.ValidationError,
+                       match=r"PE-1 has a bank or cash entry not made by M-Pesa \(JV-BANK, JV-DRAFT, JV-OTHER\)"):
         _second_disbursement(env, 45123).validate_no_double_payout()
+
+
+@pytest.mark.parametrize("docstatus, party", [(0, "EMP-1"), (1, None)])
+def test_a_payroll_bank_entry_hrms_left_as_a_draft_or_without_parties_refuses_b2c(env, monkeypatch, docstatus, party):
+    # HRMS's Make Bank Entry saves a draft, and with employee-wise accounting off (the default) its
+    # payable row names no employee: salary_slip_paid cannot see it, the payroll check does
+    monkeypatch.setattr(env.mod, "open_payouts", lambda *a, **kw: [])
+    _slip(env)
+    _bank_entry(env, "JV-HRMS", 45123.40, docstatus=docstatus)
+    if party is None:
+        env.frappe.db.table("Journal Entry Account")["JV-HRMS-1"].update(party_type=None, party=None)
+    assert env.mod.salary_slip_paid("SS-1", "EMP-1", "PE-1") == 0
+    with pytest.raises(env.frappe.ValidationError, match=r"PE-1 has a bank or cash entry not made by M-Pesa"):
+        _second_disbursement(env, 45123).validate_no_double_payout()
+    env.frappe.db.table("Journal Entry")["JV-HRMS"]["docstatus"] = 2  # cancelled: paid by M-Pesa again
+    _second_disbursement(env, 45123).validate_no_double_payout()
 
 
 def test_salary_slip_without_payroll_entry_counts_b2c_only(env):

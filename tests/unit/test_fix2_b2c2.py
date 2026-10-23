@@ -451,6 +451,8 @@ def owed(frappe, monkeypatch):
         owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
         monkeypatch.setattr(owed_mod, "b2b_open", lambda doctype, name, **kw: [])
         monkeypatch.setattr(owed_mod, "order_advances", lambda pi, **kw: [])
+        monkeypatch.setattr(owed_mod, "planned_lines", lambda dt, dn, **kw: [])
+        monkeypatch.setattr(owed_mod, "slip_bank_problem", lambda slip: None)
 
         class Request(mod.B2CDisbursementRequest):
             doctype = REQ

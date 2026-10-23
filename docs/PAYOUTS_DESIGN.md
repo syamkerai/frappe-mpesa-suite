@@ -2,7 +2,7 @@
 
 Draft, 2026-10-23. Merged by a judge from three independent designs, each checked against the code and the ERPNext/HRMS source.
 
-Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). Phases 1 and 2 passed their bench tests on the v15 and v16 benches. Phase 3 is unit-tested; its bench tests (mpsa_suite/money_out/test_payroll_payouts.py) are written but not yet run. Phase 4 is not built.
+Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). All three passed their bench tests on the v15 and v16 benches (Phase 3 on sites with HRMS: 357 tests on each). Phase 4 is not built.
 
 ## Decisions taken (2026-10-23)
 
@@ -12,6 +12,7 @@ Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Ph
 - Schedule maker-checker: on by default, with a Suite setting to turn it off for one-person teams.
 - No withholding deduction in Phase 1. Balances under KES 1 left by whole-shilling payments stay outstanding (an opt-in write-off may come in Phase 2).
 - Testing is local only (unit tests, plus bench tests on the WSL v15 and v16 benches); GitHub CI is not used. HRMS is installed on both local benches for Phase 3 (v15.64.5 and v16.52.0).
+- HRMS is required (hooks.required_apps = erpnext, hrms): both target sites run it. Nothing is built or tested for a site without HRMS.
 
 ## Phases
 
@@ -465,7 +466,7 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
   - B2C's own before_submit guard and enqueue send them;
   - services/b2c_request_service.create_b2c_request runs assert_line_due.
 - Payroll Entry button "Create M-Pesa Payment Schedule" (public/js/payroll_entry.js, hrms only) calls schedule.from_payroll_entry:
-  - at most one live schedule per payroll; refused while a non-suite Bank/Cash JE exists for it;
+  - at most one live schedule per payroll; refused while a non-suite Bank/Cash JE (draft or submitted) exists for it, and every payment of one of its salaries checks that again (Pay Selected, a B2B salary's submit and send, B2C's guards, the job that makes a B2C payout and its send);
   - one line per submitted, non-Withheld Salary Slip of an Active employee of the same company;
   - amount = rounded_total − salary_slip_paid, in whole shillings;
   - route from the default approved Employee M-Pesa Account;
@@ -484,7 +485,9 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
   - A phone line keeps its B2C payout in new line fields (b2c_disbursement, b2c_row, b2c_request); request stays the B2B request. The schedule's Payroll Entry is a Dynamic Link (payroll_doctype, payroll_entry) in the DocType JSON, so it needs no HRMS custom field; the B2C disbursement gains payment_schedule and its row mpesa_schedule_line, both JSON.
   - New Suite setting "Hold New Employee M-Pesa Accounts (Hours)" (default 24). Employee accounts are approved by the same roles as supplier accounts (ADMIN_ROLES); HR Manager and HR User may enter them.
   - The Payroll Entry button needs read on the Payroll Entry (HRMS gives it to HR Manager) and a finance role that may create a schedule; that user is the lines' preparer.
-  - The job that makes each B2C payout (create_b2c_request) checks the line again (due, its own, the approved phone still usable) and fails the row, nothing sent, when it may not be paid; the send checks again (assert_b2c_line_due). A retry of a scheduled B2C payout is refused: Plan Again and Pay Selected. A line whose row got no payout within an hour (a lost job) is failed by the 5-minute sweep: a payout is committed before it is sent, so nothing was sent.
+  - The job that makes each B2C payout (create_b2c_request) checks the line again (disbursement still submitted, due, its own, no other payout for the row, the slip still payable, the approved phone still usable) and fails the row, nothing sent, when it may not be paid. It then commits the B2C Disbursement Request, submitted but not sent, with the row's link, and only then sends it (schedule.send_b2c): as B2B's send_deferred (R1), the send commits a send_started_on marker on the request before the call and checks everything again (assert_b2c_line_due). The 5-minute sweep makes a marked request still Not Initiated after 10 minutes Status Unknown (a Transaction Status check settles it; the line is Unknown, never Failed). A line still Sending an hour after Pay Selected is failed only when nothing can have been sent: its row has no payout, or its payout never started (no marker). A retry of a scheduled B2C payout is refused: Plan Again and Pay Selected.
+  - A scheduled B2C payout that may have reached M-Pesa (Initiated, Status Unknown, or its send began) is cancelled only by an M-Pesa or Accounts Manager (its before_cancel, as B2B's) and keeps its status; a Paid one is never cancelled or deleted. Its line is then Unknown and only a manager plans it again. A cancelled request that never reached M-Pesa fails its line as before.
+  - Review round 1: account approval refuses whoever created the account, entered or last changed its details (entered_by, checked again at submit) and the employee; one phone or bank account is one employee's; nobody pays themselves (line, B2B request, approval); a payment to an employee with no Salary Slip is submitted and paid by a manager; salary lines, payroll schedules and employee B2B requests are shown only to who may read Salary Slips, pay them or manage (money_out.salary_access), and M-Pesa Viewer and Payer lose read on Employee M-Pesa Account; B2C's guards also take off planned schedule lines (R3); a Salary Slip with M-Pesa payments Paid or on their way cannot be cancelled.
   - The name check of a phone runs when its row first shows Paid; a mismatch blocks the account as for suppliers.
   - The Payroll Entry cancel is also refused while a payment schedule plans its slips (HRMS could not delete them); the message says to delete that schedule first.
   - Not built: "Phone (B2C)" on Supplier M-Pesa Account (optional); Sandbox Lab scenarios for employees.

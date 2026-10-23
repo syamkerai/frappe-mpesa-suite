@@ -63,6 +63,10 @@ def _match(row, filters):
 
 
 class FakeDB:
+    @staticmethod
+    def escape(value, percent=True):
+        return "'" + str(value).replace("'", "''") + "'"
+
     def __init__(self, frappe):
         self.frappe = frappe
         self.tables = {}

@@ -1,7 +1,7 @@
 import frappe
 from frappe.utils import flt
 
-from mpsa_suite import salary_privacy
+from mpsa_suite.money_out import salary_access
 
 
 def execute(filters=None):
@@ -93,7 +93,7 @@ def get_data(filters):
     )
     disbursements_list = disbursement_query.run(as_dict=True)
     # salary payouts only for those who may see them (decision D4)
-    shown = salary_privacy.visible("B2C Payment Disbursement", [d.name for d in disbursements_list])
+    shown = salary_access.visible("B2C Payment Disbursement", [d.name for d in disbursements_list])
     disbursements_list = [d for d in disbursements_list if d.name in shown]
 
     disbursements_map = {d.name: d for d in disbursements_list}

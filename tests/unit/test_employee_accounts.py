@@ -1,8 +1,10 @@
 """Employee M-Pesa Accounts (money_out.party_accounts, employee_accounts): an employee is paid only
 to a phone or bank paybill account a second person approved.
 
-Covers: the phone and bank paybill details, repeats for the same employee refused and for another
-warned, maker-checker approval with proof and the employee hold period, the B2B request taking
+Covers: the phone and bank paybill details, repeats refused (one phone or bank account is one
+employee's), maker-checker approval with proof and the employee hold period (not who created the
+account, not who entered or changed its details, also in the submit itself, and never the
+employee), nobody paying themselves, the B2B request taking
 its destination from an approved bank paybill account (never a phone, never typed), the checks
 again before sending, the B2C phone check, and the receiver-name check that blocks an account
 until a manager confirms it. The supplier wrappers keep their behaviour (test_supplier_accounts).
@@ -110,12 +112,19 @@ def test_a_supplier_account_type_is_not_an_employee_one(env):
         env.pa.validate_account(new_account(env, account_type="Paybill"))
 
 
-def test_the_same_details_for_the_employee_are_refused_and_for_another_warned(env):
+def test_the_same_details_for_the_employee_or_for_another_are_refused(env):
     phone(env)
     with pytest.raises(env.frappe.ValidationError, match="This employee already has an approved account"):
         env.pa.validate_account(new_account(env))
-    env.pa.validate_account(new_account(env, employee="EMP-2"))
-    assert any("already approved for EMP-1" in m and "Check with the employee" in m for m in env.frappe.messages)
+    # one employee's phone or bank account is never another's: a salary would go to the wrong person
+    with pytest.raises(env.frappe.ValidationError, match="The same phone is already approved for EMP-1"):
+        env.pa.validate_account(new_account(env, employee="EMP-2"))
+    account(env)
+    with pytest.raises(env.frappe.ValidationError, match="The same bank account is already approved for EMP-1"):
+        env.pa.validate_account(new_account(env, employee="EMP-2", account_type="Bank Paybill (B2B)", phone=None,
+                                            shortcode="247247", account_number="0123456789"))
+    env.pa.validate_account(new_account(env, employee="EMP-2", account_type="Bank Paybill (B2B)", phone=None,
+                                        shortcode="247247", account_number="0999"))  # same bank, another account
 
 
 # ---------------------------------------------------------------- approval
@@ -124,6 +133,72 @@ def test_who_entered_an_account_cannot_approve_it(env):
     env.frappe.session.user = "hr@example.com"
     with pytest.raises(env.frappe.ValidationError, match="different person"):
         env.pa.approve(new_account(env))
+
+
+def draft(env, **kw):
+    """MEA-NEW as saved by HR (hr@example.com entered it), and a form copy of it."""
+    row = {"name": "MEA-NEW", "docstatus": 0, "employee": "EMP-1", "account_type": "Phone (B2C)",
+           "phone": "254722000111", "shortcode": None, "account_number": None, "bank": None,
+           "expected_name": "Jane Wanjiru", "owner": "hr@example.com", "entered_by": "hr@example.com",
+           "proof": "/private/files/registration.pdf"}
+    env.frappe.db.table(ACC)["MEA-NEW"] = row
+    return env.frappe.get_doc(dict(row, doctype=ACC, **kw))
+
+
+def as_manager(env, user):
+    env.frappe.user_roles = {"M-Pesa Manager"}  # approvers are ADMIN_ROLES (decision D2)
+    env.frappe.session.user = user
+    env.frappe.db.columns = env.frappe.db.columns | {(ACC, "entered_by")}
+
+
+def submit(env, doc):
+    """before_submit: the details checked again, then the approval."""
+    env.pa.validate_account(doc)
+    env.pa.approve(doc)
+
+
+def test_a_manager_who_changed_the_details_cannot_approve_them(env):
+    # the scenario: HR enters the phone; manager B types another phone and name on the draft and
+    # saves; B then submits. The owner is HR, but B entered what would be paid
+    as_manager(env, "b@example.com")
+    doc = draft(env, phone="0722 000 002", expected_name="B Person")
+    env.pa.validate_account(doc)  # B's save
+    assert doc.entered_by == "b@example.com"
+    env.frappe.db.table(ACC)["MEA-NEW"].update(phone=doc.phone, expected_name=doc.expected_name,
+                                               entered_by=doc.entered_by)
+    with pytest.raises(env.frappe.ValidationError, match="you entered or changed the details"):
+        submit(env, env.frappe.get_doc(ACC, "MEA-NEW"))
+    as_manager(env, "c@example.com")
+    doc = env.frappe.get_doc(ACC, "MEA-NEW")
+    submit(env, doc)  # another manager approves what B entered
+    assert (doc.approved_by, doc.entered_by) == ("c@example.com", "b@example.com")
+
+
+def test_a_change_made_in_the_submit_itself_makes_its_author_the_one_who_entered_it(env):
+    as_manager(env, "b@example.com")
+    with pytest.raises(env.frappe.ValidationError, match="you entered or changed the details"):
+        submit(env, draft(env, phone="0722000002"))  # frappe.client.submit with a changed phone
+    doc = draft(env, entered_by="b@example.com")  # a typed entered_by is not trusted either
+    submit(env, doc)
+    assert (doc.entered_by, doc.approved_by) == ("hr@example.com", "b@example.com")
+
+
+def test_the_employee_cannot_approve_their_own_account(env):
+    env.frappe.db.table("Employee")["EMP-1"] = {"name": "EMP-1", "user_id": "boss@example.com"}
+    as_manager(env, "boss@example.com")
+    with pytest.raises(env.frappe.ValidationError, match="This is your own M-Pesa account"):
+        submit(env, draft(env))
+    as_manager(env, "other@example.com")
+    submit(env, draft(env))
+
+
+def test_nobody_pays_themselves(env):
+    env.frappe.db.table("Employee")["EMP-1"] = {"name": "EMP-1", "user_id": "payer@example.com"}
+    env.frappe.db.table("Employee")["EMP-2"] = {"name": "EMP-2", "user_id": None}
+    assert env.ea.own_payment_problem("EMP-1", "payer@example.com") == "You are EMP-1: another person must pay you."
+    assert env.ea.own_payment_problem("EMP-1", "other@example.com") is None
+    assert env.ea.own_payment_problem("EMP-2", "payer@example.com") is None
+    assert env.ea.own_payment_problem("EMP-1", "Administrator") is None
 
 
 def test_an_hr_user_cannot_approve(env):

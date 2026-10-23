@@ -80,6 +80,9 @@ INTERRUPTED_MINUTES = 10
 # A submitted request never started is sent again from this age until RESEND_WITHIN, then given up.
 RESEND_AFTER_MINUTES, RESEND_WITHIN_MINUTES = 5, 60
 INTERRUPTED = "Sending was interrupted after it may have reached M-Pesa. Check the statement before paying again."
+B2C_INTERRUPTED = ("Sending was interrupted after it may have reached M-Pesa. A Transaction Status check settles it; "
+                   "never pay it again before.")
+NOT_INITIATED = "Not Initiated"
 CHANGED = "It changed after you pressed Pay Selected. Press Pay Selected again."
 # Fields staff type; a line that left Planned keeps them as they were.
 EDITABLE = ("planned_date", "party_type", "party", "payee_name", "payee_account", "one_off_type",
@@ -566,6 +569,12 @@ def line_problem(line, schedule=None, *, for_update: bool = False, payer=None, s
         return refuse(f"{schedule.name} is closed.")
     if maker_checker_on() and payer != "Administrator" and payer in (line.prepared_by, line.changed_by):
         return refuse("You prepared or last changed this line: another person must pay it.")
+    if line.party_type == "Employee" and line.party:
+        own = employee_accounts.own_payment_problem(line.party, payer)
+        if own:
+            return refuse(own)
+        if not _document(line)[0] and not employee_accounts.is_manager(payer):
+            return refuse(employee_accounts.NO_SLIP)  # nothing caps a payment with no slip
     if snapshot is not None and _changed(line, snapshot):
         return refuse(CHANGED)
     problem = _send_problem(line, schedule, payer) or _document_problem(line, schedule, found, for_update)
@@ -705,10 +714,18 @@ B2C_LINE_FIELDS = ("name", "parent", "idx", "planned_date", "status", "b2c_disbu
                    "reference_doctype", "reference_name", "last_problem")
 
 
-def b2c_problem(row, disbursement: str, phone=None) -> str | None:
-    """Why a B2C row made by Pay Selected may not be paid now (None: it may): it is its line's
-    own, the line is waiting to be sent and due (site time zone), amount, payee and slip are the
-    line's, and the number is the employee's approved phone, still usable. Under a lock on the line."""
+def b2c_problem(row, disbursement: str, phone=None, request: str | None = None) -> str | None:
+    """Why a B2C row made by Pay Selected may not be paid now (None: it may): its disbursement is
+    still submitted, it is its line's own, the line is waiting to be sent and due (site time
+    zone), amount, payee and slip are the line's, no other payout names the row (``request``: the
+    payout being sent, None while it is not made yet), the slip may still be paid (not cancelled
+    or withheld, no bank entry for its payroll), and the number is the employee's approved phone,
+    still usable. Under a lock on the line.
+
+    The disbursement is read without a lock: its rows' jobs run side by side, and a cancel of it
+    must cancel its payouts first, which wait on the payout row the send holds (send_b2c)."""
+    if cint(frappe.db.get_value(B2C_DOCTYPE, disbursement, "docstatus")) != 1:
+        return f"{disbursement} is not submitted (cancelled?): nothing is sent for it."
     name = cstr(row.get("mpesa_schedule_line")).strip()
     line = frappe.db.get_value(LINE, name, list(B2C_LINE_FIELDS), as_dict=True, for_update=True)
     if not line:
@@ -722,23 +739,49 @@ def b2c_problem(row, disbursement: str, phone=None) -> str | None:
     if (flt(row.get("allocated_amount"), 2) != flt(line.amount, 2) or row.get("party") != line.party
             or cstr(row.get("reference_name")) != cstr(line.reference_name)):
         return "It does not match its schedule line."
+    other = frappe.db.get_value(B2C_REQUEST, {"b2c_payment_disbursement_reference": row.get("name"),
+                                              "name": ["!=", request or ""]}, "name")
+    if other:
+        return f"{other} already pays this row: a row is paid once."
+    if line.reference_doctype == SLIP and line.reference_name:
+        problems = owed.slip_problems(owed.read_slip(line.reference_name))
+        if problems:
+            return problems[0]
     phone = phone or row.get("partyb")
     return employee_accounts.phone_problem(line.payee_account, line.party, phone)
 
 
 def assert_b2c_line_due(request) -> None:
     """The B2C send of a payout made by Pay Selected (services.b2c_request_service): refused before
-    the planned day, or when it is not its line's or not to the approved phone."""
+    the planned day, when it is not its row's and line's own, or not to the approved phone."""
     ref = cstr(request.get("b2c_payment_disbursement_reference")).strip()
     if not ref or not frappe.get_meta(B2C_ROW).has_field("mpesa_schedule_line"):
         return
     row = frappe.db.get_value(B2C_ROW, ref, ["name", "mpesa_schedule_line", "allocated_amount", "party",
-                                             "reference_name", "partyb"], as_dict=True)
+                                             "reference_name", "partyb", "b2c_disbursement_request"], as_dict=True)
     if not row or not cstr(row.mpesa_schedule_line).strip():
         return
-    problem = b2c_problem(row, request.get("b2c_payment_disbursement"), phone=request.get("phone_number"))
+    if cstr(row.b2c_disbursement_request) != cstr(request.get("name")):
+        # the job that makes a scheduled payout links it to its row before anything is sent
+        frappe.throw(f"{request.get('name')} is not the payout of its row: pay it with Pay Selected in M-Pesa "
+                     "Payments Due.")
+    problem = b2c_problem(row, request.get("b2c_payment_disbursement"), phone=request.get("phone_number"),
+                          request=request.get("name"))
     if problem:
         frappe.throw(problem)
+
+
+def check_b2c_request(doc) -> None:
+    """A B2C Disbursement Request names a row of a scheduled payout only when the job that makes
+    that payout made it (flags cannot come through the API)."""
+    ref = cstr(doc.get("b2c_payment_disbursement_reference")).strip()
+    if not ref or not frappe.get_meta(B2C_ROW).has_field("mpesa_schedule_line"):
+        return
+    if not cstr(frappe.db.get_value(B2C_ROW, ref, "mpesa_schedule_line")).strip():
+        return
+    flags = getattr(doc, "flags", None) or {}
+    if not flags.get("mpesa_from_schedule"):
+        frappe.throw("A scheduled payment is paid with Pay Selected in M-Pesa Payments Due, not by hand.")
 
 
 def check_b2c_disbursement(doc) -> None:
@@ -764,6 +807,65 @@ def check_b2c_row(row) -> None:
     acc = employee_accounts.get_account(line.payee_account)
     if not acc or cstr(row.partyb).strip() != cstr(acc.phone).strip():
         frappe.throw(f"Row #{row.idx}: the number must be the employee's approved phone ({line.payee_account}).")
+
+
+def send_b2c(name: str) -> bool:
+    """Send a scheduled B2C payout; True when it was posted. The job that makes it calls this once
+    the payout and its row's link are committed, so a row with no payout was never sent.
+
+    As b2b.send_deferred (R1): the claim is a locking read, and the send_started_on marker is
+    committed before anything else, so a worker that dies after it leaves a payout the 5-minute
+    sweep makes Status Unknown (a Transaction Status check settles it), never one sent again.
+    The checks (b2c_request_service.ready_to_send: the date, the row's and line's own payout, the
+    approved phone) run once more; one that fails marks it Failed, "Not sent: <reason>", while it
+    is still this send's own. Nothing after the call raises."""
+    from ..services import b2c_request_service as service
+
+    claim = frappe.db.get_value(B2C_REQUEST, name, ["docstatus", "status", "send_started_on"], as_dict=True,
+                                for_update=True)
+    if (not claim or cint(claim.docstatus) != 1 or (claim.status or NOT_INITIATED) != NOT_INITIATED
+            or claim.send_started_on):
+        return False  # cancelled, sent, failed, or being sent by another worker
+    marker = now_datetime()
+    frappe.db.set_value(B2C_REQUEST, name, "send_started_on", marker, update_modified=False)
+    frappe.db.commit()  # the marker stays whatever happens next
+    frappe.db.savepoint("mpsa_b2c_send_checks")
+    try:
+        doc = service.ready_to_send(name)
+    except Exception as e:
+        try:
+            frappe.db.rollback(save_point="mpsa_b2c_send_checks")  # the checks write nothing that matters
+        except Exception:
+            frappe.db.rollback()  # a deadlock ended the transaction, savepoint and all
+        if isinstance(e, (frappe.ValidationError, frappe.PermissionError)):
+            _forget_message()
+        _fail_unsent_b2c(name, marker, f"Not sent: {_plain(e) or type(e).__name__}")
+        frappe.db.commit()
+        return False
+    try:
+        service.send(doc)  # the connector records the ack: Initiated, Failed or Status Unknown
+    except Exception:
+        # it may have reached M-Pesa: the marker stays, and the sweep makes it Status Unknown (R1)
+        frappe.db.rollback()
+        frappe.log_error(title="M-Pesa scheduled B2C payout send failed", message=f"{name}\n{frappe.get_traceback()}",
+                         reference_doctype=B2C_REQUEST, reference_name=name)
+    frappe.db.commit()
+    return True
+
+
+def _fail_unsent_b2c(name: str, marker, message: str) -> None:
+    """Failed with its row and line, only while the payout is still Not Initiated with this send's
+    marker (a locking read): an answer or a cancel committed meanwhile is kept."""
+    current = frappe.db.get_value(B2C_REQUEST, name, ["status", "send_started_on", "b2c_payment_disbursement_reference"],
+                                  as_dict=True, for_update=True)
+    if (not current or (current.status or NOT_INITIATED) != NOT_INITIATED
+            or cstr(current.send_started_on)[:19] != cstr(marker)[:19]):
+        return
+    frappe.db.set_value(B2C_REQUEST, name, {"status": "Failed", "error_message": message[:1000]}, update_modified=False)
+    row = current.b2c_payment_disbursement_reference
+    if row:
+        frappe.db.set_value(B2C_ROW, row, "payment_status", "Failed", update_modified=False)
+        sync_b2c_line(row)
 
 
 def check_request(doc) -> None:
@@ -1249,6 +1351,19 @@ B2C_REQUEST_FIELDS = ("name", "docstatus", "status", "transaction_id", "transact
                       "accounting_booked", "accounting_error", "error_message", "result_desc")
 
 
+def _b2c_request_fields() -> list:
+    """B2C_REQUEST_FIELDS, and the send marker once migrate has made it."""
+    marker = ["send_started_on"] if frappe.get_meta(B2C_REQUEST).has_field("send_started_on") else []
+    return [*B2C_REQUEST_FIELDS, *marker]
+
+
+def b2c_never_sent(request) -> bool:
+    """A scheduled B2C payout that provably never reached M-Pesa: Failed, or Not Initiated with no
+    send marker (send_b2c commits the marker before the call)."""
+    status = request.get("status") or NOT_INITIATED
+    return status == "Failed" or (status == NOT_INITIATED and not request.get("send_started_on"))
+
+
 def sync_b2c_line(row_name) -> None:
     """Mirror a B2C row made by Pay Selected, and its B2C Disbursement Request, on its line. Never
     raises, except a deadlock or lock wait (as sync_line)."""
@@ -1264,7 +1379,7 @@ def sync_b2c_line(row_name) -> None:
             return  # planned again since: the line belongs to another payout now
         request = row.b2c_disbursement_request or frappe.db.get_value(
             B2C_REQUEST, {"b2c_payment_disbursement_reference": row.name, "docstatus": ["<", 2]}, "name")
-        values = frappe.db.get_value(B2C_REQUEST, request, list(B2C_REQUEST_FIELDS), as_dict=True) if request else None
+        values = frappe.db.get_value(B2C_REQUEST, request, _b2c_request_fields(), as_dict=True) if request else None
         mirror = _mirror_b2c(row, values, line)
         changed = {k: v for k, v in mirror.items() if _norm(k, line.get(k)) != _norm(k, v)}
         if not changed:
@@ -1304,9 +1419,14 @@ def _mirror_b2c(row, request, line) -> dict:
         booked = bool(cint(request.accounting_booked))
         entry = "Entry Made" if booked else "Entry Not Made"
         problem = None if booked else (_plain(request.accounting_error) or None)
-    elif cint(request.docstatus) == 2:
+    elif cint(request.docstatus) == 2 and b2c_never_sent(request):
         line_status = FAILED
-        problem = f"{request.name} was cancelled ({status}). Plan it again if it was not paid."
+        problem = f"{request.name} was cancelled ({status}): nothing was paid. Plan it again."
+    elif cint(request.docstatus) == 2:
+        # cancelled while M-Pesa may have paid it (only a manager may: its before_cancel)
+        line_status = UNKNOWN
+        problem = (f"{request.name} was cancelled while M-Pesa may have paid it ({status}). An M-Pesa or Accounts "
+                   "Manager checks the statement, then plans it again.")
     elif status == "Failed":
         line_status = FAILED
         problem = _plain(request.error_message or request.result_desc) or "M-Pesa refused it."
@@ -1408,16 +1528,15 @@ def plan_again(line, date=None) -> dict:
     if cint(schedule.closed):
         frappe.throw(f"{parent} is closed.")
     row = _line(line, for_update=True)
-    if row.status == UNKNOWN and row.b2c_disbursement:
-        frappe.throw(f"M-Pesa may have paid row {row.idx} ({_payout(row)}). A Transaction Status check settles it; "
-                     "plan it again only once it shows Failed.")
-    if row.status == UNKNOWN:
+    if row.b2c_disbursement:
+        if row.status not in (FAILED, UNKNOWN):
+            frappe.throw(f"Only a failed line is planned again; row {row.idx} is {row.status}.")
+        _check_b2c_not_paid(row)  # an Unknown one only once a manager settled its payout
+    elif row.status == UNKNOWN:
         frappe.throw(f"M-Pesa may have paid row {row.idx} ({row.request}). A manager checks the statement and cancels "
                      f"{row.request} if it was not paid; then plan it again.")
-    if row.status != FAILED:
+    elif row.status != FAILED:
         frappe.throw(f"Only a failed line is planned again; row {row.idx} is {row.status}.")
-    if row.b2c_disbursement:
-        _check_b2c_not_paid(row)
     if row.request:
         request = frappe.db.get_value(B2B, row.request, ["status", "docstatus", "send_started_on"], as_dict=True,
                                       for_update=True)
@@ -1445,16 +1564,40 @@ def plan_again(line, date=None) -> dict:
 
 
 def _check_b2c_not_paid(row) -> None:
-    """A failed phone line is planned again only when its B2C payout is final and not Paid."""
+    """A phone line is planned again only when its B2C payout provably was not paid: it is Failed,
+    or it never started (cancelled before its send, or its row got none). One cancelled while
+    M-Pesa may have paid it (Initiated, Status Unknown, or its send began) is planned again by a
+    manager only, who checked the statement first; a live one waits for its answer or for a
+    Transaction Status check."""
     payout = row.b2c_request or frappe.db.get_value(B2C_ROW, row.b2c_row, "b2c_disbursement_request")
     if not payout:
+        payout = frappe.db.get_value(B2C_REQUEST, {"b2c_payment_disbursement_reference": row.b2c_row}, "name")
+    if not payout:
         status = frappe.db.get_value(B2C_ROW, row.b2c_row, "payment_status", for_update=True)
-        if status and status != "Failed":
-            frappe.throw(f"Row {row.idx} of {row.b2c_disbursement} is {status}: row {row.idx} is not planned again.")
+        if status != "Failed" or row.status != FAILED:
+            frappe.throw(f"Row {row.idx} of {row.b2c_disbursement} is {status or row.status}: row {row.idx} is not "
+                         "planned again.")
         return
-    request = frappe.db.get_value(B2C_REQUEST, payout, ["status", "docstatus"], as_dict=True, for_update=True)
-    if request and (request.status == "Paid" or (cint(request.docstatus) == 1 and request.status != "Failed")):
-        frappe.throw(f"{payout} is {request.status}: row {row.idx} is not planned again.")
+    request = frappe.db.get_value(B2C_REQUEST, payout, ["status", "docstatus", *(
+        ["send_started_on"] if frappe.get_meta(B2C_REQUEST).has_field("send_started_on") else [])], as_dict=True,
+        for_update=True)
+    if not request:
+        frappe.throw(f"{payout} not found: row {row.idx} is not planned again.")
+    status = request.status or NOT_INITIATED
+    if status == "Paid":
+        frappe.throw(f"{payout} is Paid: row {row.idx} is not planned again.")
+    if status == "Failed" or (cint(request.docstatus) == 2 and b2c_never_sent(request)):
+        return
+    if cint(request.docstatus) == 2:
+        user = frappe.session.user
+        if user == "Administrator" or set(ADMIN_ROLES) & set(frappe.get_roles(user)):
+            return  # a manager cancelled it as not paid, having checked the statement
+        frappe.throw(f"M-Pesa may have paid row {row.idx}: {payout} was cancelled while it was {status}. An M-Pesa "
+                     "Manager checks the statement, then plans it again.")
+    if status == "Status Unknown" or row.status == UNKNOWN:
+        frappe.throw(f"M-Pesa may have paid row {row.idx} ({payout}). A Transaction Status check settles it; plan it "
+                     "again only once it shows Failed.")
+    frappe.throw(f"{payout} is {status}: row {row.idx} is not planned again.")
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1517,6 +1660,17 @@ def sweep(limit: int = 200) -> None:
             _each(request, sync_line)
         else:
             _each(row, sync_b2c_line)
+    if frappe.get_meta(B2C_REQUEST).has_field("send_started_on"):
+        for (name,) in frappe.db.sql(
+            f"""
+            SELECT name FROM `tab{B2C_REQUEST}`
+            WHERE docstatus = 1 AND COALESCE(status, '') IN ('', %(not_initiated)s)
+              AND send_started_on IS NOT NULL AND send_started_on < %(cutoff)s
+            ORDER BY send_started_on LIMIT {cint(limit)}
+            """,
+            {"not_initiated": NOT_INITIATED, "cutoff": add_to_date(now, minutes=-INTERRUPTED_MINUTES)},
+        ):
+            _each(name, _interrupted_b2c)
     for (row,) in frappe.db.sql(
         f"""
         SELECT b2c_row FROM `tab{LINE}`
@@ -1560,26 +1714,78 @@ def _interrupted(name: str) -> None:
     supplier_accounts._alert(f"{name}: {INTERRUPTED}", frappe._dict(doctype=B2B, name=name))
 
 
+def _interrupted_b2c(name: str) -> None:
+    """A scheduled B2C payout whose send began (its marker was committed) and never recorded an
+    answer: M-Pesa may have paid it, so it is Status Unknown, never sent again (R1), and its line
+    Unknown until a Transaction Status check settles it."""
+    values = frappe.db.get_value(B2C_REQUEST, name, ["docstatus", "status", "send_started_on",
+                                                     "b2c_payment_disbursement_reference"], as_dict=True, for_update=True)
+    if (not values or cint(values.docstatus) != 1 or (values.status or NOT_INITIATED) != NOT_INITIATED
+            or not values.send_started_on):
+        return
+    frappe.db.set_value(B2C_REQUEST, name, {"status": "Status Unknown", "error_message": B2C_INTERRUPTED},
+                        update_modified=False)
+    if values.b2c_payment_disbursement_reference:
+        sync_b2c_line(values.b2c_payment_disbursement_reference)
+    frappe.log_error(title="M-Pesa scheduled B2C payout interrupted", message=f"{name}: {B2C_INTERRUPTED}",
+                     reference_doctype=B2C_REQUEST, reference_name=name)
+    supplier_accounts._alert(f"{name}: {B2C_INTERRUPTED}", frappe._dict(doctype=B2C_REQUEST, name=name))
+
+
 def _give_up_b2c(row_name: str) -> None:
-    """A phone line's B2C row that got no payout within an hour: its job was lost. A payout is
-    recorded (and committed) before it is sent, so none was sent: the row is Failed and its line
-    may be planned again. A late job refuses it (b2c_problem: the line is no longer Sending)."""
+    """A phone line's B2C row still Sending an hour after Pay Selected: its job was lost.
+
+    The job commits the payout, linked to its row, before anything is sent, and the send commits
+    its marker first (send_b2c). So a row with no payout was never sent: it is Failed and its
+    line may be planned again. A payout that never started (no marker) is Failed, "Not sent", the
+    same way. One whose send began is left to the interrupted rule (Status Unknown, never
+    Failed). Locks: the payout, the line, then the row, as the job and the send take them; a late
+    job refuses the row (b2c_problem: the line is no longer Sending)."""
+    peek = frappe.db.get_value(B2C_ROW, row_name, ["name", "mpesa_schedule_line", "b2c_disbursement_request"],
+                               as_dict=True)
+    if not peek:
+        return
+    payout = peek.b2c_disbursement_request or frappe.db.get_value(
+        B2C_REQUEST, {"b2c_payment_disbursement_reference": row_name}, "name")
+    request = frappe.db.get_value(B2C_REQUEST, payout, _b2c_request_fields(), as_dict=True,
+                                  for_update=True) if payout else None
+    line = frappe.db.get_value(LINE, peek.mpesa_schedule_line, ["name", "parent", "idx", "status", "b2c_row"],
+                               as_dict=True, for_update=True)
     row = frappe.db.get_value(B2C_ROW, row_name, ["name", "parent", "idx", "payment_status", "b2c_disbursement_request",
                                                  "mpesa_schedule_line"], as_dict=True, for_update=True)
-    if not row:
+    if not row or not line or line.b2c_row != row_name or line.status != SENDING:
         return
-    if (row.b2c_disbursement_request or row.payment_status in ("Paid", "Failed")
-            or frappe.db.exists(B2C_REQUEST, {"b2c_payment_disbursement_reference": row_name})):
+    if not request and (row.b2c_disbursement_request or frappe.db.exists(
+            B2C_REQUEST, {"b2c_payment_disbursement_reference": row_name})):
+        # its job committed a payout since the first read: never failed here unlocked; the next
+        # sweep looks again with that payout locked first
+        sync_b2c_line(row_name)
+        return
+    if request:
+        if (cint(request.docstatus) == 1 and (request.status or NOT_INITIATED) == NOT_INITIATED
+                and not request.get("send_started_on")):
+            frappe.db.set_value(B2C_REQUEST, request.name, {
+                "status": "Failed",
+                "error_message": "Not sent: the job that sends it was lost before it started. Plan the line again."},
+                update_modified=False)
+            frappe.db.set_value(B2C_ROW, row_name, "payment_status", "Failed", update_modified=False)
+            _note_given_up(row, line, f"{request.name} was never sent (its job was lost): nothing was paid. Plan it "
+                                      "again.")
+        sync_b2c_line(row_name)
+        return
+    if row.payment_status in ("Paid", "Failed"):
         sync_b2c_line(row_name)
         return
     frappe.db.set_value(B2C_ROW, row_name, "payment_status", "Failed", update_modified=False)
     message = (f"No B2C payout was made for row {row.idx} of {row.parent} within an hour, so nothing was sent: "
                "plan it again.")
     fail_b2c_line(row_name, message)
-    line = frappe.db.get_value(LINE, row.mpesa_schedule_line, ["parent", "idx"], as_dict=True)
-    if line:
-        frappe.get_doc(SCHEDULE, line.parent).add_comment("Comment", f"Row {line.idx}: {message}")
-    frappe.log_error(title="M-Pesa scheduled B2C payout not made", message=f"{row_name}: {message}",
+    _note_given_up(row, line, message)
+
+
+def _note_given_up(row, line, message: str) -> None:
+    frappe.get_doc(SCHEDULE, line.parent).add_comment("Comment", f"Row {line.idx}: {message}")
+    frappe.log_error(title="M-Pesa scheduled B2C payout not made", message=f"{row.name}: {message}",
                      reference_doctype=B2C_DOCTYPE, reference_name=row.parent)
 
 
