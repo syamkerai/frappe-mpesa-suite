@@ -1374,8 +1374,8 @@ the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`)
   hidden Currency column is now Data, so Payers and Viewers see their lines on Frappe 15 too. The
   four upstream reports show ERPNext documents and stay with the ERPNext roles that read them.
 - A save of a submitted B2C payout through the form or the API keeps the status, send marker and
-  result M-Pesa gave it. Before, any role that could edit it (Accounts and HR roles too) could save
-  a scheduled payout as Failed or never sent, and the schedule would pay it again.
+  result M-Pesa gave it. Before, one payer could save a paid scheduled payout as Failed or never
+  sent, and the schedule would let it be paid again.
 
 **Decided by the user**
 - Only M-Pesa Payer, M-Pesa Manager and System Manager send money (B2C, B2B, reversals, retries,

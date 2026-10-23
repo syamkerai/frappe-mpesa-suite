@@ -348,8 +348,8 @@ def test_a_paid_scheduled_payout_is_never_cancelled_or_deleted(env, monkeypatch)
 
 
 def test_a_save_after_submit_keeps_what_m_pesa_answered(env, monkeypatch):
-    """Roles: a preparer who may write a submitted payout cannot mark it Failed, or clear its send
-    marker, so that a payment schedule plans it again; the Result (ignore_permissions) may."""
+    """Roles: a payer (a save after submit needs submit) cannot mark a payout Failed, or clear its
+    send marker, so that a payment schedule plans it again; the Result (ignore_permissions) may."""
     doc = b2c_request_doc(env, monkeypatch, status="Not Initiated", send_started_on="2026-10-23 10:00:00")
     doc.update({"status": "Failed", "send_started_on": None, "error_message": "typed"})
     doc.before_update_after_submit()

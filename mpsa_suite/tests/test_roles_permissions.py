@@ -383,20 +383,25 @@ class TestRolesPermissions(IntegrationTestCase):
         finally:
             frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 1)
 
-    def test_a_preparer_cannot_rewrite_what_m_pesa_answered(self):
-        """A role that may write a submitted payout (status and send marker allow on submit for the
-        Result) cannot save it as Failed or never sent, which a payment schedule would pay again."""
-        clerk = user_for(M.AU)
+    def test_a_payer_cannot_rewrite_what_m_pesa_answered(self):
+        """A save after submit needs submit (Frappe), so the payers: one cannot save a payout as Failed
+        or never sent (status and send marker allow on submit for the Result), which a payment
+        schedule would pay again. The preparers cannot save a submitted payout at all."""
+        clerk, payer = user_for(M.AU), user_for(M.MP)
         name = self._raw({"doctype": "B2C Disbursement Request", "amount": 700, "party_type": "Supplier",
                           "party": "X", "phone_number": "254708374149", "mpesa_settings": t.SETTINGS}, clerk)
         started = frappe.utils.now_datetime().replace(microsecond=0)
         frappe.db.set_value("B2C Disbursement Request", name,
                             {"docstatus": 1, "status": "Not Initiated", "send_started_on": started})
-        with self.as_user(clerk):
-            doc = frappe.get_doc("B2C Disbursement Request", name)
-            doc.update({"status": "Failed", "send_started_on": None})
-            doc.flags.ignore_links = doc.flags.ignore_mandatory = True  # fixtures, not permissions
-            doc.save()
+        for user in (clerk, payer):
+            with self.as_user(user):
+                doc = frappe.get_doc("B2C Disbursement Request", name)
+                doc.update({"status": "Failed", "send_started_on": None})
+                doc.flags.ignore_links = doc.flags.ignore_mandatory = True  # fixtures, not permissions
+                if user == clerk:
+                    self.assertRaises(frappe.PermissionError, doc.save)
+                else:
+                    doc.save()
         saved = frappe.db.get_value("B2C Disbursement Request", name, ["status", "send_started_on"], as_dict=True)
         self.assertEqual((saved.status, frappe.utils.get_datetime(saved.send_started_on)), ("Not Initiated", started))
         doc = frappe.get_doc("B2C Disbursement Request", name)
