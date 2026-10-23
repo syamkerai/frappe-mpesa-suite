@@ -1049,7 +1049,7 @@ backfill, and old rows get their state in after_migrate.
 Tests: unit tests for every rule (`tests/unit/test_b2b_owed.py`, `test_b2b_entries.py`, and
 additions to the money-out, statement, supplier account and B2C guard tests; their SQL runs on
 SQLite). Bench tests for the booking routes in `mpsa_suite/money_out/test_b2b_documents.py`.
-Not yet run on the v15 and v16 benches. Not built: the Sandbox Lab scenarios b2b_pay_order and
+Passed on the v15 and v16 benches (with the review fixes). Not built: the Sandbox Lab scenarios b2b_pay_order and
 b2b_pay_first_then_entry.
 
 **Review fixes (round 1)**
@@ -1173,7 +1173,7 @@ Tests: `tests/unit/test_schedule.py` (the date rule on every route with the site
 the schedule-line check, saved-line rules, double planning and direct payments, maker-checker on
 and off, the token, the summary, confirm to send to Result to booking, Plan Again, Move Date,
 Close, the sweep, balances, the report). Bench tests in
-`mpsa_suite/money_out/test_payment_schedule.py`, not yet run on the v15 and v16 benches. Not
+`mpsa_suite/money_out/test_payment_schedule.py`, passed on the v15 and v16 benches. Not
 built: the write-off of balances under KES 1 (decision 5, optional); B2C phone lines, employees
 and payroll (Phase 3).
 
@@ -1292,10 +1292,12 @@ Tests: `tests/unit/test_employee_accounts.py`, `tests/unit/test_salary_entry.py`
 `tests/unit/test_payroll_schedule.py` (employee lines and their checks, both routes through Pay
 Selected, the date rule and maker-checker on the B2C path, the number lock, partial failures, the
 line following its B2C payout, Plan Again, the lost-job sweep, the Payroll Entry button and its
-exclusions, the cancel guard, B2C's guard seeing B2B, the Utility card, a site without HRMS).
+exclusions, the cancel guard, B2C's guard seeing B2B, the Utility card). HRMS is required
+(`required_apps`), so nothing is tested for a site without it.
 Bench tests in `mpsa_suite/money_out/test_payroll_payouts.py` (a 4-employee payroll paid by B2B
 and B2C with employee-wise accounting on and off, never booked twice, a failed phone salary
-planned again, the cancel guard), not yet run on the v15 and v16 benches. Not built: "Phone
+planned again, the cancel guard): 357 bench tests pass on v15 (HRMS 15.64.5) and v16 (HRMS 16.52.0)
+after review round 1. Not built: "Phone
 (B2C)" on Supplier M-Pesa Account (optional); Sandbox Lab scenarios for employees.
 
 ### Payouts Phase 3 review fixes (round 1)

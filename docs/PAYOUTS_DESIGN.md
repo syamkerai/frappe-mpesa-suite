@@ -2,7 +2,7 @@
 
 Draft, 2026-10-23. Merged by a judge from three independent designs, each checked against the code and the ERPNext/HRMS source.
 
-Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). Phases 1 and 2 passed their bench tests on the v15 and v16 benches. Phase 3 is unit-tested; its bench tests (mpsa_suite/money_out/test_payroll_payouts.py) are written but not yet run. Phase 4 is not built.
+Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). All three passed their bench tests on the v15 and v16 benches (Phase 3 on sites with HRMS: 357 tests on each). Phase 4 is not built.
 
 ## Decisions taken (2026-10-23)
 
