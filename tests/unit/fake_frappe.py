@@ -145,6 +145,9 @@ class FakeDoc:
     def check_permission(self, ptype="read"):
         return True
 
+    def get_doc_before_save(self):
+        return None  # as Frappe gives for a document not yet saved
+
     def insert(self, ignore_permissions=False):
         if not self._row.get("name"):
             self._row["name"] = f"{self.doctype[:4].upper()}-{next(self._frappe._seq)}"

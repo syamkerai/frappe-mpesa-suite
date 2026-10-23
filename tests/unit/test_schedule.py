@@ -861,7 +861,7 @@ def test_a_number_not_saved_on_a_supplier_is_paid_by_a_manager_only(env):
              reference_doctype=None, reference_name=None, entry_mode="Make the entry later")
     result = env.schedule.prepare_payment(["L1"])
     assert result["not_included"][0]["reason"] == (
-        "A number not saved on a supplier is paid by an M-Pesa or Accounts Manager only.")
+        "A number not saved on a supplier is paid by an M-Pesa Manager only.")
     env.frappe.session.user, env.frappe.user_roles = OTHER, {"M-Pesa Manager"}
     answer = env.schedule.confirm_payment(prepared(env, "L1")["token"])
     request = env.frappe.db.table(B2B)[answer["sent"][0]["request"]]

@@ -701,6 +701,8 @@ def _controller(env, monkeypatch):
     doc.name, doc.docstatus, doc.status = "MB2B-1", 1, None
     doc.flags = fake_frappe._dict()  # as a Frappe Document has
     doc.get = lambda key, default=None: getattr(doc, key, default)
+    doc.owner = "clerk@example.com"  # prepared by someone else: maker-checker lets the payer send it
+    doc.get_doc_before_save = lambda: None
     return doc, calls
 
 
@@ -776,7 +778,7 @@ def test_b2b_cancel_of_a_request_that_may_have_paid_is_for_managers(env, monkeyp
     env.frappe.user_roles = {"M-Pesa Payer"}
     with pytest.raises(env.frappe.PermissionError):
         doc.before_cancel()
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     doc.before_cancel()
 
 

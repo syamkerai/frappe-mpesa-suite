@@ -43,18 +43,22 @@ ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
 SUITE_ROLES = (MM, MP, MC, MV)
 
 ALL = "rwcsxadRepmh"
+# Prepares money-out documents but does not send them (decision D1): no submit or cancel.
+PREPARE = "rwcadRepmh"
 
 # DocType -> {role: rights}. "Role@1" is that role's row at permission level 1.
 # Child tables (istable) take their parent's permissions and are not listed.
 DOCTYPES = {
     "B2C Disbursement Request": {
-        SM: ALL, MM: ALL, AM: ALL, HM: ALL,
+        SM: ALL, MM: ALL,
+        AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         AU: "rwcRepmh", HU: "rwcRepmh",
         MV: "rRep",
     },
     "B2C Payment Disbursement": {
-        SM: ALL, MM: ALL, AM: ALL, HM: ALL,
+        SM: ALL, MM: ALL,
+        AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         MV: "rRep",
     },
@@ -66,7 +70,8 @@ DOCTYPES = {
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
-        SM: ALL, MM: ALL, AM: ALL, MP: ALL,
+        SM: ALL, MM: ALL, MP: ALL,
+        AM: PREPARE,
         AU: "rwcdRep",
         MV: "rRep",
     },
@@ -80,8 +85,8 @@ DOCTYPES = {
         MV: "rRep",
     },
     "Mpesa C2B Payment Register URL": {
-        SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh",
-        AU: "rRepmh", SU: "rRepmh",
+        SM: "rwcdRepmh", MM: "rwcdRepmh",
+        AM: "rRepmh", AU: "rRepmh", SU: "rRepmh",
         MV: "rRp",
     },
     "Mpesa Express Request": {
@@ -93,8 +98,8 @@ DOCTYPES = {
     "Mpesa Match Log": {SM: "rwcdRep", MM: "rwcdRep", AM: "rRep", AU: "rRep", MV: "rRep"},
     "Mpesa Payment Intent": {SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rRep", AU: "rRep", MV: "rRep", MC: "rRep"},
     "Mpesa Public Key Certificate": {SM: "rwcdpmh", MM: "rwc"},
-    "Mpesa Reversal Request": {SM: ALL, MM: ALL, AM: ALL, MP: ALL, AU: "rRep", MV: "rRep"},
-    "Mpesa Sandbox Test Run": {SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh"},
+    "Mpesa Reversal Request": {SM: ALL, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
+    "Mpesa Sandbox Test Run": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa Settings": {
         SM: "rwcdRepmh", MM: "rwcdRepmh",
         AM: "rR", AU: "rR",
@@ -107,7 +112,8 @@ DOCTYPES = {
     # Shipped by upstream under this app's folder; the payments app owns the same DocType.
     "Payment Gateway": {SM: "rwcd"},
     "Supplier M-Pesa Account": {
-        SM: ALL, MM: ALL, AM: ALL,
+        SM: ALL, MM: ALL,
+        AM: PREPARE,
         AU: "rwcaRepmh", MP: "rwcaRepmh", PM: "rwcaRepmh",
         MV: "rRep", PU: "rRep",
     },

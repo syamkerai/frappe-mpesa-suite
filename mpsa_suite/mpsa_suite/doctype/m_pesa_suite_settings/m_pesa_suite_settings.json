@@ -593,9 +593,9 @@
   {
    "fieldname": "schedule_maker_checker",
    "fieldtype": "Check",
-   "label": "Who Pays a Scheduled Line Must Not Be Who Prepared It",
+   "label": "Who Sends a Payout Must Not Be Who Prepared It",
    "default": "1",
-   "description": "On: Pay Selected refuses a line the payer prepared or last changed (amount, payee, document or Pay On), so two people see every scheduled payment. Turn off only when one person does both jobs."
+   "description": "On: Pay Selected refuses a scheduled line the payer prepared or last changed (amount, payee, document or Pay On), and submitting a B2B request, a B2C Payment Disbursement or a B2C request refuses whoever created it, last saved it or changes it while sending. Two people see every payout. Turn off only when one person does both jobs."
   },
   {
    "fieldname": "column_break_schedule",
@@ -611,7 +611,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-23 18:00:00.000000",
+ "modified": "2026-10-23 19:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

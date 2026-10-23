@@ -19,8 +19,8 @@ document drifts from them, and when a whitelisted function has no server-side ch
 | M-Pesa Collector | Sends STK prompts and attaches received payments to invoices. | the suite |
 | M-Pesa Viewer | Reads M-Pesa transactions and reports. Changes nothing, sees no secrets. | the suite |
 | Accounts User | Prepares payouts (drafts), books and reconciles entries, collects. | ERPNext |
-| Accounts Manager | As Accounts User, plus today: sends payouts and approves payee accounts (see decisions D1, D2). | ERPNext |
-| HR Manager / HR User | Prepare (and today, HR Manager also sends) B2C payroll disbursements. | ERPNext |
+| Accounts Manager | As Accounts User, plus booking work (C2B register cancel, statement imports). Prepares payouts; does not send them or do M-Pesa admin work (decisions D1, D2). | ERPNext |
+| HR Manager / HR User | Prepare B2C payroll disbursements; an M-Pesa Payer sends them (D1). | ERPNext |
 | Sales User | Collects: STK prompts, C2B receipts on invoices. | ERPNext |
 | Purchase Manager / User | Proposes / reads supplier M-Pesa accounts. No B2B access. | ERPNext |
 
@@ -33,8 +33,9 @@ Separation of duties the code enforces:
   again at send.
 - **Payment schedules** (payouts Phase 2): the person who presses Pay must differ from the one who
   prepared or last changed the line, behind a Suite switch on by default (`docs/PAYOUTS_DESIGN.md`).
-- **Paying** needs `PAYOUT_ROLES` on the server for B2B (`mpesa_b2b_payment_request.py:30`) and
-  reversals (`mpesa_reversal_request.py:19`); B2C relies on the DocType's submit permission (D1).
+- **Paying** needs `PAYOUT_ROLES` on the server at submit for B2B, B2C and reversals, and again
+  at send for B2B. Who sends a direct payout must not be who prepared it (D3); a scheduled line
+  is checked the same way at Pay Selected.
 - **Secrets** (Daraja credentials, the callback token, API client secrets) are visible to
   `CONFIG_ROLES` only: System Manager and M-Pesa Manager.
 
@@ -47,7 +48,7 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | G1 | **High** | **Role gates skipped on Frappe's v2 API.** `require_for_direct_call` recognised a direct call only by a path ending `.<function>`. `/api/v2/method/<DocType>/<function>` runs any whitelisted name the DocType's controller module holds, imported ones too, and its path ends `/<function>`. Any logged-in user, portal users included, could send STK prompts from any shortcode to any phone (`/api/v2/method/Mpesa Express Request/initiate_stk_push`), query balances and transaction status, and make the one-way Pull registration at Safaricom with a callback URL of their choosing (`/api/v2/method/Mpesa Settings/register_pull_transaction`). | `permissions.py:71`; reached through `mpesa_express_request.py:13`, `mpesa_settings.py:42`; targets `m_pesa_api.py:193`, `:255`, `:339`, `mpesa_settings.py:498`, `:704` | Fixed: every route counts (v1 path and `cmd`, v2 method and DocType-method, `run_doc_method`) |
 | G2 | **High** | **Credentials readable below M-Pesa Manager.** On Mpesa Settings, Consumer Key, Initiator Name, Security Credential (the encrypted initiator password Daraja accepts in place of it) and Access Token were level-0 fields. Accounts Manager could read, export, print and email them; Accounts User and M-Pesa Viewer could read them. On both live sites the site's own rules give read and export to Accounts Manager, Accounts User and other local roles. | `mpesa_settings.json` | Fixed: nine credential fields on permission level 1, held by System Manager and M-Pesa Manager only; export, print and email removed below them; the browser no longer reads those fields (`mpesa_c2b_payment_register_list.js:68`, `mpesa_settings.js`) and the server checks the initiator instead |
 | G3 | **High (live)** | **The live sites do not use the app's permissions.** Both have Custom DocPerm rows on B2C Disbursement Request, B2C Payment Disbursement, Mpesa C2B Payment Register, Mpesa C2B Payment Register URL, Mpesa Express Request, Mpesa Settings and Payment Gateway. Frappe then ignores the app's rules for those DocTypes entirely, so JSON hardening alone never reaches production. | live sites (section 5) | Fixed in code: detected and reported on every migrate (one Error Log per change), never deleted; a Manager-only **Check Permissions** dialog compares them with the suite and resets chosen DocTypes; credential fields stay reachable for the site's editors (`access.py`). The reset itself is a rollout step (section 7) |
-| G4 | **High** | **Many people can send money.** Submitting a B2C document sends money. Its submit permission is held by Accounts Manager, HR Manager and System Manager, and nothing on the server checks a role at B2C submit (B2B and reversals do). On the live sites about 15 people per site hold one of those roles. | `b2c_payment_disbursement.py:47`, `b2c_disbursement_request.py:28`, their JSON | **Decision D1** |
+| G4 | **High** | **Many people can send money.** Submitting a B2C document sends money. Its submit permission is held by Accounts Manager, HR Manager and System Manager, and nothing on the server checks a role at B2C submit (B2B and reversals do). On the live sites about 15 people per site hold one of those roles. | `b2c_payment_disbursement.py:47`, `b2c_disbursement_request.py:28`, their JSON | Fixed after decisions D1 to D3 (section 9): only the pay roles send, checked at submit, by someone other than who prepared it |
 | G5 | Medium | **Form buttons ran for anyone who can read.** `run_doc_method` asks only for read. So M-Pesa Viewer could start a Safaricom balance query (`get_account_balance_info`), a reader could re-send an STK prompt (`initiate_request`), any reader of a B2C disbursement could pull other documents' outstanding amounts past their permissions (`get_outstanding_reference_documents`, `allocate_amount_to_references`) or rewrite its status (`update_disbursement_status`), and a refused retry (`retry_failed_payments`) was only logged. | `mpesa_settings.py:337`, `mpesa_express_request.py:135`, `b2c_payment_disbursement.py:287`, `:305`, `:383`, `:889` | Fixed |
 | G6 | Medium | **Role gates were never tested on Frappe 15.** `frappe.only_for` returns early whenever `flags.in_test` is set on v15, so the suite's `require()` and nine direct `only_for` calls let everyone through in v15 bench tests. | `permissions.py` `require` | Fixed: `require()` checks roles itself; every `only_for` replaced (a unit test keeps it out) |
 | G7 | Medium | **Roles that cannot do their job.** M-Pesa Payer is in `PAYOUT_ROLES` but had no permission on the B2C DocTypes, nor read on C2B registers (`make_reversal` needs it); M-Pesa Collector had no permission on Mpesa Express Request; M-Pesa Manager none on B2C, C2B registers, C2B URL registration or the certificates; M-Pesa Viewer could not read B2C, STK or C2B records; the reports left out the suite roles. | DocType and Report JSON | Fixed (matrix below) |
@@ -81,7 +82,7 @@ Checked and found sound (no change):
    Below M-Pesa Manager nobody changes settings, shortcodes or registrations at Safaricom.
 4. **M-Pesa Viewer** reads, reports and prints; it exports transactions, never settings.
 5. **Guests** reach only Safaricom callbacks, the Payments API (client credentials) and the pay page.
-6. **Separation of duties** as in section 1; the open questions are D1 to D3.
+6. **Separation of duties** as in section 1, with the decisions of section 9.
 7. **System work** that acts beyond the session user is listed and justified in section 6.
 8. **A site's own permission rules win** in Frappe; the suite reports them and an M-Pesa admin
    chooses to reset them (section 7). Nothing is deleted automatically.
@@ -104,38 +105,38 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 | DocType | SysMgr | M-Pesa Mgr | Payer | Collector | Viewer | Acc Mgr | Acc User | HR Mgr | HR User | Sales User | Pur Mgr | Pur User |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| B2C Disbursement Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcsxadRepmh` | `rwcRepmh` | `rwcsxadRepmh` | `rwcRepmh` |  |  |  |
-| B2C Payment Disbursement | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcsxadRepmh` |  | `rwcsxadRepmh` |  |  |  |  |
+| B2C Disbursement Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
+| B2C Payment Disbursement | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
 | M-Pesa Payment Schedule | `rwcdRepmh` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa B2B Payment Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcsxadRepmh` | `rwcdRep` |  |  |  |  |  |
+| Mpesa B2B Payment Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` |  |  |  |  |  |
 | Mpesa B2C Status Query | `rdRep` | `rRep` | `rRep` |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Balance Snapshot | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa C2B Payment Register | `rwdRepmh` | `rwsxaRepmh` | `rRp` | `rRp` | `rRep` | `rwsxaRepmh` | `rwsRepmh` |  |  | `rwsRepmh` |  |  |
-| Mpesa C2B Payment Register URL | `rwcdRepmh` | `rwcdRepmh` |  |  | `rRp` | `rwcdRepmh` | `rRepmh` |  |  | `rRepmh` |  |  |
+| Mpesa C2B Payment Register URL | `rwcdRepmh` | `rwcdRepmh` |  |  | `rRp` | `rRepmh` | `rRepmh` |  |  | `rRepmh` |  |  |
 | Mpesa Express Request | `rwcsdRepmh` | `rwcsRepmh` |  | `rwcsRp` | `rRep` | `rwcsRepmh` | `rwcsRepmh` |  |  | `rwcsRepmh` |  |  |
 | Mpesa Match Log | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Payment Intent | `rwcdRepmh` | `rwcdRepmh` |  | `rRep` | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Public Key Certificate | `rwcdpmh` | `rwc` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa Reversal Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcsxadRepmh` | `rRep` |  |  |  |  |  |
-| Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  | `rwcdRepmh` |  |  |  |  |  |  |
+| Mpesa Reversal Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |
+| Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `r` | `r` | `r` | `rR` | `rR` |  |  |  |  |  |
 | Mpesa Statement Import | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rwcdRep` | `rRep` |  |  |  |  |  |
 | Mpesa Statement Row | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Webhook Delivery | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
 | Payment Gateway | `rwcd` |  |  |  |  |  |  |  |  |  |  |  |
-| Supplier M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcsxadRepmh` | `rwcaRepmh` |  |  |  | `rwcaRepmh` | `rRep` |
+| Supplier M-Pesa Account | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` |  |  |  | `rwcaRepmh` | `rRep` |
 
 ### Role sets of the server checks (mpsa_suite/permissions.py)
 
 | Set | Roles |
 |---|---|
-| `ADMIN_ROLES` | System Manager, M-Pesa Manager, Accounts Manager |
+| `ADMIN_ROLES` | System Manager, M-Pesa Manager |
 | `COLLECT_ROLES` | System Manager, M-Pesa Manager, M-Pesa Collector, Accounts Manager, Accounts User, Sales Manager, Sales User |
 | `CONFIG_ROLES` | System Manager, M-Pesa Manager |
 | `FINANCE_ROLES` | System Manager, M-Pesa Manager, Accounts Manager, Accounts User |
-| `PAYOUT_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer, Accounts Manager |
+| `PAYOUT_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer |
 
 ### Report roles
 
@@ -313,7 +314,9 @@ sites apart: do Trident completely, check it, then Astral after its own rename h
 
 **Before the deploy**
 
-1. Decide who pays, who approves and who only reads (D1, D2). Write the list down per site.
+1. Decide who pays (M-Pesa Payer), who approves (M-Pesa Manager) and who only reads. On both sites
+   about 15 people send money today through Accounts Manager or HR Manager; after the deploy only
+   the people given M-Pesa Payer or M-Pesa Manager will. Write the list down per site.
 2. Integration User (G11): User > New: a System User such as `mpesa-integration@<company>` with
    roles **Accounts User** and **M-Pesa Manager** only, a long random password nobody keeps, no
    other access. M-Pesa Suite Settings > Callback Security: set **Integration User** to it, save,
@@ -355,6 +358,15 @@ Then on Astral, repeat steps 1 to 7 after its rename hand-over.
 
 ## 8. Behaviour changes for current users
 
+On every site, at once (server checks, whatever the site's own permission rules):
+
+- **Accounts Manager and HR Manager can no longer send money**: submitting a B2C disbursement or
+  request, a B2B request or a reversal, retrying a B2C payout, Pay Selected and B2C status queries
+  need M-Pesa Payer, M-Pesa Manager or System Manager (D1).
+- **Accounts Manager can no longer approve payee accounts** or do the other `ADMIN_ROLES` work (D2).
+- **Maker-checker** (D3): a payer cannot send a B2B request or B2C disbursement they created or
+  last saved, or change it while sending. A one-person team turns the switch off.
+
 On a site using the suite's own rules (new installs, and DocTypes after a reset):
 
 - Accounts Manager, Accounts User, M-Pesa Viewer: no longer see the nine credential fields of
@@ -363,6 +375,8 @@ On a site using the suite's own rules (new installs, and DocTypes after a reset)
 - M-Pesa Payer: can now read, edit and submit (send) B2C documents and read C2B registers.
 - M-Pesa Collector: can now create and submit STK requests and read C2B registers.
 - M-Pesa Manager: full access to B2C documents, C2B registers, C2B URL registration, certificates.
+- Accounts Manager and HR Manager: no submit or cancel on B2C, B2B, reversal or Supplier M-Pesa
+  Account documents; Accounts Manager: C2B URL registrations read-only, no Sandbox Lab.
 - Reports: M-Pesa Manager, the matching suite roles and M-Pesa Viewer can open them.
 
 On every site, at once, whatever its own rules:
@@ -375,23 +389,25 @@ On every site, at once, whatever its own rules:
   form's helpers need read on Payment Request; the Express Request form's conversion needs read on
   it. Their normal users have these.
 
-## 9. Decisions for the user
+## 9. Decisions taken (the user, 2026-10-23)
 
-- **D1. Who may send money (submit B2C payouts, B2B payments, reversals)?**
-  - Recommended: M-Pesa Payer, M-Pesa Manager and System Manager only. A server check at B2C
-    submit like B2B's; Accounts Manager and HR Manager keep preparing B2C drafts but no longer send;
-    Accounts Manager leaves `PAYOUT_ROLES`.
-  - Keep today: Accounts Manager also sends B2C, B2B and reversals, and HR Manager sends B2C.
-- **D2. Who may approve payee accounts and do M-Pesa admin work (`ADMIN_ROLES`: approve Supplier
-  M-Pesa Accounts, one-off destinations, register C2B URLs and Pull, cancel Unknown payouts,
-  reconcile a prompt by hand, the Sandbox Lab)?**
-  - Recommended: M-Pesa Manager and System Manager only (`ADMIN_ROLES` = `CONFIG_ROLES`).
-  - Keep today: Accounts Manager too.
-- **D3. Maker-checker on direct payouts: must the person who submits a B2B request or a B2C
-  disbursement differ from the one who created it?**
-  - Recommended: yes, behind the same kind of Suite switch as schedules (on by default, off for
-    one-person teams), sharing the payouts Phase 2 setting.
-  - No: maker-checker stays on schedules and payee accounts only.
+- **D1. Who sends money** (submit B2C payouts, B2B payments, reversals; retry; Pay Selected):
+  M-Pesa Payer, M-Pesa Manager and System Manager only. `PAYOUT_ROLES` lost Accounts Manager;
+  B2C Payment Disbursement and B2C Disbursement Request now check `PAYOUT_ROLES` at submit, as B2B
+  and reversals do. Accounts Manager and HR Manager keep preparing (create, edit, amend, delete
+  drafts) but have no submit or cancel on money-out DocTypes.
+- **D2. M-Pesa admin work** (`ADMIN_ROLES`: approve Supplier M-Pesa Accounts, one-off destinations,
+  register C2B URLs and Pull, cancel Unknown payouts, entries for cancelled or moved payouts,
+  reconcile a prompt by hand, the Sandbox Lab): M-Pesa Manager and System Manager only
+  (`ADMIN_ROLES` = `CONFIG_ROLES`). Accounts Manager reads C2B URL registrations, proposes
+  supplier accounts as drafts and no longer has the Sandbox Lab.
+- **D3. Maker-checker on direct payouts:** who submits a B2B request, a B2C Payment Disbursement
+  or a direct B2C Disbursement Request must not be who created it or last saved it, and the
+  submitting save must not change what is paid or where (`money_out/maker_checker.py`). It shares
+  M-Pesa Suite Settings' switch with the payment schedule, now labelled "Who Sends a Payout Must Not
+  Be Who Prepared It" (on by default; off only for a one-person team). Not checked: Administrator,
+  requests a schedule makes (checked at Pay Selected), and the B2C requests a checked disbursement
+  creates.
 
 ## 10. Changing a permission
 

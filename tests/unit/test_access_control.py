@@ -41,6 +41,15 @@ def test_require_lets_administrator_through(env):
     perms.require(perms.CONFIG_ROLES)
 
 
+def test_sending_money_and_admin_work_are_for_the_suite_roles_only(env):
+    # the user's decisions D1 and D2 (2026-10-23)
+    perms, _ = env
+    assert perms.PAYOUT_ROLES == ("System Manager", "M-Pesa Manager", "M-Pesa Payer")
+    assert perms.ADMIN_ROLES == perms.CONFIG_ROLES == ("System Manager", "M-Pesa Manager")
+    for role in ("Accounts Manager", "Accounts User", "HR Manager", "HR User"):
+        assert role not in perms.PAYOUT_ROLES + perms.ADMIN_ROLES, role
+
+
 def test_config_roles_are_inside_every_other_set(env):
     perms, _ = env
     for name in ("COLLECT_ROLES", "FINANCE_ROLES", "PAYOUT_ROLES", "ADMIN_ROLES"):
@@ -246,3 +255,75 @@ def test_reset_deletes_the_site_rows_and_records_who(site):
     assert deleted == ["Mpesa Settings"]
     assert "Mpesa Settings" in frappe.cleared
     assert "admin@example.com" in comments[0] and "1 site rows" in comments[0]
+
+
+# ---------------------------------------------------------------- maker-checker on direct payouts (D3)
+class PayoutDoc(fake_frappe._dict):
+    """Just what maker_checker reads of a Frappe document."""
+
+    TYPES = {"amount": "Currency", "allocated_amount": "Currency"}
+
+    @property
+    def meta(self):
+        return types.SimpleNamespace(get_field=lambda f: fake_frappe._dict(fieldtype=self.TYPES.get(f, "Data")))
+
+    def get_doc_before_save(self):
+        return self.before
+
+
+@pytest.fixture
+def mc(env, monkeypatch):
+    _, frappe = env
+    module = importlib.import_module("mpsa_suite.money_out.maker_checker")
+    monkeypatch.setattr(module, "enabled", lambda: True)
+    frappe.session.user = "payer@example.com"
+
+    def doc(owner="clerk@example.com", modified_by="clerk@example.com", before_amount=3000, **values):
+        row = dict(doctype="Mpesa B2B Payment Request", name="MB2B-1", owner=owner, amount=3000,
+                   mpesa_settings="S", supplier="ACME", supplier_mpesa_account="MSA-1")
+        row.update(values)
+        before = PayoutDoc(row, modified_by=modified_by, before=None)
+        before["amount"] = before_amount
+        return PayoutDoc(row, before=before)
+
+    return module, frappe, doc
+
+
+def test_another_person_sends_what_the_clerk_prepared(mc):
+    module, _, doc = mc
+    module.check(doc())
+
+
+@pytest.mark.parametrize("owner,modified_by", [("payer@example.com", "clerk@example.com"),
+                                               ("clerk@example.com", "payer@example.com")])
+def test_who_created_or_last_saved_it_cannot_send_it(mc, owner, modified_by):
+    module, frappe, doc = mc
+    with pytest.raises(frappe.ValidationError, match="another person must send it"):
+        module.check(doc(owner=owner, modified_by=modified_by))
+
+
+def test_a_change_made_while_sending_is_refused(mc):
+    module, frappe, doc = mc
+    with pytest.raises(frappe.ValidationError, match="changed while being sent"):
+        module.check(doc(before_amount=300))
+    module.check(doc(before_amount="3000.00"))  # the same amount, as an API might send it
+
+
+def test_child_rows_count_for_a_b2c_disbursement(mc):
+    module, frappe, _ = mc
+    rows = [PayoutDoc(party="EMP-1", partyb="254700000001", allocated_amount=1000)]
+    changed = [PayoutDoc(party="EMP-1", partyb="254799999999", allocated_amount=1000)]
+    base = dict(doctype="B2C Payment Disbursement", name="B2C-1", owner="clerk@example.com", mode_of_payment="Mpesa-X")
+    before = PayoutDoc(base, references=rows, modified_by="clerk@example.com", before=None)
+    module.check(PayoutDoc(base, references=rows, before=before))
+    with pytest.raises(frappe.ValidationError, match="changed while being sent"):
+        module.check(PayoutDoc(base, references=changed, before=before))
+
+
+def test_switched_off_or_administrator_is_not_checked(mc, monkeypatch):
+    module, frappe, doc = mc
+    frappe.session.user = "Administrator"
+    module.check(doc(owner="Administrator", modified_by="Administrator"))
+    frappe.session.user = "payer@example.com"
+    monkeypatch.setattr(module, "enabled", lambda: False)
+    module.check(doc(owner="payer@example.com"))

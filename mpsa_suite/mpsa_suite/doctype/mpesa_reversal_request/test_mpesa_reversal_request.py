@@ -11,5 +11,5 @@ class TestMpesaReversalRequest(IntegrationTestCase):
     def test_submit_is_gated_to_payout_and_admin_roles(self):
         meta = frappe.get_meta("Mpesa Reversal Request")
         submitters = {p.role for p in meta.permissions if p.submit}
-        self.assertTrue(submitters <= {"System Manager", "M-Pesa Manager", "Accounts Manager", "M-Pesa Payer"})
-        self.assertNotIn("Accounts User", submitters)
+        self.assertTrue(submitters <= {"System Manager", "M-Pesa Manager", "M-Pesa Payer"})  # D1
+        self.assertFalse(submitters & {"Accounts User", "Accounts Manager"})

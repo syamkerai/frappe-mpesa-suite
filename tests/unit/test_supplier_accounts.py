@@ -110,7 +110,7 @@ def test_clerk_without_manager_role_cannot_approve(env):
 
 
 def test_manager_approval_starts_hold(env):
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.frappe.session.user = "boss@example.com"
     doc = new_account(env)
     env.sa.approve(doc)
@@ -120,7 +120,7 @@ def test_manager_approval_starts_hold(env):
 
 def test_zero_hold_is_usable_at_once(env):
     env.frappe.db.table(SUITE)[SUITE]["supplier_account_hold_hours"] = 0
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.frappe.session.user = "boss@example.com"
     doc = new_account(env)
     env.sa.approve(doc)
@@ -217,7 +217,7 @@ def test_send_without_an_account_is_refused_unless_one_offs_are_on(env):
     env.frappe.user_roles = {"M-Pesa Payer"}
     with pytest.raises(env.frappe.PermissionError):
         env.sa.check_before_send(doc)
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.sa.check_before_send(doc)  # switch on and a manager: sent as typed
 
 

@@ -10,6 +10,7 @@ from frappe.model.document import Document
 from frappe.utils import cint, flt
 
 from ...api.b2c import make_b2c_payment_request
+from ....money_out import maker_checker
 from ....permissions import PAYOUT_ROLES, require
 
 
@@ -24,6 +25,11 @@ class B2CDisbursementRequest(Document):
         """B2C Payments Transactions validations"""
         if not self.originator_conversation_id:
             self.originator_conversation_id = self._generate_uuid_v4()
+
+    def before_submit(self) -> None:
+        require(PAYOUT_ROLES)  # submitting sends the money
+        if not (self.flags.get("mpesa_from_disbursement") or self.flags.get("mpesa_from_schedule")):
+            maker_checker.check(self)
 
     def on_submit(self):
         make_b2c_payment_request(self.name)

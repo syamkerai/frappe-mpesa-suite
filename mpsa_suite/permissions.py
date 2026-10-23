@@ -1,8 +1,9 @@
 """Role gates for whitelisted M-Pesa actions that talk to Safaricom.
 
 Upstream left these open to any logged-in user (including website/portal users).
-The lists include the standard ERPNext roles Astral's staff already hold, so
-adding the gates does not take access away from anyone who uses them today.
+Collecting and finance work keep the standard ERPNext roles staff already hold. Sending money
+and M-Pesa administration are for the suite's own roles only (the user's decisions D1 and D2,
+2026-10-23): ERPNext's Accounts Manager and HR Manager prepare payouts but do not send them.
 Who holds what, per DocType and per endpoint: docs/ROLES_AND_PERMISSIONS.md
 (kept in step with mpsa_suite.permission_matrix by the unit tests).
 """
@@ -28,19 +29,18 @@ FINANCE_ROLES = (
     "Accounts User",
 )
 
-# Send or retry B2C payouts directly (outside the disbursement document's submit flow).
+# Send money: submit B2C payouts, B2B payments and reversals, retry them, Pay Selected.
 PAYOUT_ROLES = (
     "System Manager",
     "M-Pesa Manager",
     "M-Pesa Payer",
-    "Accounts Manager",
 )
 
-# Change registrations at Safaricom (C2B URLs, Pull), rotate secrets, release payouts.
+# Approve payee accounts and one-off destinations, change registrations at Safaricom (C2B URLs,
+# Pull), settle Unknown payouts, reconcile by hand, the Sandbox Lab.
 ADMIN_ROLES = (
     "System Manager",
     "M-Pesa Manager",
-    "Accounts Manager",
 )
 
 # See and change Daraja secrets and suite settings, approve what only an M-Pesa admin may.

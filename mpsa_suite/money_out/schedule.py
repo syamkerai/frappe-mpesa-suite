@@ -469,7 +469,7 @@ def _send_problem(line, schedule, payer) -> str | None:
         if not cint(frappe.db.get_single_value(supplier_accounts.SUITE, "allow_one_off_b2b")):
             return "Paying a number not saved on a supplier is switched off (M-Pesa Suite Settings)."
         if payer != "Administrator" and not set(ADMIN_ROLES) & set(frappe.get_roles(payer)):
-            return "A number not saved on a supplier is paid by an M-Pesa or Accounts Manager only."
+            return "A number not saved on a supplier is paid by an M-Pesa Manager only."
     return _caught(_check_settings, _request_like(schedule, line))
 
 

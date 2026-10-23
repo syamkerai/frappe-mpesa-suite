@@ -286,3 +286,58 @@ class TestRolesPermissions(IntegrationTestCase):
         finally:
             frappe.db.delete("Custom DocPerm", {"parent": doctype})
             frappe.clear_cache(doctype=doctype)
+
+    # ------------------------------------------------------------ the user's decisions (2026-10-23)
+    def test_only_the_payer_roles_send_money(self):
+        """D1: Accounts Manager and HR Manager prepare payouts; they do not send them."""
+        for doctype in ("B2C Payment Disbursement", "B2C Disbursement Request", "Mpesa B2B Payment Request",
+                        "Mpesa Reversal Request"):
+            for role in (M.AM, M.HM, M.AU, M.HU, M.MV):
+                with self.as_user(user_for(role)):
+                    doc = frappe.new_doc(doctype)
+                    with self.assertRaises(frappe.PermissionError, msg=f"{role} could send a {doctype}"):
+                        doc.before_submit()
+
+    def test_only_mpesa_managers_do_admin_work(self):
+        """D2: approving payee accounts and the other ADMIN_ROLES actions left Accounts Manager."""
+        from mpsa_suite.money_out import supplier_accounts
+
+        account = frappe.new_doc("Supplier M-Pesa Account")
+        account.owner = user_for(M.AU)
+        account.proof = "/files/proof.pdf"
+        for role in (M.AM, M.AU, M.MP):
+            with self.as_user(user_for(role)), self.assertRaises(frappe.PermissionError, msg=role):
+                supplier_accounts.approve(account)
+        with self.as_user(user_for(M.MM)):
+            supplier_accounts.approve(account)
+        self.assertEqual(account.approved_by, user_for(M.MM))
+
+    def test_maker_checker_on_direct_payouts(self):
+        """D3: who sends must not be who created or last saved it, nor change it while sending."""
+        from mpsa_suite.money_out import maker_checker
+
+        def disbursement(owner, modified_by, partyb="254708374149"):
+            doc = frappe.get_doc({"doctype": "B2C Payment Disbursement", "name": "B2C-MC-1", "owner": owner,
+                                  "mode_of_payment": f"Mpesa-{t.SETTINGS}",
+                                  "references": [{"party": "EMP-1", "partyb": partyb, "allocated_amount": 1500}]})
+            before = frappe.get_doc(doc.as_dict())
+            before.modified_by = modified_by
+            before.references[0].partyb = "254708374149"
+            doc._doc_before_save = before
+            return doc
+
+        clerk, payer = user_for(M.AU), user_for(M.MP)
+        frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 1)
+        with self.as_user(payer):
+            maker_checker.check(disbursement(clerk, clerk))
+            for owner, saver in ((payer, clerk), (clerk, payer)):
+                with self.assertRaises(frappe.ValidationError):
+                    maker_checker.check(disbursement(owner, saver))
+            with self.assertRaises(frappe.ValidationError):
+                maker_checker.check(disbursement(clerk, clerk, partyb="254799999999"))
+        frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 0)
+        try:
+            with self.as_user(payer):
+                maker_checker.check(disbursement(payer, payer))  # one-person team
+        finally:
+            frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 1)

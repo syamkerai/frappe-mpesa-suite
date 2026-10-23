@@ -1176,3 +1176,43 @@ Close, the sweep, balances, the report). Bench tests in
 `mpsa_suite/money_out/test_payment_schedule.py`, not yet run on the v15 and v16 benches. Not
 built: the write-off of balances under KES 1 (decision 5, optional); B2C phone lines, employees
 and payroll (Phase 3).
+
+## Roles and permissions: strict, by role, checked on the server (2026-10-23, branch roles-permissions)
+
+Audit, model, live rollout and the per-role checks: [docs/ROLES_AND_PERMISSIONS.md](docs/ROLES_AND_PERMISSIONS.md).
+No patch: DocType and report permissions come from JSON; Role Profiles, credential-field access and
+the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`).
+
+**Who may do what is data, and tested**
+- `mpsa_suite/permission_matrix.py` lists every DocType's rights per role, the report roles, the
+  credential fields and the server check behind every whitelisted endpoint. Unit tests fail when
+  the JSON, the code or the doc drift from it, or when a whitelisted function has no check.
+- The suite's `require()` checks roles itself: `frappe.only_for`, used before, lets everyone through
+  in Frappe 15 bench tests, so no role gate had ever refused anyone there.
+
+**Fixed**
+- `/api/v2/method/<DocType>/<function>` ran the STK, balance, status and Pull registration functions
+  without their role gate (any logged-in user, portal users too); every route is now recognised.
+- Mpesa Settings credentials (Consumer Key, Initiator Name, Security Credential, Access Token and the
+  passwords) are on permission level 1: System Manager and M-Pesa Manager only. No export, print or
+  email of Mpesa Settings below them. The browser no longer reads those fields.
+- Form buttons that ran for anyone who could read (balance query, STK re-send, B2C disbursement
+  helpers and status) and helpers open to every logged-in user now check permissions.
+- The suite roles get the DocType and report rights their jobs need (Payer on B2C, Collector on STK,
+  Manager everywhere, Viewer read-only).
+
+**Decided by the user**
+- Only M-Pesa Payer, M-Pesa Manager and System Manager send money (B2C, B2B, reversals, retries,
+  Pay Selected): B2C now checks this at submit. Accounts Manager and HR Manager prepare drafts.
+- M-Pesa admin work (approving payee accounts, one-off destinations, C2B/Pull registration, settling
+  Unknown payouts, the Sandbox Lab) is for M-Pesa Manager and System Manager only.
+- Maker-checker on direct payouts: who sends a B2B request or B2C disbursement must not be who
+  created or last saved it, nor change it while sending. One switch with the payment schedule:
+  "Who Sends a Payout Must Not Be Who Prepared It" (on by default).
+
+**A site's own permission rules (Custom DocPerm)**
+- Frappe uses them instead of the app's rules. Trident and Astral both have them on seven M-Pesa
+  DocTypes. They are reported once per change (Error Log) and never deleted automatically. An M-Pesa
+  admin compares and resets them in M-Pesa Suite Settings > Permissions > Check Permissions.
+- Role Profiles M-Pesa Finance Clerk, Paying Officer, Approver, Cashier and Auditor are created once.
+  On Frappe 15 a Role Profile replaces all of a user's roles: use them only for M-Pesa-only users.

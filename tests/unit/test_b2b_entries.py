@@ -430,7 +430,7 @@ def test_make_entry_moves_an_order_payout_onto_the_invoice_made_from_it(env):
     env.frappe.db.table("Purchase Invoice Item")["PII-1"] = {
         "name": "PII-1", "parent": "PINV-1", "parenttype": PI, "purchase_order": "PO-1"}
     env.request(transaction_id="R1", purchase_order="PO-1", amount=10000, entry_mode="Make the entry later")
-    env.frappe.user_roles = {"Accounts Manager"}  # moving a payout to another document
+    env.frappe.user_roles = {"M-Pesa Manager"}  # moving a payout to another document
     assert make(env, PI, purchase_invoice="PINV-1")["entry_status"] == "Entry Made"
     assert [r["allocated_amount"] for r in env.frappe.db.table("Payment Entry Reference").values()] == [10000]
     assert (row(env)["purchase_invoice"], row(env)["purchase_order"]) == ("PINV-1", None)
@@ -512,7 +512,7 @@ def test_moving_a_payout_to_another_document_needs_a_manager(env):
     env.request(transaction_id="R1", purchase_invoice="PINV-1")
     with pytest.raises(env.frappe.PermissionError):
         make(env, PI, purchase_invoice="PINV-2")
-    env.frappe.user_roles = {"Accounts Manager"}
+    env.frappe.user_roles = {"M-Pesa Manager"}
     make(env, PI, purchase_invoice="PINV-2")
     assert row(env)["purchase_invoice"] == "PINV-2"
     assert any("moved this payment from Purchase Invoice PINV-1 to Purchase Invoice PINV-2" in c[2]

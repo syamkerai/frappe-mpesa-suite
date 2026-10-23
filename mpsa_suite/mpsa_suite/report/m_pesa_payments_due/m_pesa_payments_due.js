@@ -6,7 +6,7 @@
 // paid automatically, and no line can be sent before its Pay On.
 const MPSA_SCHEDULE = "mpsa_suite.money_out.schedule";
 const MPSA_DUE_FINANCE = ["System Manager", "M-Pesa Manager", "Accounts Manager", "Accounts User"];
-const MPSA_DUE_PAYERS = ["System Manager", "M-Pesa Manager", "M-Pesa Payer", "Accounts Manager"];
+const MPSA_DUE_PAYERS = ["System Manager", "M-Pesa Manager", "M-Pesa Payer"]; // permissions.PAYOUT_ROLES
 
 frappe.query_reports["M-Pesa Payments Due"] = {
 	filters: [

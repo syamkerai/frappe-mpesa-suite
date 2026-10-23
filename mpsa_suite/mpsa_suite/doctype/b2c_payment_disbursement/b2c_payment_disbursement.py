@@ -10,6 +10,7 @@ from frappe.query_builder import DocType
 from frappe.utils import cint, flt, now
 
 from ....daraja.guard import B2C_MIN_AMOUNT
+from ....money_out import maker_checker
 from ....permissions import PAYOUT_ROLES, is_direct_call, require
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
@@ -46,6 +47,9 @@ class B2CPaymentDisbursement(Document):
 
     def before_submit(self) -> None:
         """Initital payment trigger"""
+        require(PAYOUT_ROLES)  # submitting sends the money
+        if not self.flags.get("mpesa_from_schedule"):
+            maker_checker.check(self)
         if self.payment_type == "Mpesa Disbursement":
             settings = self._get_mpesa_settings()
 
@@ -982,6 +986,7 @@ def create_b2c_request(ref, settings, b2c_disbursement):
         data["payment_provider"] = "Mpesa"
 
         b2c_request = frappe.get_doc(data)
+        b2c_request.flags.mpesa_from_disbursement = True  # its disbursement passed maker-checker
         b2c_request.insert(ignore_permissions=True)
         b2c_request.submit()
         frappe.db.set_value(

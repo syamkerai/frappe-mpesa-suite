@@ -4,6 +4,7 @@
 import frappe
 from frappe.model.document import Document
 
+from ....money_out import maker_checker
 from ....money_out.b2b import send_b2b, validate_request
 from ....money_out.schedule import assert_line_due, check_request
 from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
@@ -33,6 +34,8 @@ class MpesaB2BPaymentRequest(Document):
         # Every check again, under the document's lock: validate() above runs only on drafts,
         # and Frappe also submits an insert that carries docstatus 1 (F1).
         require(PAYOUT_ROLES)
+        if not self.get("schedule_line"):
+            maker_checker.check(self)  # a schedule line was checked at Pay Selected
         check_request(self)  # a schedule line only from Pay Selected
         assert_line_due(self)  # never before the line's planned day, whatever the route
         validate_request(self, at_submit=True)
