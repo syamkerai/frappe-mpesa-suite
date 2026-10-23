@@ -189,6 +189,13 @@ const mpsa_due = {
 		return html;
 	},
 
+	// Run after the report changed: an empty result renders no table, so after_datatable_render
+	// would not clear the "Selected" indicator.
+	refresh(report) {
+		report.page.clear_indicator();
+		report.refresh();
+	},
+
 	confirm(report, r) {
 		const d = new frappe.ui.Dialog({
 			title: r.count ? __("Confirm M-Pesa Payments") : __("Nothing Can Be Paid"),
@@ -196,8 +203,11 @@ const mpsa_due = {
 			fields: [{ fieldtype: "HTML", fieldname: "summary" }],
 		});
 		d.fields_dict.summary.$wrapper.html(mpsa_due.summary_html(r));
+		// each Pay Selected builds a new dialog: drop the old one once closed
+		const drop = () => setTimeout(() => d.$wrapper.remove(), 500);
 		if (!r.token) {
 			d.set_primary_action(__("Close"), () => d.hide());
+			d.onhide = drop;
 			d.show();
 			return;
 		}
@@ -215,7 +225,7 @@ const mpsa_due = {
 				const res = await frappe.xcall(`${MPSA_SCHEDULE}.confirm_payment`, { token: r.token });
 				d.hide();
 				mpsa_due.show_result(res);
-				report.refresh();
+				mpsa_due.refresh(report);
 			} catch (err) {
 				sending = false;
 				d.get_primary_btn().prop("disabled", false);
@@ -232,7 +242,10 @@ const mpsa_due = {
 				btn.prop("disabled", false);
 			}
 		}, 1000);
-		d.onhide = () => clearInterval(timer);
+		d.onhide = () => {
+			clearInterval(timer);
+			drop();
+		};
 		d.show();
 	},
 
@@ -280,7 +293,7 @@ const mpsa_due = {
 				});
 				d.hide();
 				frappe.show_alert({ message: __("{0} lines moved", [res.moved]), indicator: "green" });
-				report.refresh();
+				mpsa_due.refresh(report);
 			},
 		});
 		d.show();
@@ -297,7 +310,7 @@ const mpsa_due = {
 				await frappe.xcall(`${MPSA_SCHEDULE}.plan_again`, { line: row.line });
 			}
 			frappe.show_alert({ message: __("{0} lines planned again", [rows.length]), indicator: "green" });
-			report.refresh();
+			mpsa_due.refresh(report);
 		});
 	},
 
@@ -316,6 +329,6 @@ const mpsa_due = {
 			message: __("Asked Safaricom for the balances. They arrive in a few seconds; the report refreshes in 10 seconds."),
 			indicator: "blue",
 		});
-		setTimeout(() => report.refresh(), 10000);
+		setTimeout(() => mpsa_due.refresh(report), 10000);
 	},
 };
