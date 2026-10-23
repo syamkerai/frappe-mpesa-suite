@@ -6,7 +6,7 @@ from frappe.model.document import Document
 
 from ....money_out import maker_checker
 from ....money_out.b2b import send_b2b, validate_request
-from ....money_out.schedule import assert_line_due, check_request
+from ....money_out.schedule import INTERRUPTED, assert_line_due, check_request
 from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
 
 # Written only by the server (the send, the ack, the Result, the booking), with db writes. The
@@ -49,14 +49,28 @@ class MpesaB2BPaymentRequest(Document):
     def before_update_after_submit(self):
         """A save after submit (a form opened before the Result, the API, a script) writes back
         what the database holds for the server's fields. Frappe does not enforce read only on
-        the server, and a changed status, receipt or entry would fool the double-payment checks.
-        Locking read, so a value committed after this transaction's snapshot is seen too."""
+        the server, and a changed status, receipt or entry would fool the double-payment checks."""
+        self._server_fields_from_db()
+
+    def _server_fields_from_db(self):
+        """Locking read, so a value committed after this transaction's snapshot is seen too."""
         fields = [f for f in SERVER_FIELDS if self.meta.has_field(f)]
         current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
         if current:
             self.update({f: current.get(f) for f in fields})
 
     def before_cancel(self):
+        # Decide on what the database holds, and keep it on the cancelled request: a form opened
+        # before the send (the marker does not change modified) or a typed status cannot pass.
+        self._server_fields_from_db()
+        if (self.status or "Not Initiated") == "Not Initiated" and self.get("send_started_on"):
+            # The schedule's send began and never recorded an answer: M-Pesa may have paid it
+            # (R1). Only an admin who has checked the statement cancels it, and it is kept as
+            # Unknown, so a late Result still matches it and the sweep's rule holds.
+            require(ADMIN_ROLES)
+            self.status = "Unknown"
+            self.error_message = INTERRUPTED
+            return
         if self.status in ("Not Initiated", "Failed"):
             return
         if self.status in ("Unknown", "Initiated"):
@@ -70,6 +84,11 @@ class MpesaB2BPaymentRequest(Document):
     def on_trash(self):
         """A cancelled request that may have reached M-Pesa is the only record of that money:
         a Paid one keeps counting against its document, and a late Result needs it to match."""
+        if (self.status or "Not Initiated") == "Not Initiated" and self.get("send_started_on"):
+            frappe.throw(
+                f"{self.name} was being sent to M-Pesa when it stopped, so it may have been paid. It is the record "
+                "of that payment and cannot be deleted."
+            )
         if self.status in MAY_HAVE_PAID or self.get("conversation_id") or self.get("transaction_id"):
             frappe.throw(
                 f"{self.name} was sent to M-Pesa ({self.status}). It is the record of that payment and cannot "

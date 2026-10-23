@@ -293,6 +293,94 @@ class TestPaymentSchedule(IntegrationTestCase):
         fresh.lines[0].amount = 3500  # sent: it cannot change
         self.assertRaisesRegex(frappe.ValidationError, "was sent to M-Pesa", fresh.save)
 
+    # ------------------------------------------------------------ a line only through its schedule
+    def test_a_line_cannot_be_saved_or_deleted_on_its_own(self):
+        """Write on the schedule is enough for Frappe to save or delete a row by itself (REST PUT
+        and DELETE on the row, frappe.client.save), which would skip every schedule check."""
+        from frappe.api import v1
+        from frappe.client import save as client_save
+
+        pi = self._invoice(10000)
+        doc = self._schedule((3000, pi, 0))
+        line = doc.lines[0]
+        frappe.set_user(PREPARER)
+        try:
+            frappe.local.form_dict = frappe._dict(data=frappe.as_json({"prepared_by": "Administrator",
+                                                                          "changed_by": None}))
+            self.assertRaisesRegex(frappe.ValidationError, "on their schedule", v1.update_doc, LINE, line.name)
+            self.assertRaisesRegex(frappe.ValidationError, "on their schedule", v1.delete_doc, LINE, line.name)
+            row = frappe.db.get_value(LINE, line.name, "*", as_dict=True)
+            self.assertRaisesRegex(frappe.ValidationError, "on their schedule", client_save,
+                                   {**row, "doctype": LINE, "planned_date": add_days(nowdate(), -3)})
+        finally:
+            frappe.local.form_dict = frappe._dict()
+            frappe.set_user("Administrator")
+        state = self._line(line.name)
+        self.assertEqual((state.prepared_by, state.changed_by, str(state.planned_date)), (PREPARER, PREPARER,
+                                                                                         nowdate()))
+        # on the schedule, as always
+        frappe.set_user(PREPARER)
+        try:
+            fresh = frappe.get_doc(SCHEDULE, doc.name)
+            fresh.lines[0].remarks = "changed on the schedule"
+            fresh.save()
+            fresh.lines = []
+            fresh.save()
+        finally:
+            frappe.set_user("Administrator")
+        self.assertFalse(frappe.db.exists(LINE, line.name))
+
+    def test_a_line_of_another_schedule_cannot_be_moved_in(self):
+        """Frappe updates rows by name only: a row carrying a sent line's name would move it here
+        and reset its record of the payment."""
+        pi = self._invoice(10000)
+        first = self._schedule((3000, pi, 0))
+        self._send(self._pay(first.lines))
+        sent = frappe.db.get_value(LINE, first.lines[0].name, "*", as_dict=True)
+        second = frappe.get_doc(SCHEDULE, self._schedule((1000, None, 1)).name)
+        second.append("lines", {**{f: sent[f] for f in schedule.EDITABLE}, "name": sent.name})
+        frappe.set_user(PREPARER)
+        try:
+            self.assertRaisesRegex(frappe.ValidationError, f"is a line of {first.name}: it cannot be moved",
+                                   second.save)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertEqual(frappe.db.get_value(LINE, sent.name, ["parent", "status", "request"]),
+                         (first.name, "Sent", sent.request))
+
+    # ------------------------------------------------------------ a send that began (R1)
+    def test_a_request_whose_send_began_is_cancelled_by_a_manager_only_and_stays_unknown(self):
+        pi = self._invoice(10000)
+        line = self._schedule((3000, pi, 0)).lines[0]
+        name = self._pay([line])["sent"][0]["request"]
+        # its worker died after committing the marker, or the call is still out
+        frappe.db.set_value(B2B, name, "send_started_on", now_datetime(), update_modified=False)
+        frappe.set_user(PAYER)  # M-Pesa Payer has cancel on the request
+        try:
+            self.assertRaises(frappe.PermissionError, frappe.get_doc(B2B, name).cancel)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertEqual(frappe.db.get_value(B2B, name, "docstatus"), 1)
+        frappe.get_doc(B2B, name).cancel()  # Administrator, after checking the statement
+        self.assertEqual(frappe.db.get_value(B2B, name, ["docstatus", "status", "error_message"]),
+                         (2, "Unknown", schedule.INTERRUPTED))
+        self.assertRaisesRegex(frappe.ValidationError, "is the record of that payment", frappe.delete_doc, B2B, name)
+        schedule.sync_line(name)
+        self.assertEqual(self._line(line.name).status, "Failed")
+        # a cancel that went around before_cancel: only a manager plans the line again
+        frappe.db.set_value(B2B, name, {"status": "Not Initiated", "error_message": None}, update_modified=False)
+        schedule.sync_line(name)
+        self.assertIn("M-Pesa may have paid it", self._line(line.name).last_problem)
+        self.assertRaisesRegex(frappe.ValidationError, "when it stopped", frappe.delete_doc, B2B, name)
+        frappe.set_user(PREPARER)
+        try:
+            self.assertRaisesRegex(frappe.ValidationError, "cancelled after its send began", schedule.plan_again,
+                                   line.name)
+        finally:
+            frappe.set_user("Administrator")
+        schedule.plan_again(line.name)
+        self.assertEqual((self._line(line.name).status, self._line(line.name).request), ("Planned", None))
+
     # ------------------------------------------------------------ planned lines and direct payments
     def test_a_planned_line_stops_a_direct_payment_beyond_what_is_left(self):
         pi = self._invoice(10000)

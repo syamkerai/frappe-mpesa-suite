@@ -773,8 +773,7 @@ def test_b2b_request_that_may_have_reached_mpesa_cannot_be_deleted(env, monkeypa
 def test_b2b_cancel_of_a_request_that_may_have_paid_is_for_managers(env, monkeypatch, status):
     # an Initiated request whose Result never came is settled like an Unknown one: a manager
     # checks the statement first (Phase 1 has no B2B status query)
-    doc, _ = _saved_after_submit(env, monkeypatch)
-    doc.status = status
+    doc, _ = _saved_after_submit(env, monkeypatch, status=status)
     env.frappe.user_roles = {"M-Pesa Payer"}
     with pytest.raises(env.frappe.PermissionError):
         doc.before_cancel()
@@ -783,11 +782,44 @@ def test_b2b_cancel_of_a_request_that_may_have_paid_is_for_managers(env, monkeyp
 
 
 def test_b2b_paid_request_cannot_be_cancelled(env, monkeypatch):
-    doc, _ = _saved_after_submit(env, monkeypatch)
-    doc.status = "Paid"
+    doc, _ = _saved_after_submit(env, monkeypatch, status="Paid")
     env.frappe.user_roles = {"System Manager"}
     with pytest.raises(env.frappe.ValidationError, match="A B2B payment that is Paid cannot be cancelled"):
         doc.before_cancel()
+
+
+def test_b2b_cancel_decides_on_what_the_database_holds(env, monkeypatch):
+    # a form opened before the send, or a typed status, cannot pass for Not Initiated
+    doc, _ = _saved_after_submit(env, monkeypatch, status="Initiated", conversation_id="AG_1")
+    doc.status, doc.conversation_id = "Not Initiated", None
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with pytest.raises(env.frappe.PermissionError):
+        doc.before_cancel()
+    assert (doc.status, doc.conversation_id) == ("Initiated", "AG_1")  # kept on the cancelled request
+    assert ("Mpesa B2B Payment Request", "MB2B-1") in env.frappe.db.locks  # a locking read
+
+
+def test_b2b_cancel_of_a_send_that_began_is_for_managers_and_keeps_it_unknown(env, monkeypatch):
+    # the schedule's send committed its marker and never recorded an answer: M-Pesa may have paid (R1)
+    started = datetime.datetime(2026, 10, 18, 11, 55)
+    doc, _ = _saved_after_submit(env, monkeypatch, status="Not Initiated", send_started_on=started)
+    doc.send_started_on = None  # a form opened before the send
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with pytest.raises(env.frappe.PermissionError):
+        doc.before_cancel()
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    doc.before_cancel()
+    schedule = importlib.import_module("mpsa_suite.money_out.schedule")
+    assert (doc.status, doc.error_message, doc.send_started_on) == ("Unknown", schedule.INTERRUPTED, started)
+
+
+def test_b2b_request_whose_send_began_cannot_be_deleted(env, monkeypatch):
+    doc, _ = _saved_after_submit(env, monkeypatch)
+    doc.docstatus, doc.status, doc.send_started_on = 2, "Not Initiated", datetime.datetime(2026, 10, 18, 11, 55)
+    with pytest.raises(env.frappe.ValidationError, match="was being sent to M-Pesa when it stopped"):
+        doc.on_trash()
+    doc.status = "Failed"  # "Not sent": its checks failed before the call
+    doc.on_trash()
 
 
 @pytest.mark.parametrize("error", ["QueryTimeoutError", "QueryDeadlockError"])

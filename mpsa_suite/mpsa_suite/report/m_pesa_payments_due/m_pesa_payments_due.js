@@ -75,7 +75,16 @@ frappe.query_reports["M-Pesa Payments Due"] = {
 		}
 	},
 
-	after_datatable_render() {
+	after_datatable_render(datatable) {
+		// A refresh (Pay Selected, Move Date, Plan Again, a filter, Refresh Balances) redraws every
+		// box unticked, but frappe-datatable keeps the old ticks by row number, which would now
+		// point at other lines. Clear them, so only what the user sees ticked is paid or moved.
+		const rows = datatable && datatable.rowmanager;
+		if (rows && typeof rows.checkAll === "function") {
+			rows.checkAll(false);
+		} else if (rows) {
+			rows.checkMap = [];
+		}
 		mpsa_due.show_selected(frappe.query_report);
 	},
 };
@@ -131,11 +140,15 @@ const mpsa_due = {
 				"Read this before you confirm. Nothing is sent until you press Confirm; then the payments go to M-Pesa one at a time and this report shows how each one went."
 			)}</p>`;
 			html += `<h5>${__("Who is paid")}</h5><table class="table table-bordered table-sm"><thead><tr>
-				<th>${__("Payee")}</th><th class="text-right">${__("Lines")}</th><th class="text-right">${__("Amount")}</th>
-				</tr></thead><tbody>`;
+				<th>${__("Payee")}</th><th>${__("Pays To")}</th><th class="text-right">${__("Lines")}</th>
+				<th class="text-right">${__("Amount")}</th></tr></thead><tbody>`;
 			for (const p of r.parties) {
-				html += `<tr><td>${e(p.payee || p.party || "")}</td><td class="text-right">${p.lines}</td>
-					<td class="text-right">${kes(p.amount)}</td></tr>`;
+				// the supplier's ID, or a plain note for a number not saved on a supplier
+				const note = p.party ? (p.payee && p.payee !== p.party ? p.party : "") : __("not saved on a supplier");
+				const who = e(p.payee || p.party || "") + (note ? ` <span class="text-muted">(${e(note)})</span>` : "");
+				html += `<tr><td>${who}</td><td><b>${e(p.destination || "")}</b>
+					<span class="text-muted small">${e(p.route || "")}</span></td>
+					<td class="text-right">${p.lines}</td><td class="text-right">${kes(p.amount)}</td></tr>`;
 			}
 			html += `</tbody></table>`;
 			html += `<h5>${__("Paid from")}</h5><table class="table table-bordered table-sm"><thead><tr>
