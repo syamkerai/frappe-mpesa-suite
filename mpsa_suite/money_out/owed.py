@@ -12,6 +12,11 @@ submitted entry is allocated to it. Until then the money is counted here:
 
 A Salary Slip (HRMS) has its own reading: its rounded total less what was paid (Paid B2C and B2B
 salary payouts and bank entries: salary_slip_paid), less payouts on their way and planned lines.
+No M-Pesa payment of a slip passes while its Payroll Entry has a bank or cash entry not made by
+M-Pesa, draft or submitted (HRMS's Make Bank Entry pays every slip of the payroll, and its entry
+may name no employee or still be a draft, so what it paid cannot be told per slip): slip_problems,
+checked on the schedule form, at Pay Selected, at a B2B salary's submit and send, and by B2C's
+guards and the job and send of a scheduled B2C payout.
 
 B2B and B2C share the per-document lock "b2c-pay:<doctype>:<name>", so a B2B request and a B2C
 disbursement for one invoice cannot both pass. Lock order (R4): the document lock, the payout
@@ -452,6 +457,40 @@ def hrms_installed() -> bool:
     return "hrms" in frappe.get_installed_apps()
 
 
+def payroll_bank_entries(payroll_entry: str) -> list:
+    """Live (draft or submitted) Bank or Cash Journal Entries for the Payroll Entry not made by an
+    M-Pesa payout (HRMS's Make Bank Entry, or one made by hand): an M-Pesa salary as well could
+    pay twice. M-Pesa's own salary entries are tagged with their payout."""
+    if not payroll_entry:
+        return []
+    meta = frappe.get_meta("Journal Entry Account")
+    tags = [f for f in ("b2c_payment_disbursement", "mpesa_b2b_payment_request") if meta.has_field(f)]
+    mpesa = " OR ".join(f"COALESCE(t.{f}, '') != ''" for f in tags)
+    not_mpesa = (f"AND NOT EXISTS (SELECT 1 FROM `tabJournal Entry Account` t WHERE t.parent = je.name AND ({mpesa}))"
+                 if tags else "")
+    rows = frappe.db.sql(
+        f"""
+        SELECT DISTINCT je.name FROM `tabJournal Entry` je
+        JOIN `tabJournal Entry Account` jea ON jea.parent = je.name
+        WHERE je.docstatus < 2 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
+          AND jea.reference_type = 'Payroll Entry' AND jea.reference_name = %s
+          {not_mpesa}
+        ORDER BY je.name
+        """,
+        (payroll_entry,),
+    )
+    return [r[0] for r in rows]
+
+
+def bank_entry_problem(payroll_entry: str) -> str | None:
+    """Why no salary of the Payroll Entry is paid by M-Pesa now: it has a bank or cash entry."""
+    entries = payroll_bank_entries(payroll_entry)
+    if not entries:
+        return None
+    return (f"{payroll_entry} has a bank or cash entry not made by M-Pesa ({', '.join(entries[:5])}): its salaries may "
+            "be paid by bank already. Cancel that entry first, or pay these salaries outside M-Pesa.")
+
+
 def slip_lock(slip: str):
     """The Salary Slip's per-document lock: the key B2C's guards take for it too."""
     return doc_lock(SLIP, slip)
@@ -478,7 +517,16 @@ def slip_problems(values) -> list:
         problems.append(f"{name} is in {currency}. M-Pesa pays KES only.")
     if not values.get("payroll_entry"):
         problems.append(f"{name} is not part of a Payroll Entry, so it has no payroll payable to clear.")
+    else:
+        bank = bank_entry_problem(values.payroll_entry)
+        if bank:
+            problems.append(bank)
     return problems
+
+
+def slip_bank_problem(slip: str) -> str | None:
+    """bank_entry_problem for the slip's Payroll Entry (B2C's guards ask by slip)."""
+    return bank_entry_problem(frappe.db.get_value(SLIP, slip, "payroll_entry"))
 
 
 def b2b_slip_open(slip: str, exclude: str | None = None, for_update: bool = False) -> list:

@@ -9,10 +9,16 @@ Entry and each line its Salary Slip; a Payroll Entry has at most one live (not c
 From there the schedule's rules apply: Accounts prepare, an M-Pesa Payer pays on the day with
 Pay Selected after the 5-second confirm, and never before the line's Pay On.
 
-A Payroll Entry cannot be cancelled while M-Pesa salaries of it are paid or on their way: HRMS
-cancels every Journal Entry referencing it and deletes its salary slips.
+Nothing is paid by M-Pesa while the payroll has a bank or cash entry not made by M-Pesa (HRMS's
+Make Bank Entry, draft or submitted): checked when the schedule is made and again whenever one of
+its salaries is paid (owed.slip_problems), since HR may press Make Bank Entry after the schedule.
 
-Everything here runs only on a site with HRMS; the rest of the app works without it.
+A Payroll Entry cannot be cancelled while M-Pesa salaries of it are paid or on their way: HRMS
+cancels every Journal Entry referencing it and deletes its salary slips. Nor can one of its
+Salary Slips: an amended slip would show its whole net pay as unpaid again (what was paid is
+found by the slip's name).
+
+HRMS is a required app (hooks.required_apps).
 """
 
 import frappe
@@ -61,24 +67,9 @@ def live_schedule(payroll_entry: str) -> str | None:
 
 def bank_entries(payroll_entry: str) -> list:
     """Live Bank or Cash Journal Entries for the Payroll Entry not made by an M-Pesa payout (HRMS's
-    Make Bank Entry, or one made by hand): paying through a schedule as well could pay twice."""
-    meta = frappe.get_meta("Journal Entry Account")
-    tags = [f for f in ("b2c_payment_disbursement", "mpesa_b2b_payment_request") if meta.has_field(f)]
-    mpesa = " OR ".join(f"COALESCE(t.{f}, '') != ''" for f in tags)
-    not_mpesa = (f"AND NOT EXISTS (SELECT 1 FROM `tabJournal Entry Account` t WHERE t.parent = je.name AND ({mpesa}))"
-                 if tags else "")
-    rows = frappe.db.sql(
-        f"""
-        SELECT DISTINCT je.name FROM `tabJournal Entry` je
-        JOIN `tabJournal Entry Account` jea ON jea.parent = je.name
-        WHERE je.docstatus < 2 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
-          AND jea.reference_type = 'Payroll Entry' AND jea.reference_name = %s
-          {not_mpesa}
-        ORDER BY je.name
-        """,
-        (payroll_entry,),
-    )
-    return [r[0] for r in rows]
+    Make Bank Entry, or one made by hand): paying through M-Pesa as well could pay twice. Checked
+    again whenever one of its salaries is paid (owed.slip_problems)."""
+    return owed.payroll_bank_entries(payroll_entry)
 
 
 def _slips(payroll_entry: str) -> list:
@@ -220,19 +211,36 @@ def before_cancel(doc, method=None) -> None:
                      "was paid from it: delete it first, then cancel.")
 
 
+def slip_before_cancel(doc, method=None) -> None:
+    """Salary Slip before_cancel: refused while an M-Pesa payment of it is Paid (also on a
+    cancelled payout: the money left) or on its way. Paid payouts are found by the slip's name, so
+    an amended slip would show its whole net pay as unpaid and could be paid again."""
+    paying = paid_or_on_their_way([doc.name])
+    if paying:
+        frappe.throw(f"{doc.name} cannot be cancelled while M-Pesa payments of it are paid or on their way: "
+                     f"{', '.join(paying[:10])}. An amended slip would show its whole net pay as unpaid again.")
+
+
 def _slip_names(payroll_entry: str) -> list:
     return frappe.get_all(owed.SLIP, filters={"payroll_entry": payroll_entry}, pluck="name")
 
 
 def salaries_paid_or_on_their_way(payroll_entry: str) -> list:
     """M-Pesa payouts of the Payroll Entry's salary slips that are Paid or still on their way."""
-    slips = _slip_names(payroll_entry)
+    return paid_or_on_their_way(_slip_names(payroll_entry), payroll_entry)
+
+
+def paid_or_on_their_way(slips: list, payroll_entry: str | None = None) -> list:
+    """M-Pesa payouts of these salary slips (and B2B salaries naming the Payroll Entry) that are
+    Paid or still on their way."""
     found = []
-    if frappe.db.has_column(B2B, "salary_slip"):
+    if frappe.db.has_column(B2B, "salary_slip") and (slips or payroll_entry):
+        named = " OR ".join((["salary_slip IN %(slips)s"] if slips else [])
+                            + (["payroll_entry = %(payroll)s"] if payroll_entry else []))
         found += [r[0] for r in frappe.db.sql(
             f"""
             SELECT name FROM `tab{B2B}`
-            WHERE (payroll_entry = %(payroll)s OR salary_slip IN %(slips)s)
+            WHERE ({named})
               AND ((docstatus < 2 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
             ORDER BY creation
             """,

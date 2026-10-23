@@ -316,6 +316,14 @@ def payout(monkeypatch):
             monkeypatch.setattr(req_mod, "paid_without_entry", paid_without_entry)
             monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
             monkeypatch.setattr(owed_mod, "order_advances", order_advances)
+            env.planned, env.bank = [], None
+
+            def planned_lines(dt, dn, exclude_line=None, exclude_schedule=None, for_update=False):
+                env.calls.append(("planned_lines", dt, dn, for_update, list(env.locks)))
+                return [fake_frappe._dict(o) for o in env.planned]
+
+            monkeypatch.setattr(owed_mod, "planned_lines", planned_lines)
+            monkeypatch.setattr(owed_mod, "slip_bank_problem", lambda slip: env.bank)
 
             def disbursement(name, *rows):
                 doc = disb.B2CPaymentDisbursement()
@@ -423,6 +431,34 @@ def test_payout_whose_row_lost_its_link_but_names_this_disbursement_is_its_own(p
     payout.stale = [stale_payout("B2C-9", "D-1-1", 50000, parents=["D-1-1"])]
     with pytest.raises(payout.frappe.ValidationError, match="allocates 110000.0"):
         payout.disbursement("D-1-1", {"allocated_amount": 60000}).validate_no_double_payout()
+
+
+def test_submit_takes_off_what_a_payment_schedule_plans_for_the_document(payout):
+    # SS-1 is planned for Friday on a payroll schedule (date rule, maker-checker, the approved
+    # phone): a disbursement made by hand on Monday cannot pay it as well (R3)
+    payout.owed = 50000
+    payout.planned = [{"kind": "planned", "name": "MPS-1", "line": "L1", "amount": 50000,
+                       "label": "planned on MPS-1 for 23 Oct 50,000"}]
+    doc = payout.disbursement("D-NEW", {"reference_doctype": "Salary Slip", "reference_name": "SS-1",
+                                        "allocated_amount": 50000})
+    with pytest.raises(payout.frappe.ValidationError,
+                       match="SS-1 owes 50000.0, less planned on MPS-1 for 23 Oct 50,000; this disbursement allocates"):
+        doc.validate_no_double_payout()
+    key = "b2c-pay:Salary Slip:SS-1"
+    calls = [c[0] for c in payout.calls]
+    assert ("planned_lines", "Salary Slip", "SS-1", True, [key]) in payout.calls  # locking, under the lock
+    assert calls.index("planned_lines") < calls.index("current_outstanding")  # before the slip's row (R4)
+    payout.planned = []
+    doc.validate_no_double_payout()
+
+
+def test_submit_refuses_a_slip_whose_payroll_has_a_bank_entry(payout):
+    payout.owed = 50000
+    payout.bank = "PAY-1 has a bank or cash entry not made by M-Pesa (ACC-JV-1): its salaries may be paid by bank"
+    doc = payout.disbursement("D-NEW", {"reference_doctype": "Salary Slip", "reference_name": "SS-1",
+                                        "allocated_amount": 50000})
+    with pytest.raises(payout.frappe.ValidationError, match="PAY-1 has a bank or cash entry not made by M-Pesa"):
+        doc.validate_no_double_payout()
 
 
 def test_salary_slip_is_left_to_its_own_owed(payout):

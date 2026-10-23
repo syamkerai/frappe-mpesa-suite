@@ -45,7 +45,8 @@ COLUMNS = {
     "B2C Disbursement Request": ("name", "docstatus", "status", "reference_doctype", "reference_name",
                                  "transaction_id", "mpesa_settings", "amount", "creation",
                                  "transaction_completed_datetime", "working_acct_avlbl_funds",
-                                 "utility_acct_avlbl_funds"),
+                                 "utility_acct_avlbl_funds", "send_started_on", "b2c_payment_disbursement",
+                                 "b2c_payment_disbursement_reference"),
     "B2C Payment Disbursement": ("name", "docstatus", "payment_schedule", "company"),
     "B2C Payment Disbursement Reference": (
         "name", "parent", "parenttype", "idx", "reference_doctype", "reference_name", "party_type", "party",

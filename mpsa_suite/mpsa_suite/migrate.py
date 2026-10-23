@@ -44,7 +44,7 @@ def update_settings_module():
 
 
 def create_custom_hrms_fields():
-    """Fields that link HRMS DocTypes: only on a site with HRMS (the app works without it)."""
+    """Fields that link HRMS DocTypes (HRMS is a required app; installed before this one)."""
     custom_fields = {
         "B2C Payment Disbursement Reference": [
             {

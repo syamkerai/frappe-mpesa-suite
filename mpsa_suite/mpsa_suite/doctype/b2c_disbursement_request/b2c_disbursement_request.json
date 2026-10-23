@@ -17,6 +17,7 @@
   "posting_date",
   "remarks",
   "status",
+  "send_started_on",
   "section_break_apgb",
   "currency",
   "amount",
@@ -191,6 +192,16 @@
    "fieldtype": "Select",
    "label": "Status",
    "options": "Not Initiated\nInitiated\nPaid\nFailed\nStatus Unknown",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "description": "A payment schedule's payout: when its send to M-Pesa began. Still Not Initiated long after, it may have reached M-Pesa and is never sent again.",
+   "fieldname": "send_started_on",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Send Started On",
+   "no_copy": 1,
    "read_only": 1
   },
   {
@@ -408,7 +419,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-10-21 12:00:00.000000",
+ "modified": "2026-10-23 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "B2C Disbursement Request",

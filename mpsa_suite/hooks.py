@@ -4,12 +4,12 @@ app_publisher = "Astral Industries Limited"
 app_description = "M-Pesa C2B, STK, B2C, B2B, bank feeds and reconciliation (Frappe/ERPNext v15 + v16)"
 app_email = "finance@astralind.com"
 app_license = "agpl-3.0"
-# required_apps = ["erpnext", "hrms", "lending"]
 
 # Apps
 # ------------------
 
-# required_apps = []
+# Salaries are paid from HRMS Payroll Entries and Salary Slips: both sites run HRMS.
+required_apps = ["erpnext", "hrms"]
 
 
 fixtures = [
@@ -164,6 +164,17 @@ before_uninstall = "mpsa_suite.uninstall_guard.before_uninstall"
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
 # }
 
+# Salaries (what each employee is paid, to which phone or bank account) only for who may read
+# Salary Slips, who pays them and the managers (money_out.salary_access).
+permission_query_conditions = {
+    "M-Pesa Payment Schedule": "mpsa_suite.money_out.salary_access.schedule_query_conditions",
+    "Mpesa B2B Payment Request": "mpsa_suite.money_out.salary_access.b2b_query_conditions",
+}
+has_permission = {
+    "M-Pesa Payment Schedule": "mpsa_suite.money_out.salary_access.schedule_has_permission",
+    "Mpesa B2B Payment Request": "mpsa_suite.money_out.salary_access.b2b_has_permission",
+}
+
 # DocType Class
 # ---------------
 # Override standard doctype classes
@@ -203,9 +214,12 @@ doc_events = {
         "before_validate": "mpsa_suite.money_in.payment_request.before_validate",
         "before_insert": "mpsa_suite.money_in.payment_request.before_insert",
     },
-    # HRMS: no cancel while M-Pesa salaries of the payroll are paid or on their way
+    # HRMS: no cancel while M-Pesa salaries of the payroll (or of the slip) are paid or on their way
     "Payroll Entry": {
         "before_cancel": "mpsa_suite.money_out.payroll.before_cancel",
+    },
+    "Salary Slip": {
+        "before_cancel": "mpsa_suite.money_out.payroll.slip_before_cancel",
     },
 }
 

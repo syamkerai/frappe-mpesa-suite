@@ -10,7 +10,17 @@ from frappe.model.document import Document
 from frappe.utils import cint, flt
 
 from ...api.b2c import make_b2c_payment_request
-from ....permissions import PAYOUT_ROLES
+from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
+
+# Written only by the send, the ack, the Result and the booking (db writes). A scheduled payout's
+# cancel decides on, and keeps, what the database holds.
+SERVER_FIELDS = (
+    "status", "send_started_on", "conversation_id", "originator_conversation_id", "response_code",
+    "response_description", "error_code", "error_message", "result_type", "result_code", "result_desc",
+    "transaction_id", "transaction_completed_datetime", "receiver_public_name", "recipient_is_registered_customer",
+    "accounting_booked", "accounting_attempted_on", "accounting_error", "charges_paid_acct_avlbl_funds",
+    "utility_acct_avlbl_funds", "working_acct_avlbl_funds",
+)
 
 
 class B2CDisbursementRequest(Document):
@@ -24,9 +34,59 @@ class B2CDisbursementRequest(Document):
         """B2C Payments Transactions validations"""
         if not self.originator_conversation_id:
             self.originator_conversation_id = self._generate_uuid_v4()
+        from ....money_out.schedule import check_b2c_request
+
+        check_b2c_request(self)  # a scheduled payout only from the job that makes it
 
     def on_submit(self):
+        if self.flags.get("mpesa_send_later") or self.schedule_line():
+            return  # a scheduled payout is sent by money_out.schedule.send_b2c, after it is committed
         make_b2c_payment_request(self.name)
+
+    def before_cancel(self):
+        """A payout of a payment schedule line that may have reached M-Pesa is cancelled only by a
+        manager who checked the statement (or a Transaction Status check), and keeps its status
+        (one whose send began and never answered becomes Status Unknown); a Paid one is the
+        record of that salary and is not cancelled. Its line then waits for a manager, never
+        planned again by anyone else (money_out.schedule)."""
+        if not self.schedule_line():
+            return
+        fields = [f for f in SERVER_FIELDS if self.meta.has_field(f)]
+        current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
+        if current:
+            self.update({f: current.get(f) for f in fields})
+        status = self.status or "Not Initiated"
+        if status == "Not Initiated" and self.get("send_started_on"):
+            from ....money_out.schedule import B2C_INTERRUPTED
+
+            require(ADMIN_ROLES)
+            self.status = "Status Unknown"
+            self.error_message = B2C_INTERRUPTED
+            return
+        if status in ("Not Initiated", "Failed"):
+            return
+        if status in ("Initiated", "Status Unknown"):
+            require(ADMIN_ROLES)
+            return
+        frappe.throw(f"{self.name} paid a salary from a payment schedule ({status}): it is the record of that payment "
+                     "and cannot be cancelled.")
+
+    def on_cancel(self):
+        if self.schedule_line():
+            from ....money_out.schedule import sync_b2c_line_later
+
+            sync_b2c_line_later(self.b2c_payment_disbursement_reference)  # its line shows the cancel
+
+    def on_trash(self):
+        """A scheduled payout that may have reached M-Pesa is the only record of that money: its
+        line waits on it (a manager checks the statement), and a late Result needs it to match."""
+        if not self.schedule_line():
+            return
+        from ....money_out.schedule import b2c_never_sent
+
+        if not b2c_never_sent(self):
+            frappe.throw(f"{self.name} may have paid a salary from a payment schedule ({self.status}). It is the "
+                         "record of that payment and cannot be deleted.")
 
     def _generate_uuid_v4(self) -> str:
         return str(uuid.uuid4())
@@ -98,7 +158,16 @@ class B2CDisbursementRequest(Document):
         for the document refuse it too, an invoice's order advances are taken off, and an order
         that has invoices since is refused.
         """
-        from ....money_out.owed import DOC_FIELDS, SLIP, b2b_open, b2b_slip_open, billed_order, order_advances
+        from ....money_out.owed import (
+            DOC_FIELDS,
+            SLIP,
+            b2b_open,
+            b2b_slip_open,
+            billed_order,
+            order_advances,
+            planned_lines,
+            slip_bank_problem,
+        )
         from ..b2c_payment_disbursement.b2c_payment_disbursement import (
             current_outstanding,
             open_payouts,
@@ -120,6 +189,10 @@ class B2CDisbursementRequest(Document):
                 b2b = b2b_open(dt, dn, for_update=True) if dt in DOC_FIELDS else b2b_slip_open(dn, for_update=True)
                 elsewhere |= {o.parent for o in b2b}
                 others += b2b
+            if dt == SLIP:
+                bank = slip_bank_problem(dn)  # its payroll may be paid by bank already
+                if bank:
+                    frappe.throw(bank, title=_("Paid by Bank?"))
             elsewhere = sorted(elsewhere)
             if elsewhere:
                 frappe.throw(
@@ -128,8 +201,10 @@ class B2CDisbursementRequest(Document):
                     ),
                     title=_("Duplicate Payout"),
                 )
-            # an advance still on the invoice's orders is taken off, as on submit (R3)
+            # an advance still on the invoice's orders, and lines a payment schedule plans for the
+            # document, are taken off, as on submit (R3)
             advances = order_advances(dn, for_update=True) if dt == "Purchase Invoice" else []
+            advances += planned_lines(dt, dn, for_update=True)
             owed = current_outstanding(dt, dn, for_update=True)  # the document row last (R4)
             billed = billed_order(dn, for_update=True) if dt == "Purchase Order" else None
             if billed:  # its invoices are paid instead (B2B may have paid them already)

@@ -4,15 +4,36 @@ applies them to payouts.
 
 A B2B request pays only a bank paybill account. A phone account is paid by B2C, from a payment
 schedule line (B2C Payment Disbursement), with the row's number locked to the approved phone.
+
+Nobody pays themselves: a payment to an employee is refused for the employee's own user (their
+User ID on the Employee), on a B2B request and at Pay Selected. A payment to an employee with no
+Salary Slip has no amount it is checked against, so a manager (ADMIN_ROLES) sends it.
 """
 
 import frappe
 from frappe.utils import cstr
 
+from ..permissions import ADMIN_ROLES
 from . import party_accounts as pa
 
 ACCOUNT_DOCTYPE = pa.EMPLOYEE_ACCOUNT
 PHONE, BANK = pa.PHONE, pa.BANK
+NO_SLIP = "A payment to an employee with no Salary Slip is paid by an M-Pesa or Accounts Manager."
+
+
+def own_payment_problem(employee, user=None) -> str | None:
+    """Why ``user`` may not pay ``employee``: it is their own salary or payment."""
+    user = user or frappe.session.user
+    if not employee or user == "Administrator":
+        return None
+    if user == pa.own_user(ACCOUNT_DOCTYPE, employee):
+        return f"You are {employee}: another person must pay you."
+    return None
+
+
+def is_manager(user=None) -> bool:
+    user = user or frappe.session.user
+    return user == "Administrator" or bool(set(ADMIN_ROLES) & set(frappe.get_roles(user)))
 
 
 def usable_problem(acc, employee=None) -> str | None:

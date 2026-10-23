@@ -556,6 +556,14 @@ def retry(monkeypatch):
             monkeypatch.setattr(mod, "paid_without_entry", paid_without_entry)
             monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
             monkeypatch.setattr(owed_mod, "order_advances", order_advances)
+            env.planned, env.bank = [], None
+
+            def planned_lines(dt, dn, exclude_line=None, exclude_schedule=None, for_update=False):
+                frappe.calls.append(("planned_lines", dt, dn, for_update, list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.planned]
+
+            monkeypatch.setattr(owed_mod, "planned_lines", planned_lines)
+            monkeypatch.setattr(owed_mod, "slip_bank_problem", lambda slip: env.bank)
             env.use_real_outstanding = lambda: monkeypatch.setattr(
                 disb, "current_outstanding", real_current_outstanding
             )
@@ -671,6 +679,7 @@ def test_retry_sends_when_the_document_still_owes_it(retry):
         ("paid_without_entry", "Purchase Invoice", "PI-1", [key]),
         ("b2b_open", "Purchase Invoice", "PI-1", True, [key]),  # B2B counts too, under the same lock
         ("order_advances", "PI-1", True, [key]),  # and the invoice's order advances, before its row (R4)
+        ("planned_lines", "Purchase Invoice", "PI-1", True, [key]),  # and lines a payment schedule plans (R3)
         ("current_outstanding", "Purchase Invoice", "PI-1", True, [key]),
     ]
     # the document lock before the request's row lock, in the order a disbursement submit takes them

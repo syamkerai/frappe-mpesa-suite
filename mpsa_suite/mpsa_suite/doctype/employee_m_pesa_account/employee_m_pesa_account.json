@@ -21,6 +21,7 @@
   "proof",
   "remarks",
   "approval_section",
+  "entered_by",
   "approved_by",
   "approved_on",
   "column_break_appr",
@@ -139,6 +140,15 @@
    "label": "Approval"
   },
   {
+   "fieldname": "entered_by",
+   "fieldtype": "Link",
+   "label": "Details Entered By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Who entered or last changed the details. Someone else approves them."
+  },
+  {
    "fieldname": "approved_by",
    "fieldtype": "Link",
    "label": "Approved By",
@@ -212,7 +222,7 @@
  ],
  "is_submittable": 1,
  "links": [],
- "modified": "2026-10-23 20:00:00.000000",
+ "modified": "2026-10-23 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Employee M-Pesa Account",
@@ -297,20 +307,6 @@
    "create": 1,
    "write": 1,
    "amend": 1
-  },
-  {
-   "role": "M-Pesa Payer",
-   "read": 1,
-   "report": 1,
-   "export": 1,
-   "print": 1
-  },
-  {
-   "role": "M-Pesa Viewer",
-   "read": 1,
-   "report": 1,
-   "export": 1,
-   "print": 1
   }
  ],
  "search_fields": "employee_name,phone,account_number",

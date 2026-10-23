@@ -145,7 +145,11 @@ class B2CPaymentDisbursement(Document):
         a locking read, so two disbursements submitted at the same moment cannot both pass.
         B2B requests for an invoice or order count as other payouts; an invoice's order
         advances (money_out.owed.order_advances) are taken off what it owes, and an order that
-        already has invoices is refused (they are paid instead).
+        already has invoices is refused (they are paid instead). Lines of an M-Pesa Payment
+        Schedule planned for the document are taken off too (R3): a salary a schedule plans is
+        paid by Pay Selected, under its date rule and maker-checker, not by hand. A Salary Slip
+        whose Payroll Entry has a bank or cash entry not made by M-Pesa is refused (it may be paid
+        by bank already).
         """
         from ....money_in.common import named_lock
         from ....money_out.owed import (
@@ -156,6 +160,8 @@ class B2CPaymentDisbursement(Document):
             billed_order,
             busy_message,
             order_advances,
+            planned_lines,
+            slip_bank_problem,
         )
         from ..b2c_disbursement_request.b2c_disbursement_request import paid_without_entry
 
@@ -187,6 +193,9 @@ class B2CPaymentDisbursement(Document):
                     # B2B salary requests to the employee's bank paybill still on their way (a Paid
                     # one is in what the slip owes already)
                     others += b2b_slip_open(name, for_update=True)
+                    bank = slip_bank_problem(name)
+                    if bank:
+                        frappe.throw(bank, title=_("Paid by Bank?"))
                 if others:
                     frappe.throw(
                         _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(
@@ -197,6 +206,9 @@ class B2CPaymentDisbursement(Document):
                 # An advance still on the invoice's orders (B2B, B2C or a bank entry) is not in its
                 # outstanding until Get Advances moves it over: taken off, as for B2B (R3).
                 advances = order_advances(name, for_update=True) if doctype == "Purchase Invoice" else []
+                # planned on a payment schedule and not sent yet (a line Pay Selected is paying now
+                # is no longer planned): taken off, as owed.left_to_pay does
+                advances += planned_lines(doctype, name, for_update=True)
                 owed = current_outstanding(doctype, name, for_update=True)  # the document row last (R4)
                 # an invoice made from the order may be paid already (B2B, bank): its advance_paid
                 # does not show that
@@ -972,8 +984,10 @@ def create_b2c_request(ref, settings, b2c_disbursement):
     if line:
         from ....money_out import schedule
 
-        # A payout of a payment schedule line: its line is due, still this row's, and the number
-        # is the employee's approved phone (checked again at send). Refused as above: nothing sent.
+        # A payout of a payment schedule line: its disbursement is still submitted, its line is
+        # due and still this row's, no payout names the row yet, the slip may be paid and the
+        # number is the employee's approved phone (checked again at send). Refused as above:
+        # nothing sent.
         if problem := schedule.b2c_problem(ref, b2c_disbursement.name):
             frappe.db.set_value(ref.doctype, ref.name, "payment_status", "Failed")
             schedule.fail_b2c_line(ref.name, f"Not sent: {problem}")
@@ -1004,23 +1018,33 @@ def create_b2c_request(ref, settings, b2c_disbursement):
 
         b2c_request = frappe.get_doc(data)
         if line:
-            # Pay Selected checked the payer's roles and the line; the job submits as that payer
+            # Pay Selected checked the payer's roles and the line; the job submits as that payer.
+            # Submitting does not send it (mpesa_send_later): schedule.send_b2c does, below.
             b2c_request.flags.ignore_permissions = True
+            b2c_request.flags.mpesa_from_schedule = True
+            b2c_request.flags.mpesa_send_later = True
         b2c_request.insert(ignore_permissions=True)
         b2c_request.submit()
         frappe.db.set_value(
             ref.doctype, ref.name, "b2c_disbursement_request", b2c_request.name
         )
-        if line:
-            from ....money_out.schedule import sync_b2c_line_later
-
-            sync_b2c_line_later(ref.name)  # its line shows Sent once M-Pesa took it
 
     except Exception as e:
         frappe.log_error(
             title="Failed to create B2C Request", message=frappe.get_traceback()
         )
         frappe.throw(f"Failed to create B2C Request {e}")
+
+    if line:
+        from ....money_out.schedule import send_b2c, sync_b2c_line_later
+
+        # The payout and its row's link are committed before anything is sent (R1): a row the
+        # 5-minute sweep finds with no payout an hour later was never sent. send_b2c commits its
+        # own send_started_on marker before the call to M-Pesa.
+        frappe.db.commit()
+        send_b2c(b2c_request.name)
+        sync_b2c_line_later(ref.name)  # its line shows Sent once M-Pesa took it
+        frappe.db.commit()
 
 
 def current_outstanding(doctype: str | None, name: str | None, for_update: bool = False) -> float | None:

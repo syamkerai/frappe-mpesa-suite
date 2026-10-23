@@ -1,13 +1,12 @@
 """Employees and payroll (payouts Phase 3) against the real database (ERPNext v15 and v16).
 
-TestEmployeePayouts runs on every site: Employee M-Pesa Account approval, B2B to an employee's
-bank paybill with no salary slip (Make Entry), the date rule on an employee line. TestPayroll runs
-only where HRMS is installed: a Payroll Entry of four employees (one paid to a bank paybill by
-B2B, one to a phone by B2C, one with no account, one who left) through the Payroll Entry's
-button, Pay Selected, the sends and the Results, the salary Journal Entries clearing the
-payroll payable (employee-wise accounting on and off, round-off), never booked twice, a partial
-failure planned again, the date rule on the B2C path, maker-checker and the cancel guard.
-TestWithoutHrms runs only where HRMS is not installed: the app works, salary slips are refused.
+TestEmployeePayouts: Employee M-Pesa Account approval, B2B to an employee's bank paybill with no
+salary slip (Make Entry), the date rule on an employee line. TestPayroll (HRMS is a required
+app): a Payroll Entry of four employees (one paid to a bank paybill by B2B, one to a phone by
+B2C, one with no account, one who left) through the Payroll Entry's button, Pay Selected, the
+sends and the Results, the salary Journal Entries clearing the payroll payable (employee-wise
+accounting on and off, round-off), never booked twice, a partial failure planned again, the date
+rule on the B2C path, maker-checker and the cancel guard.
 
 The Payroll Entry, its Salary Slips and its accrual entry are written directly (db_insert, and a
 Journal Entry like HRMS's accrual), not computed by HRMS: what is tested is the M-Pesa side. Same
@@ -506,21 +505,3 @@ class TestPayroll(_Base):
         self.assertTrue(any(label.startswith("Utility") for label in labels), labels)
         self.assertTrue(any(label.startswith("Working") for label in labels), labels)
 
-
-class TestWithoutHrms(_Base):
-    def setUp(self):
-        if hrms():
-            self.skipTest("HRMS is installed")
-        super().setUp()
-
-    def test_the_app_works_and_salary_slips_are_refused(self):
-        self.assertFalse(frappe.get_meta(B2B).has_field("salary_slip"))
-        self.assertEqual(owed.b2b_slip_open("anything"), [])
-        with _as(PREPARER):
-            doc = frappe.get_doc({"doctype": SCHEDULE, "title": "T no hrms", "company": t.COMPANY,
-                                  "b2b_settings": SETTINGS, "lines": [{
-                                      "planned_date": nowdate(), "party_type": "Employee",
-                                      "party": self.employees["_T Pay Bank"], "amount": 700,
-                                      "reference_doctype": SLIP, "reference_name": "SAL-NONE"}]})
-            self.assertRaises(frappe.ValidationError, doc.insert)
-            self.assertRaisesRegex(frappe.ValidationError, "needs HRMS", schedule.from_payroll_entry, "PAY-NONE")

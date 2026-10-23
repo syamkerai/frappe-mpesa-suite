@@ -3,11 +3,14 @@ bank paybill.
 
 A payout goes to whatever number is on it, so a typo or a swapped number sends money to the
 wrong person. Destinations therefore live on an account that one person enters (with proof)
-and a different manager approves by submitting it. Approved details cannot be edited (cancel
-and amend, which needs approval again), become usable only after a hold period, and payouts
-copy the destination from the approved account instead of trusting typed values. After each
-payment, the name Safaricom says it paid is compared with the name on file; a mismatch blocks
-the account until a manager confirms it.
+and a different manager approves by submitting it: not who created it, not who last entered or
+changed its details (entered_by, set on every save that changes them and checked again at
+submit), and for an employee's account not the employee. Approved details cannot be edited
+(cancel and amend, which needs approval again), become usable only after a hold period, and
+payouts copy the destination from the approved account instead of trusting typed values. One
+phone or bank account is approved for one employee only. After each payment, the name
+Safaricom says it paid is compared with the name on file; a mismatch blocks the account until
+a manager confirms it.
 
 One profile per account DocType (Supplier M-Pesa Account, Employee M-Pesa Account) holds what
 differs: the party, its account types, the hold setting and the wording. supplier_accounts and
@@ -57,6 +60,9 @@ PROFILES = {
                 "active_from", "is_default", "name_mismatch", "last_receiver_name"),
         proof="Attach the supplier's proof of these details (letter, invoice or statement)",
         add_hint="add one under Supplier > M-Pesa Accounts and have a manager approve it.",
+        # who entered or changed these may not approve them
+        destination_fields=("supplier", "account_type", "shortcode", "account_number", "expected_name"),
+        user_link=None, unique_destination=False,
     ),
     EMPLOYEE_ACCOUNT: Profile(
         doctype=EMPLOYEE_ACCOUNT, party_type="Employee", party_field="employee", label="employee",
@@ -65,6 +71,12 @@ PROFILES = {
                 "expected_name", "active_from", "is_default", "name_mismatch", "last_receiver_name"),
         proof="Attach the employee's proof of these details (bank letter or statement, or M-Pesa registration)",
         add_hint="add one under Employee > M-Pesa Accounts and have a manager approve it.",
+        destination_fields=("employee", "account_type", "phone", "shortcode", "account_number", "bank",
+                            "expected_name"),
+        # the employee's own user may not approve their account (nor pay themselves)
+        user_link=("Employee", "user_id"),
+        # a salary goes to one employee only: the same phone or bank account for two is refused
+        unique_destination=True,
     ),
 }
 ACCOUNT_FOR_PARTY = {p.party_type: p.doctype for p in PROFILES.values()}
@@ -83,8 +95,9 @@ def party_of(acc, doctype) -> str | None:
 
 # ---------------------------------------------------------------- the account itself
 def validate_account(doc) -> None:
-    """On save of a draft account: clean and check the details, refuse a repeat for the same party
-    and warn when another party has the same number approved."""
+    """On save of a draft account, and again at submit (the approval): clean and check the
+    details, note who entered or changed them, refuse a repeat for the same party, and warn when
+    another party has the same number approved (an employee's is refused)."""
     p = profile(doc)
     party = doc.get(p.party_field)
     if doc.account_type not in p.types:
@@ -104,6 +117,10 @@ def validate_account(doc) -> None:
     if frappe.db.exists(p.doctype, dict(same, **{p.party_field: party})):
         frappe.throw(f"This {p.label} already has an approved account with these details")
     others = frappe.get_all(p.doctype, filters=dict(same, **{p.party_field: ["!=", party]}), pluck=p.party_field)
+    if others and p.unique_destination:
+        what = "phone" if doc.account_type == PHONE else "bank account"
+        frappe.throw(f"The same {what} is already approved for {', '.join(sorted(set(others)))}. One {p.label}'s "
+                     f"account cannot be another's: check with the {p.label}.")
     if others:
         # Shared bank paybills (e.g. 522522) differ by account number, so an exact repeat is suspicious.
         frappe.msgprint(
@@ -112,6 +129,28 @@ def validate_account(doc) -> None:
             title="Possible duplicate",
             indicator="orange",
         )
+    _note_who_entered(doc, p)
+
+
+def _note_who_entered(doc, p) -> None:
+    """entered_by: who entered or last changed the destination, who may not approve it. Read
+    back from the database when nothing changed: the form's copy is not trusted."""
+    fields = list(p.destination_fields)
+    extra = ["owner", "entered_by"] if frappe.db.has_column(p.doctype, "entered_by") else ["owner"]
+    stored = frappe.db.get_value(p.doctype, doc.name, [*fields, *extra], as_dict=True) if doc.get("name") else None
+    if not stored or any(cstr(doc.get(f)).strip() != cstr(stored.get(f)).strip() for f in fields):
+        doc.entered_by = frappe.session.user
+    else:
+        doc.entered_by = stored.get("entered_by") or stored.get("owner")
+
+
+def own_user(doctype, party) -> str | None:
+    """The party's own user (an employee's User ID), or None."""
+    p = profile(doctype)
+    if not p.user_link or not party:
+        return None
+    link_doctype, field = p.user_link
+    return cstr(frappe.db.get_value(link_doctype, party, field)).strip() or None
 
 
 def _check_number(doc, p) -> None:
@@ -138,12 +177,18 @@ def _check_number(doc, p) -> None:
 
 
 def approve(doc) -> None:
-    """Submitting is the approval: a manager who did not enter the details."""
+    """Submitting is the approval: a manager who did not create the account or enter (or change)
+    its details, and for an employee's account not the employee. validate_account runs just
+    before (before_submit), so entered_by also names who changed the details in this submit."""
     p = profile(doc)
     require(ADMIN_ROLES)
     user = frappe.session.user
-    if user != "Administrator" and user == doc.owner:
-        frappe.throw("A different person must approve the M-Pesa account they did not enter themselves")
+    if user != "Administrator":
+        if user in {doc.owner, doc.get("entered_by")} - {None, ""}:
+            frappe.throw("A different person must approve: you entered or changed the details of this M-Pesa "
+                         "account.")
+        if user == own_user(p.doctype, doc.get(p.party_field)):
+            frappe.throw("This is your own M-Pesa account: another manager must approve it.")
     if not doc.proof:
         frappe.throw(p.proof)
     now = now_datetime()

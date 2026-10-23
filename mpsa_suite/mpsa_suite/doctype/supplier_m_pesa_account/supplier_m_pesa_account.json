@@ -18,6 +18,7 @@
   "proof",
   "remarks",
   "approval_section",
+  "entered_by",
   "approved_by",
   "approved_on",
   "column_break_appr",
@@ -109,6 +110,15 @@
    "label": "Approval"
   },
   {
+   "fieldname": "entered_by",
+   "fieldtype": "Link",
+   "label": "Details Entered By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Who entered or last changed the details. Someone else approves them."
+  },
+  {
    "fieldname": "approved_by",
    "fieldtype": "Link",
    "label": "Approved By",
@@ -182,7 +192,7 @@
  ],
  "is_submittable": 1,
  "links": [],
- "modified": "2026-10-19 12:00:00.000000",
+ "modified": "2026-10-23 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Supplier M-Pesa Account",

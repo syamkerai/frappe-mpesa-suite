@@ -6,13 +6,15 @@ lines, Utility for B2C phone lines).
 
 Ticked lines are paid with Pay Selected (money_out.schedule.prepare_payment, then
 confirm_payment after the 5-second confirm step), or moved to another day with Move Date.
-The Problem column says why a line cannot be paid by the person looking at it now.
+The Problem column says why a line cannot be paid by the person looking at it now. Employee and
+salary lines are shown only to who may see salaries (money_out.salary_access): who reads Salary
+Slips, who pays them and the managers.
 """
 
 import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate, nowdate
 
-from mpsa_suite.money_out import owed
+from mpsa_suite.money_out import owed, salary_access
 from mpsa_suite.money_out import schedule as s
 from mpsa_suite.wallet import balances
 
@@ -64,6 +66,9 @@ def _rows(filters) -> list:
     elif show == IN_PROGRESS:
         where.append("l.status IN %(in_progress)s")
         values["in_progress"] = s.IN_PROGRESS
+    hidden = salary_access.report_condition("l.")
+    if hidden:
+        where.append(hidden)  # what each employee is paid is for who may read Salary Slips
     for field, column in (("company", "p.company"), ("route", "l.route"), ("schedule", "l.parent")):
         if filters.get(field):
             where.append(f"{column} = %({field})s")
