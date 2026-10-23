@@ -194,12 +194,15 @@ class TestEmployeePayouts(_Base):
 
     def test_b2b_to_an_employee_bank_paybill_without_a_slip_waits_for_make_entry(self):
         employee = self.employees["_T Pay Bank"]
-        with _as(MANAGER), patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack):
+        with _as(PREPARER):
             req = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
                                   "remarks": "Allowance", "employee": employee})
             req.insert()
             self.assertEqual((req.employee_mpesa_account, req.receiver_shortcode, req.entry_mode, req.supplier),
                              (self.accounts["_T Pay Bank"], "247247", "Make the entry later", None))
+        # another person sends what Accounts prepared (maker-checker on direct payouts, decision D3)
+        with _as(MANAGER), patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack):
+            req = frappe.get_doc(B2B, req.name)
             req.submit()
         self._b2b_result(req.name)
         self.assertEqual(frappe.db.get_value(B2B, req.name, "entry_status"), "Entry Not Made")
