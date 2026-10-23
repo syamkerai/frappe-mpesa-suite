@@ -46,6 +46,10 @@ class B2CDisbursementRequest(Document):
             self.reload()
             if self.docstatus != 1 or self.status != "Failed":
                 frappe.throw(f"Only submitted, failed B2C requests can be retried ({self.status})")
+            if self.schedule_line():
+                # a scheduled payment is paid again only with Pay Selected (date rule, maker-checker)
+                frappe.throw(f"{self.name} was paid from a payment schedule: plan its line again (Plan Again) and "
+                             "pay it with Pay Selected.")
             self.validate_still_owed()
             # Daraja rejects a reused OriginatorConversationID (500.002.1001), and the result
             # callback ignores re-sends for a request that already has a final result.
@@ -59,6 +63,13 @@ class B2CDisbursementRequest(Document):
                 }
             )
             make_b2c_payment_request(self.name)
+
+    def schedule_line(self) -> str | None:
+        """The M-Pesa Payment Schedule line this payout pays (its disbursement row's), or None."""
+        ref = getattr(self, "b2c_payment_disbursement_reference", None)
+        if not ref:
+            return None
+        return frappe.db.get_value("B2C Payment Disbursement Reference", ref, "mpesa_schedule_line") or None
 
     def _document_lock(self):
         """The double-payout check's per-document lock (held until commit; re-entrant)."""
@@ -87,7 +98,7 @@ class B2CDisbursementRequest(Document):
         for the document refuse it too, an invoice's order advances are taken off, and an order
         that has invoices since is refused.
         """
-        from ....money_out.owed import DOC_FIELDS, b2b_open, billed_order, order_advances
+        from ....money_out.owed import DOC_FIELDS, SLIP, b2b_open, b2b_slip_open, billed_order, order_advances
         from ..b2c_payment_disbursement.b2c_payment_disbursement import (
             current_outstanding,
             open_payouts,
@@ -105,8 +116,8 @@ class B2CDisbursementRequest(Document):
                 paid = paid_without_entry(dt, dn)
                 elsewhere |= {o.parent for o in paid if mine not in (o.parents or [o.parent])}
                 others += paid
-            if dt in DOC_FIELDS:  # B2B requests for the invoice or order (same lock, locking read)
-                b2b = b2b_open(dt, dn, for_update=True)
+            if dt in DOC_FIELDS or dt == SLIP:  # B2B requests for the document (same lock, locking read)
+                b2b = b2b_open(dt, dn, for_update=True) if dt in DOC_FIELDS else b2b_slip_open(dn, for_update=True)
                 elsewhere |= {o.parent for o in b2b}
                 others += b2b
             elsewhere = sorted(elsewhere)

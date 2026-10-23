@@ -10,6 +10,9 @@ submitted entry is allocated to it. Until then the money is counted here:
 - lines of an M-Pesa Payment Schedule planned for the document and not yet sent (a sent line
   counts as its B2B request).
 
+A Salary Slip (HRMS) has its own reading: its rounded total less what was paid (Paid B2C and B2B
+salary payouts and bank entries: salary_slip_paid), less payouts on their way and planned lines.
+
 B2B and B2C share the per-document lock "b2c-pay:<doctype>:<name>", so a B2B request and a B2C
 disbursement for one invoice cannot both pass. Lock order (R4): the document lock, the payout
 rows, then the document row last.
@@ -21,6 +24,7 @@ from frappe.utils import cint, cstr, flt, getdate, nowdate
 B2B = "Mpesa B2B Payment Request"
 SCHEDULE_LINE = "M-Pesa Payment Schedule Line"
 DOC_FIELDS = {"Purchase Invoice": "purchase_invoice", "Purchase Order": "purchase_order"}
+SLIP = "Salary Slip"
 # Requests that may still take money from M-Pesa: their whole amount counts.
 OPEN = ("Not Initiated", "Initiated", "Unknown")
 # An order in one of these states takes no more payments.
@@ -356,7 +360,7 @@ def planned_lines(dt: str, dn: str, exclude_line=None, exclude_schedule=None, fo
         SELECT name, parent, amount, planned_date
         FROM `tab{SCHEDULE_LINE}`
         WHERE reference_doctype = %(dt)s AND reference_name = %(dn)s AND parenttype = 'M-Pesa Payment Schedule'
-          AND status = 'Planned' AND COALESCE(request, '') = ''
+          AND status = 'Planned' AND COALESCE(request, '') = '' AND COALESCE(b2c_disbursement, '') = ''
           AND name != %(line)s AND parent != %(schedule)s
         ORDER BY planned_date, parent, idx
         {_locking(for_update)}
@@ -388,8 +392,12 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, ex
 
     ``exclude_request``: the B2B request being checked. ``exclude_line`` / ``exclude_schedule``:
     the payment schedule line being checked, or the schedule being saved (planned_lines).
-    Payouts and planned lines are read before the document row (R4).
+    Payouts and planned lines are read before the document row (R4). A Salary Slip has its own
+    reading (slip_left_to_pay).
     """
+    if dt == SLIP:
+        return slip_left_to_pay(dn, exclude_request=exclude_request, exclude_line=exclude_line,
+                                exclude_schedule=exclude_schedule, for_update=for_update)
     parts = []
     b2b = b2b_open(dt, dn, exclude=exclude_request, for_update=for_update)
     for row in b2b:
@@ -433,6 +441,92 @@ def explain(dn: str, result) -> str:
     if less:
         text += f", less {less}"
     return f"{text}: {money(result.left)} is left to pay."
+
+
+# ---------------------------------------------------------------- Salary Slips (HRMS)
+SLIP_READ = ("name", "docstatus", "status", "employee", "employee_name", "company", "currency", "payroll_entry",
+             "net_pay", "rounded_total", "start_date", "end_date")
+
+
+def hrms_installed() -> bool:
+    return "hrms" in frappe.get_installed_apps()
+
+
+def slip_lock(slip: str):
+    """The Salary Slip's per-document lock: the key B2C's guards take for it too."""
+    return doc_lock(SLIP, slip)
+
+
+def read_slip(slip: str, for_update: bool = False):
+    meta = frappe.get_meta(SLIP)
+    fields = [f for f in SLIP_READ if f in ("name", "docstatus") or meta.has_field(f)]
+    return frappe.db.get_value(SLIP, slip, fields, as_dict=True, for_update=for_update)
+
+
+def slip_problems(values) -> list:
+    """Why the Salary Slip's salary cannot be paid by M-Pesa now, as plain messages."""
+    if not values:
+        return ["Salary Slip not found"]
+    name = values.name
+    problems = []
+    if cint(values.docstatus) != 1:
+        problems.append(f"{name} is not submitted.")
+    if values.get("status") == "Withheld":
+        problems.append(f"{name} is withheld (Salary Withholding): its salary is not paid now.")
+    currency = values.get("currency") or "KES"
+    if currency != "KES":
+        problems.append(f"{name} is in {currency}. M-Pesa pays KES only.")
+    if not values.get("payroll_entry"):
+        problems.append(f"{name} is not part of a Payroll Entry, so it has no payroll payable to clear.")
+    return problems
+
+
+def b2b_slip_open(slip: str, exclude: str | None = None, for_update: bool = False) -> list:
+    """B2B salary requests for the slip still on their way (drafts too). A Paid one already
+    lowers what the slip owes (salary_slip_paid counts it)."""
+    if not frappe.db.has_column(B2B, "salary_slip"):
+        return []  # a site without HRMS
+    rows = frappe.db.sql(
+        f"""
+        SELECT name, status, amount
+        FROM `tab{B2B}`
+        WHERE salary_slip = %(slip)s AND name != %(exclude)s
+          AND docstatus < 2 AND COALESCE(status, '') IN %(open)s
+        ORDER BY creation
+        {_locking(for_update)}
+        """,
+        {"slip": slip, "exclude": exclude or "", "open": ("", *OPEN)},
+        as_dict=True,
+    )
+    return [frappe._dict(parent=r.name, allocated_amount=flt(r.amount, 2), request_status=r.status or "Not Initiated")
+            for r in rows]
+
+
+def b2c_slip_open(slip: str) -> list:
+    """B2C payouts for the slip still on their way. A Paid one (booked or not) already lowers what
+    the slip owes (salary_slip_paid counts every Paid payout)."""
+    from ..mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement import open_payouts
+
+    return [r for r in open_payouts(SLIP, slip) if (r.get("request_status") or "") != "Paid"]
+
+
+def slip_left_to_pay(slip: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
+                     for_update: bool = False):
+    """_dict(owed, parts, left) for a Salary Slip: what it owes (its rounded total less what was
+    paid: Paid B2C and B2B payouts and bank entries), less payouts on their way and lines planned
+    on a payment schedule. Payouts first, the slip row last (R4)."""
+    parts = []
+    for row in b2b_slip_open(slip, exclude_request, for_update):
+        parts.append(frappe._dict(kind="b2b", name=row.parent, amount=row.allocated_amount,
+                                  label=f"{row.parent} {row.request_status} {money(row.allocated_amount)}"))
+    for row in b2c_slip_open(slip):
+        status = row.get("request_status") or row.get("payment_status") or "in progress"
+        parts.append(frappe._dict(kind="b2c", name=row.parent, amount=flt(row.allocated_amount, 2),
+                                  label=f"B2C {row.parent} {status} {money(row.allocated_amount)}"))
+    parts += planned_lines(SLIP, slip, exclude_line, exclude_schedule, for_update)
+    owed = outstanding(SLIP, slip, for_update)  # last: the slip row (R4)
+    left = max(0.0, flt(owed - sum(flt(p.amount) for p in parts), 2))
+    return frappe._dict(owed=owed, parts=parts, left=left)
 
 
 # ---------------------------------------------------------------- money the supplier may already have

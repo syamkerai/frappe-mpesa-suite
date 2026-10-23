@@ -28,7 +28,8 @@
   "column_break_hvei",
   "reference_date",
   "section_break_apzo",
-  "b2c_disbursement_request"
+  "b2c_disbursement_request",
+  "mpesa_schedule_line"
  ],
  "fields": [
   {
@@ -179,12 +180,21 @@
    "fieldname": "payment_status_section",
    "fieldtype": "Section Break",
    "label": "Payment Status"
+  },
+  {
+   "fieldname": "mpesa_schedule_line",
+   "fieldtype": "Data",
+   "label": "Payment Schedule Line",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "Paid from this M-Pesa Payment Schedule line: the number is its employee's approved phone."
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-10-21 14:00:00.000000",
+ "modified": "2026-10-23 20:00:00.000000",
  "modified_by": "a@d.com",
  "module": "Mpsa Suite",
  "name": "B2C Payment Disbursement Reference",

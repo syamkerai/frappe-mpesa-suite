@@ -73,6 +73,8 @@ OWN_FIELDS = {
         "supplier",
         "purchase_invoice",
         "purchase_order",
+        "employee",
+        "salary_slip",
         "receiver_shortcode",
         "receiver_public_name",
         "command_id",
@@ -209,13 +211,15 @@ def description(p) -> str:
         on = " ".join(filter(None, [p.reference_doctype, p.reference_name])) or "-"
         return f"M-Pesa B2C payout to {to} | {on} | {p.name}"
     to = p.receiver_public_name or p.receiver_shortcode or "-"
-    on = p.purchase_invoice or p.get("purchase_order") or p.supplier or "-"
+    on = p.purchase_invoice or p.get("purchase_order") or p.get("salary_slip") or p.supplier or p.get("employee") or "-"
     return f"M-Pesa B2B {p.command_id or ''} to {to} | {on} | {p.name}"
 
 
 def party(p) -> tuple:
     if p.doctype == B2C:
         return p.party_type, p.party
+    if p.get("employee"):
+        return "Employee", p.employee
     return ("Supplier", p.supplier) if p.supplier else (None, None)
 
 

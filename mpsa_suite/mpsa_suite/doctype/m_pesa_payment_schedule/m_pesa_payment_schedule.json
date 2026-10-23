@@ -3,17 +3,20 @@
  "allow_rename": 0,
  "autoname": "MPS-.YY.-.MM.-.####",
  "creation": "2026-10-23 18:00:00.000000",
- "description": "B2B payments planned ahead: prepared by Accounts, paid on their day after a confirm step.",
+ "description": "Payments planned ahead (suppliers by B2B; employees by B2B to a bank paybill or B2C to a phone): prepared by Accounts, paid on their day after a confirm step.",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
   "title",
   "company",
   "b2b_settings",
+  "b2c_settings",
   "column_break_a",
   "status",
   "purpose",
   "closed",
+  "payroll_doctype",
+  "payroll_entry",
   "lines_section",
   "lines",
   "totals_section",
@@ -33,7 +36,7 @@
    "label": "Title",
    "reqd": 1,
    "in_list_view": 1,
-   "description": "What these payments are for, e.g. Suppliers end of October."
+   "description": "What these payments are for, e.g. Suppliers end of October, or Salaries October."
   },
   {
    "fieldname": "company",
@@ -49,7 +52,15 @@
    "label": "Pay From (B2B)",
    "options": "Mpesa Settings",
    "in_standard_filter": 1,
-   "description": "The shortcode the paybill and till lines are paid from (its Working account)."
+   "description": "The shortcode the paybill and till lines (suppliers, employees' bank paybills) are paid from (its Working account)."
+  },
+  {
+   "fieldname": "b2c_settings",
+   "fieldtype": "Link",
+   "label": "Pay From (B2C)",
+   "options": "Mpesa Settings",
+   "in_standard_filter": 1,
+   "description": "The shortcode the phone lines (employees' M-Pesa lines) are paid from (its Utility account)."
   },
   {
    "fieldname": "column_break_a",
@@ -84,10 +95,31 @@
    "no_copy": 1
   },
   {
+   "fieldname": "payroll_doctype",
+   "fieldtype": "Link",
+   "label": "Payroll Document Type",
+   "options": "DocType",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "payroll_entry",
+   "fieldtype": "Dynamic Link",
+   "label": "Payroll Entry",
+   "options": "payroll_doctype",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "in_standard_filter": 1,
+   "depends_on": "eval:doc.payroll_entry",
+   "description": "Made with Create M-Pesa Payment Schedule on this Payroll Entry: a line per salary slip."
+  },
+  {
    "fieldname": "lines_section",
    "fieldtype": "Section Break",
    "label": "Payments",
-   "description": "Accounts prepare the lines and may move a line's Pay On until it is sent. On the day, an M-Pesa Payer or Manager pays them from the M-Pesa Payments Due report (Pay Due Lines). Nothing is paid automatically, and no line can be sent before its Pay On."
+   "description": "Accounts prepare the lines and may move a line's Pay On until it is sent. On the day, an M-Pesa Payer or Manager pays them from the M-Pesa Payments Due report (Pay Due Lines). Nothing is paid automatically, and no line can be sent before its Pay On. Phone lines are paid by B2C, the others by B2B."
   },
   {
    "fieldname": "lines",
@@ -155,9 +187,14 @@
    "link_doctype": "Mpesa B2B Payment Request",
    "link_fieldname": "payment_schedule",
    "group": "M-Pesa"
+  },
+  {
+   "link_doctype": "B2C Payment Disbursement",
+   "link_fieldname": "payment_schedule",
+   "group": "M-Pesa"
   }
  ],
- "modified": "2026-10-23 18:00:00.000000",
+ "modified": "2026-10-23 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Payment Schedule",

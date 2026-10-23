@@ -24,6 +24,7 @@
   "min_payout_amount",
   "supplier_payments_section",
   "supplier_account_hold_hours",
+  "employee_account_hold_hours",
   "column_break_supplier_payments",
   "allow_one_off_b2b",
   "notifications_section",
@@ -204,7 +205,7 @@
   {
    "fieldname": "supplier_payments_section",
    "fieldtype": "Section Break",
-   "label": "Supplier Payments (B2B)"
+   "label": "Supplier and Employee Accounts"
   },
   {
    "fieldname": "supplier_account_hold_hours",
@@ -212,6 +213,13 @@
    "label": "Hold New Supplier M-Pesa Accounts (Hours)",
    "default": "24",
    "description": "A newly approved paybill / till can be paid only after this many hours, so a wrong or fraudulent number can be caught first. 0 = usable at once."
+  },
+  {
+   "fieldname": "employee_account_hold_hours",
+   "fieldtype": "Int",
+   "label": "Hold New Employee M-Pesa Accounts (Hours)",
+   "default": "24",
+   "description": "A newly approved employee phone or bank paybill account can be paid only after this many hours. 0 = usable at once."
   },
   {
    "fieldname": "column_break_supplier_payments",
@@ -611,7 +619,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-23 18:00:00.000000",
+ "modified": "2026-10-23 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

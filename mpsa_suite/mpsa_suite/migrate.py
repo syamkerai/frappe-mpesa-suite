@@ -44,6 +44,7 @@ def update_settings_module():
 
 
 def create_custom_hrms_fields():
+    """Fields that link HRMS DocTypes: only on a site with HRMS (the app works without it)."""
     custom_fields = {
         "B2C Payment Disbursement Reference": [
             {
@@ -53,6 +54,31 @@ def create_custom_hrms_fields():
                 "label": "Payroll Entry",
                 "options": "Payroll Entry",
                 "insert_after": "party",
+            },
+        ],
+        # A B2B salary to an employee's bank paybill pays a Salary Slip of a Payroll Entry
+        # (money_out.b2b, salary_entries).
+        "Mpesa B2B Payment Request": [
+            {
+                "fieldname": "salary_slip",
+                "fieldtype": "Link",
+                "label": "Salary Slip",
+                "options": "Salary Slip",
+                "insert_after": "employee_mpesa_account",
+                "depends_on": "eval:doc.employee",
+                "search_index": 1,
+                "description": "Optional. The salary this pays: it cannot exceed what the slip has left to pay, and the "
+                "salary Journal Entry clears the Payroll Entry's payroll payable when M-Pesa confirms.",
+            },
+            {
+                "fieldname": "payroll_entry",
+                "fieldtype": "Link",
+                "label": "Payroll Entry",
+                "options": "Payroll Entry",
+                "insert_after": "salary_slip",
+                "depends_on": "eval:doc.salary_slip",
+                "read_only": 1,
+                "search_index": 1,
             },
         ],
     }
@@ -219,7 +245,18 @@ def create_custom_erpnext_fields():
                 "fieldtype": "Link",
                 "insert_after": "reference_detail_no",
                 "options": "B2C Payment Disbursement",
-            }
+            },
+            # A salary Journal Entry of a B2B salary payout: salary_slip_paid counts the Paid request,
+            # so it must not count this row as a bank payment too.
+            {
+                "fieldname": "mpesa_b2b_payment_request",
+                "label": "M-Pesa B2B Payment Request",
+                "fieldtype": "Link",
+                "insert_after": "b2c_payment_disbursement",
+                "options": "Mpesa B2B Payment Request",
+                "read_only": 1,
+                "no_copy": 1,
+            },
         ],
         "Payment Request": [
             {

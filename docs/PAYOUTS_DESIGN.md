@@ -2,7 +2,7 @@
 
 Draft, 2026-10-23. Merged by a judge from three independent designs, each checked against the code and the ERPNext/HRMS source.
 
-Status: Phases 1 and 2 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1" and "Payouts Phase 2"). Phase 2 is unit-tested; its bench tests are written but not yet run on the v15 and v16 benches. Phases 3 and 4 are not built.
+Status: Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). Phases 1 and 2 passed their bench tests on the v15 and v16 benches. Phase 3 is unit-tested; its bench tests (mpsa_suite/money_out/test_payroll_payouts.py) are written but not yet run. Phase 4 is not built.
 
 ## Decisions taken (2026-10-23)
 
@@ -11,7 +11,7 @@ Status: Phases 1 and 2 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase
 - A payment with a supplier but no invoice or order books automatically as a supplier advance (today's behaviour); "Make the entry later" is the opt-in.
 - Schedule maker-checker: on by default, with a Suite setting to turn it off for one-person teams.
 - No withholding deduction in Phase 1. Balances under KES 1 left by whole-shilling payments stay outstanding (an opt-in write-off may come in Phase 2).
-- Testing is local only (unit tests, plus bench tests on the WSL v15 and v16 benches); GitHub CI is not used. HRMS is installed on the local v16 bench for Phase 3.
+- Testing is local only (unit tests, plus bench tests on the WSL v15 and v16 benches); GitHub CI is not used. HRMS is installed on both local benches for Phase 3 (v15.64.5 and v16.52.0).
 
 ## Phases
 
@@ -82,7 +82,7 @@ Needs from you for Phase 3:
 - Which banks' paybills and account formats are used, and employees' proof documents.
 - Who approves employee accounts.
 - A 2-employee test payroll.
-- Acceptance of CI as the HRMS v16 check, since HRMS v16 is not on the local machine.
+- (Done: HRMS v15 and v16 are on the local benches, so no CI is needed for the HRMS check.)
 
 PHASE 4 (later, as needed):
 - Initiated-B2B Transaction Status.
@@ -478,6 +478,16 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
   - Cr the payout GL (Working for B2B, Utility for B2C);
   - tagged so salary_slip_paid does not count it twice. salary_slip_paid also counts Paid B2B salary requests.
 - Payroll Entry before_cancel (doc_event) is refused while M-Pesa salaries for it are in flight or Paid.
+- Built (2026-10-23), where it differs from the above:
+  - Amounts are whole shillings rounded down (never more than the slip has left), as B2C's own guards need. With rounded totals (HRMS's default) the round-off row is at most 0.50; with "Disable Rounded Total" on it is under 1.00. The salary entry debits the payroll payable with what the salary still has on it (net pay less what was paid before: Paid payouts and bank entries) when the payout pays all that is left to the shilling; a part payment debits what was paid.
+  - The B2C route needs a Salary Slip on the line (a B2C Payment Disbursement pays documents). A bank paybill line with no slip is a B2B request that waits for Make Entry (Make Entry gains "Salary Slip" for employee requests).
+  - A phone line keeps its B2C payout in new line fields (b2c_disbursement, b2c_row, b2c_request); request stays the B2B request. The schedule's Payroll Entry is a Dynamic Link (payroll_doctype, payroll_entry) in the DocType JSON, so it needs no HRMS custom field; the B2C disbursement gains payment_schedule and its row mpesa_schedule_line, both JSON.
+  - New Suite setting "Hold New Employee M-Pesa Accounts (Hours)" (default 24). Employee accounts are approved by the same roles as supplier accounts (ADMIN_ROLES); HR Manager and HR User may enter them.
+  - The Payroll Entry button needs read on the Payroll Entry (HRMS gives it to HR Manager) and a finance role that may create a schedule; that user is the lines' preparer.
+  - The job that makes each B2C payout (create_b2c_request) checks the line again (due, its own, the approved phone still usable) and fails the row, nothing sent, when it may not be paid; the send checks again (assert_b2c_line_due). A retry of a scheduled B2C payout is refused: Plan Again and Pay Selected. A line whose row got no payout within an hour (a lost job) is failed by the 5-minute sweep: a payout is committed before it is sent, so nothing was sent.
+  - The name check of a phone runs when its row first shows Paid; a mismatch blocks the account as for suppliers.
+  - The Payroll Entry cancel is also refused while a payment schedule plans its slips (HRMS could not delete them); the message says to delete that schedule first.
+  - Not built: "Phone (B2C)" on Supplier M-Pesa Account (optional); Sandbox Lab scenarios for employees.
 
 === PHASE 4 (as needed) ===
 - Transaction Status for Initiated B2B (by the ack's IDs).
@@ -640,7 +650,7 @@ SANDBOX LAB AND LIVE
 - An Unknown B2B (no ack) cannot be settled by Transaction Status, because B2B sends carry no OriginatorConversationID. Staff must check the statement. Phase 2's interrupted-send rule creates such Unknowns by design: they are safe, but manual.
 - A Paid payout without a submitted entry on its document blocks that document indefinitely, by design. An old payout booked by hand without the receipt keeps blocking until its entry carries the receipt.
 - The Phase 2 balance is approximate: Account Balance answers asynchronously, Utility is funded by manual portal transfers, and charges come off Utility on Astral. Paying more than the real balance makes Safaricom fail the extra lines. No money is lost, but the batch partly fails.
-- HRMS v16 source is not on the local machine, so CI is the only v16 check for Phase 3. HRMS's Payroll Entry cancel cancels every JE referencing it. Make Bank Entry disappears once any M-Pesa salary JE exists, which affects mixed payrolls. Whole-shilling pay against an unrounded payable needs the round-off row.
+- HRMS's Payroll Entry cancel cancels every JE referencing it. Make Bank Entry disappears once any M-Pesa salary JE exists, which affects mixed payrolls. Whole-shilling pay against an unrounded payable needs the round-off row.
 - For an employee bank-paybill B2B, the result names the bank, not the employee. Wrong-account risk rests on the proof document, the second approver and the hold period.
 - Release and rename: new whitelisted paths are under mpsa_suite. If Phase 1 is cherry-picked to a frappe_mpsa_payments release for Trident before its rename, the JS xcall paths differ per branch. No phase may add a patch: test_r8 pins release C's eight.
 

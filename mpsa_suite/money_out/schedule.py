@@ -1,15 +1,25 @@
-"""M-Pesa Payment Schedule: B2B payments planned ahead and paid on their day after a confirm step.
+"""M-Pesa Payment Schedule: payments planned ahead and paid on their day after a confirm step.
 
-Accounts prepare the lines (who, how much, which invoice or order, which day) and may move a
-line's day until it is sent. On the day, an M-Pesa Payer or Manager ticks lines in the "M-Pesa
-Payments Due" report and presses Pay Selected. prepare_payment shows a summary per payee and per
-shortcode with the balances; confirm_payment pays only with the token it issued, at least 5
-seconds later, once, for the same user (the browser keeps Confirm disabled for those 5 seconds
-too). Nothing is ever paid automatically.
+Accounts prepare the lines (who, how much, which invoice, order or salary slip, which day) and
+may move a line's day until it is sent. On the day, an M-Pesa Payer or Manager ticks lines in
+the "M-Pesa Payments Due" report and presses Pay Selected. prepare_payment shows a summary per
+payee and per shortcode with the balances; confirm_payment pays only with the token it issued,
+at least 5 seconds later, once, for the same user (the browser keeps Confirm disabled for those
+5 seconds too). Nothing is ever paid automatically.
 
-Rules on top of the B2B request's own (money_out.b2b):
+Suppliers are paid by B2B (paybill or till). Employees are paid to their approved Employee M-Pesa
+Account: a bank paybill by B2B, like a supplier; a phone by B2C, through one B2C Payment
+Disbursement per schedule, B2C shortcode, party type, document type and Payroll Entry, whose
+rows carry their line and the approved phone (the row refuses any other number). B2C's own
+guard and jobs send those. A Payroll Entry's "Create M-Pesa Payment Schedule" builds one
+schedule for its salary slips (money_out.payroll).
+
+Rules on top of the B2B request's and the B2C disbursement's own (money_out.b2b, B2C Payment
+Disbursement):
 - no line is sent before its planned day (site time zone), whatever the route: confirm_payment,
   the request's submit (before_submit), send_b2b and send_deferred all refuse (assert_line_due);
+  on the B2C route the job that makes the payout and the send refuse too (b2c_problem,
+  assert_b2c_line_due);
 - the payer must not be who prepared or last changed the line (maker-checker), unless the Suite
   setting is off;
 - a planned line counts in owed.left_to_pay, so its document cannot also be paid past what is left;
@@ -33,27 +43,35 @@ import frappe
 from frappe.utils import add_days, add_to_date, cint, cstr, flt, get_datetime, getdate, now_datetime, nowdate
 
 from ..compat import get_cache
+from ..daraja import apis
 from ..daraja import money_out as daraja
+from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
 from ..permissions import ADMIN_ROLES, FINANCE_ROLES, PAYOUT_ROLES, require
 from ..wallet import accounts as wallet_accounts
 from ..wallet import balances
-from . import owed, supplier_accounts
+from . import employee_accounts, owed, party_accounts, supplier_accounts
 
 SCHEDULE = "M-Pesa Payment Schedule"
 LINE = "M-Pesa Payment Schedule Line"
 B2B = "Mpesa B2B Payment Request"
-PI, PO = "Purchase Invoice", "Purchase Order"
+B2C_DOCTYPE = "B2C Payment Disbursement"
+B2C_ROW = "B2C Payment Disbursement Reference"
+B2C_REQUEST = "B2C Disbursement Request"
+PI, PO, SLIP = "Purchase Invoice", "Purchase Order", owed.SLIP
+DOCUMENTS = (PI, PO, SLIP)
 PLANNED, SENDING, SENT, PAID, FAILED, UNKNOWN, CANCELLED = (
     "Planned", "Sending", "Sent", "Paid", "Failed", "Unknown", "Cancelled")
 IN_PROGRESS = (SENDING, SENT, UNKNOWN)
 AUTO, LATER = "Book automatically", "Make the entry later"
-# The approved-account DocType of each party type (Employee M-Pesa Account comes with payroll).
-PARTY_ACCOUNT = {"Supplier": supplier_accounts.ACCOUNT_DOCTYPE}
-B2B_PAYBILL, B2B_TILL = "B2B Paybill", "B2B Till"
-ROUTE_FOR = {supplier_accounts.PAYBILL: B2B_PAYBILL, supplier_accounts.TILL: B2B_TILL}
-# The sub-account each route pays from (B2C phone lines would pay from Utility).
-SUB_ACCOUNT = {B2B_PAYBILL: wallet_accounts.WORKING, B2B_TILL: wallet_accounts.WORKING}
+# The approved-account DocType of each party type.
+PARTY_ACCOUNT = {"Supplier": supplier_accounts.ACCOUNT_DOCTYPE, "Employee": employee_accounts.ACCOUNT_DOCTYPE}
+B2B_PAYBILL, B2B_TILL, B2C_PHONE = party_accounts.B2B_PAYBILL, party_accounts.B2B_TILL, party_accounts.B2C_PHONE
+ROUTE_FOR = party_accounts.ROUTE_FOR
+B2C_ROUTES = (B2C_PHONE,)
+# The sub-account each route pays from.
+SUB_ACCOUNT = {B2B_PAYBILL: wallet_accounts.WORKING, B2B_TILL: wallet_accounts.WORKING,
+               B2C_PHONE: wallet_accounts.UTILITY}
 # Confirm works this many seconds after the summary was made, for this long.
 CONFIRM_DELAY = 5
 TOKEN_SECONDS = 600
@@ -69,7 +87,7 @@ EDITABLE = ("planned_date", "party_type", "party", "payee_name", "payee_account"
             "entry_mode", "remarks")
 # Written only by the server; always restored from the database on save.
 SYSTEM = ("status", "request", "receipt", "paid_on", "entry_status", "last_problem", "prepared_by", "changed_by",
-          "approved_by", "approved_on", "batch", "attempts")
+          "approved_by", "approved_on", "batch", "attempts", "b2c_disbursement", "b2c_row", "b2c_request")
 # Copied from the approved account (or the one-off number) on save.
 DERIVED = ("payee_account_doctype", "route", "destination")
 
@@ -114,6 +132,26 @@ def _document(line) -> tuple:
     return (dt, dn) if dt and dn else (None, None)
 
 
+def is_b2c(line) -> bool:
+    """A phone line, paid by B2C."""
+    return line.get("route") in B2C_ROUTES
+
+
+def _sent(line) -> bool:
+    """The line has (or had) a payout: a B2B request, or a row of a B2C disbursement."""
+    return bool(cstr(line.get("request")).strip() or cstr(line.get("b2c_disbursement")).strip())
+
+
+def _payout(line) -> str:
+    """The name of what pays the line, for messages."""
+    return cstr(line.get("request") or line.get("b2c_request") or line.get("b2c_disbursement"))
+
+
+def pay_from(schedule, line):
+    """The shortcode a line is paid from: Pay From (B2C) for a phone line, else Pay From (B2B)."""
+    return schedule.get("b2c_settings") if is_b2c(line) else schedule.get("b2b_settings")
+
+
 def maker_checker_on() -> bool:
     """The Suite setting, on unless switched off (a site not yet migrated reads it as on)."""
     try:
@@ -137,9 +175,11 @@ def _line(name: str, for_update: bool = False):
     return frappe.db.get_value(LINE, name, list(LINE_FIELDS), as_dict=True, for_update=for_update)
 
 
+HEADER_FIELDS = ("name", "title", "company", "b2b_settings", "b2c_settings", "purpose", "payroll_entry", "closed")
+
+
 def _header(name: str, for_update: bool = False):
-    return frappe.db.get_value(SCHEDULE, name, ["name", "title", "company", "b2b_settings", "closed"], as_dict=True,
-                               for_update=for_update)
+    return frappe.db.get_value(SCHEDULE, name, list(HEADER_FIELDS), as_dict=True, for_update=for_update)
 
 
 def _stored_lines(schedule: str) -> dict:
@@ -167,6 +207,7 @@ def validate_schedule(doc) -> None:
     approved account, and no document gets more planned than it has left to pay."""
     stored = {} if doc.is_new() else _stored_lines(doc.name)
     doc.closed = 0 if doc.is_new() else cint(frappe.db.get_value(SCHEDULE, doc.name, "closed"))
+    _keep_payroll_fields(doc)
     doc.purpose = doc.purpose or "General"
     _check_pay_from(doc)
     user = frappe.session.user
@@ -179,7 +220,7 @@ def validate_schedule(doc) -> None:
         elif row.name:
             _check_not_elsewhere(doc, row)
         changed = not old or any(_norm(f, row.get(f)) != _norm(f, old.get(f)) for f in EDITABLE)
-        if old and (old.status != PLANNED or old.request):
+        if old and (old.status != PLANNED or _sent(old)):
             if changed:
                 frappe.throw(_left_planned(old, "changed"))
             row.update({f: old.get(f) for f in (*SYSTEM, *DERIVED)})
@@ -199,10 +240,27 @@ def validate_schedule(doc) -> None:
             frappe.throw(f"Row {row.idx}: Pay On cannot be before today.")
         row.last_problem = _check_line(doc, row, changed) or None
     for name, old in stored.items():
-        if name not in kept and (old.status != PLANNED or old.request):
+        if name not in kept and (old.status != PLANNED or _sent(old)):
             frappe.throw(_left_planned(old, "deleted"))
     _check_planned_amounts(doc)
     doc.update(totals(doc.lines, doc.closed))
+
+
+PAYROLL_FIELDS = ("purpose", "payroll_doctype", "payroll_entry", "excluded")
+
+
+def _keep_payroll_fields(doc) -> None:
+    """The Payroll Entry a schedule pays, and who it left out, are set only when the Payroll
+    Entry's button makes it (money_out.payroll), and kept as they are on every save: "at most one
+    live schedule per payroll" relies on them."""
+    fields = [f for f in PAYROLL_FIELDS if frappe.get_meta(SCHEDULE).has_field(f)]
+    if not doc.is_new():
+        stored = frappe.db.get_value(SCHEDULE, doc.name, fields, as_dict=True) or {}
+        doc.update({field: stored.get(field) for field in fields})
+        return
+    flags = getattr(doc, "flags", None) or {}
+    if not flags.get("mpesa_from_payroll"):
+        doc.update({field: None for field in fields})
 
 
 def _check_not_elsewhere(doc, row) -> None:
@@ -224,11 +282,12 @@ def _left_planned(old, what: str) -> str:
 
 
 def _check_pay_from(doc) -> None:
-    if not doc.b2b_settings or not frappe.get_meta("Mpesa Settings").has_field("company"):
+    if not frappe.get_meta("Mpesa Settings").has_field("company"):
         return
-    company = frappe.db.get_value("Mpesa Settings", doc.b2b_settings, "company")
-    if company and company != doc.company:
-        frappe.throw(f"Mpesa Settings {doc.b2b_settings} pays for {company}, not {doc.company}.")
+    for settings in {doc.get("b2b_settings"), doc.get("b2c_settings")} - {None, ""}:
+        company = frappe.db.get_value("Mpesa Settings", settings, "company")
+        if company and company != doc.company:
+            frappe.throw(f"Mpesa Settings {settings} pays for {company}, not {doc.company}.")
 
 
 def _check_line(doc, row, changed: bool = True) -> str | None:
@@ -238,71 +297,106 @@ def _check_line(doc, row, changed: bool = True) -> str | None:
         daraja.whole_shillings(row.amount)
     except ValueError as e:
         frappe.throw(f"Row {row.idx}: {e}")
-    if not doc.b2b_settings:
-        frappe.throw("Pick Pay From (B2B): the shortcode these lines are paid from.")
     if row.party:
         soft = _check_party(row)
     else:
         soft = _check_one_off(doc, row, changed)
+    b2c = is_b2c(row)
+    if b2c:
+        if not doc.get("b2c_settings"):
+            frappe.throw("Pick Pay From (B2C): the shortcode the phone lines are paid from.")
+        if not B2C_MIN_AMOUNT <= flt(row.amount) <= B2C_MAX_AMOUNT:
+            frappe.throw(f"Row {row.idx}: M-Pesa B2C pays KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,} per payment.")
+    elif not doc.b2b_settings:
+        frappe.throw("Pick Pay From (B2B): the shortcode these lines are paid from.")
     row.entry_mode = row.entry_mode or AUTO
     if not row.party:
         row.entry_mode = LATER  # nothing to book it on until someone says what it paid for
     dt, dn = _document(row)
     if row.get("reference_doctype") or row.get("reference_name"):
-        if not dt or dt not in owed.DOC_FIELDS:
-            frappe.throw(f"Row {row.idx}: pick the Purchase Invoice or Purchase Order, or leave both empty.")
-        if not row.party:
-            frappe.throw(f"Row {row.idx}: a payment of {dn} needs its supplier.")
-        values = owed.read_document(dt, dn)
-        if not values:
-            frappe.throw(f"Row {row.idx}: {dt} {dn} not found.")
-        if values.supplier != row.party:
-            frappe.throw(f"Row {row.idx}: {dn} belongs to {values.supplier}, not {row.party}.")
-        if values.get("company") and values.company != doc.company:
-            frappe.throw(f"Row {row.idx}: {dn} belongs to {values.company}, not {doc.company}.")
-        problems = owed.document_problems(dt, values)
-        soft = soft or (problems[0] if problems else None)
+        if not dt or dt not in DOCUMENTS:
+            frappe.throw(f"Row {row.idx}: pick the Purchase Invoice, Purchase Order or Salary Slip, or leave both "
+                         "empty.")
+        if dt == SLIP:
+            soft = soft or _check_slip_line(doc, row, dn)
+        else:
+            soft = soft or _check_document_line(doc, row, dt, dn)
+    elif row.party_type == "Employee":
+        if b2c:
+            frappe.throw(f"Row {row.idx}: a payment to a phone (B2C) pays a Salary Slip: pick it.")
+        row.entry_mode = LATER  # no salary slip: nothing to book it on until someone makes the entry
+    if b2c:
+        row.entry_mode = AUTO  # B2C books every salary it pays (b2c_postprocess_service)
     settings = _settings_problem(doc, row)
     return soft or settings
+
+
+def _check_document_line(doc, row, dt, dn) -> str | None:
+    """A Purchase Invoice or Order: of the line's supplier and company. Returns its first problem
+    (one that may clear by the Pay On, shown on the line)."""
+    if not row.party:
+        frappe.throw(f"Row {row.idx}: a payment of {dn} needs its supplier.")
+    if row.party_type != "Supplier":
+        frappe.throw(f"Row {row.idx}: {dn} is paid to its supplier: pick Supplier.")
+    values = owed.read_document(dt, dn)
+    if not values:
+        frappe.throw(f"Row {row.idx}: {dt} {dn} not found.")
+    if values.supplier != row.party:
+        frappe.throw(f"Row {row.idx}: {dn} belongs to {values.supplier}, not {row.party}.")
+    if values.get("company") and values.company != doc.company:
+        frappe.throw(f"Row {row.idx}: {dn} belongs to {values.company}, not {doc.company}.")
+    problems = owed.document_problems(dt, values)
+    return problems[0] if problems else None
+
+
+def _check_slip_line(doc, row, slip) -> str | None:
+    """A Salary Slip (HRMS): of the line's employee and company, in a Payroll Entry (its payroll
+    payable is what the salary entry clears). Returns its first other problem."""
+    if not owed.hrms_installed():
+        frappe.throw(f"Row {row.idx}: Salary Slips are paid when HRMS is installed.")
+    if row.party_type != "Employee" or not row.party:
+        frappe.throw(f"Row {row.idx}: {slip} is paid to its employee: pick Employee.")
+    values = owed.read_slip(slip)
+    if not values:
+        frappe.throw(f"Row {row.idx}: Salary Slip {slip} not found.")
+    if values.employee != row.party:
+        frappe.throw(f"Row {row.idx}: {slip} belongs to {values.employee}, not {row.party}.")
+    if values.get("company") and values.company != doc.company:
+        frappe.throw(f"Row {row.idx}: {slip} belongs to {values.company}, not {doc.company}.")
+    if not values.get("payroll_entry"):
+        frappe.throw(f"Row {row.idx}: {slip} is not part of a Payroll Entry, so it has no payroll payable to clear.")
+    problems = owed.slip_problems(values)
+    return problems[0] if problems else None
 
 
 def _check_party(row) -> str | None:
     account_doctype = PARTY_ACCOUNT.get(row.party_type or "")
     if not account_doctype:
-        frappe.throw(f"Row {row.idx}: {row.party_type or 'this party type'} is not paid by the schedule yet.")
+        frappe.throw(f"Row {row.idx}: {row.party_type or 'this party type'} is not paid by the schedule.")
     if not frappe.db.exists(row.party_type, row.party):
         frappe.throw(f"Row {row.idx}: {row.party_type} {row.party} not found.")
+    profile = party_accounts.profile(account_doctype)
     row.payee_account_doctype = account_doctype
-    row.payee_account = row.payee_account or _default_account(row.party)
+    row.payee_account = row.payee_account or party_accounts.default_account(account_doctype, row.party)
     if not row.payee_account:
-        frappe.throw(f"Row {row.idx}: {row.party} has no approved M-Pesa account. Add one under Supplier > M-Pesa "
-                     "Accounts and have a manager approve it.")
-    acc = supplier_accounts.get_account(row.payee_account)
-    if not acc or acc.docstatus != 1 or acc.supplier != row.party:
+        hint = profile.add_hint
+        frappe.throw(f"Row {row.idx}: {row.party} has no approved M-Pesa account. {hint[0].upper()}{hint[1:]}")
+    acc = party_accounts.get_account(account_doctype, row.payee_account)
+    if not acc or acc.docstatus != 1 or party_accounts.party_of(acc, account_doctype) != row.party:
         frappe.throw(f"Row {row.idx}: {row.payee_account} is not an approved M-Pesa account of {row.party}.")
     row.route, row.destination = destination_of(acc)
-    row.payee_name = frappe.db.get_value("Supplier", row.party, "supplier_name") or row.party
+    row.payee_name = frappe.db.get_value(row.party_type, row.party, profile.name_field) or row.party
     for field in ("one_off_type", "one_off_shortcode", "one_off_account"):
         row.set(field, None)
-    return supplier_accounts.usable_problem(acc, row.party) or owed.supplier_hold(row.party)
-
-
-def _default_account(supplier) -> str | None:
-    """The supplier's default approved account, or its only one; one still in its hold period
-    counts (the line may be due after it)."""
-    rows = frappe.get_all(supplier_accounts.ACCOUNT_DOCTYPE, filters={"supplier": supplier, "docstatus": 1},
-                          fields=["name", "is_default"], order_by="is_default desc, creation asc")
-    if rows and (rows[0].is_default or len(rows) == 1):
-        return rows[0].name
-    return None
+    problem = party_accounts.usable_problem(acc, row.party, account_doctype)
+    if row.party_type == "Supplier":
+        problem = problem or owed.supplier_hold(row.party)
+    return problem
 
 
 def destination_of(acc) -> tuple:
-    """(route, destination) of an approved account: ('B2B Paybill', '888880 / ACME-1')."""
-    route = ROUTE_FOR.get(acc.account_type)
-    shortcode = cstr(acc.shortcode).strip()
-    account = cstr(acc.get("account_number")).strip()
-    return route, f"{shortcode} / {account}" if account else shortcode
+    """(route, destination) of an approved account: ('B2B Paybill', '888880 / ACME-1'), ('B2C Phone', '2547...')."""
+    return party_accounts.destination(acc)
 
 
 def _check_one_off(doc, row, changed: bool) -> str | None:
@@ -336,9 +430,33 @@ def _check_one_off(doc, row, changed: bool) -> str | None:
 
 
 def _settings_problem(doc, row) -> str | None:
-    """The shortcode: B2B switched on, not paying itself, within its limit, for this company."""
+    """The shortcode: B2B (or B2C for a phone line) switched on, not paying itself, within its
+    limit, for this company."""
+    if is_b2c(row):
+        return _caught(check_b2c_settings, doc.get("b2c_settings"), flt(row.get("amount")), doc.company)
     request = _request_like(doc, row)
     return _caught(_check_settings, request)
+
+
+def check_b2c_settings(settings: str, amount: float, company: str) -> None:
+    """The B2C shortcode: B2C switched on, an initiator, within its limit, for this company, and
+    its Mode of Payment (the B2C disbursement finds the shortcode by it)."""
+    meta = frappe.get_meta("Mpesa Settings")
+    fields = ["name", "initiator_name", "transaction_limit", *apis.ALL]
+    if meta.has_field("company"):
+        fields.append("company")
+    values = frappe.db.get_value("Mpesa Settings", settings, fields, as_dict=True)
+    if not values:
+        frappe.throw(f"Mpesa Settings {settings} not found")
+    apis.require(values, apis.B2C)
+    if not values.initiator_name:
+        frappe.throw(f"Mpesa Settings {settings} needs an Initiator Name to pay B2C.")
+    if flt(values.transaction_limit) and flt(amount) > flt(values.transaction_limit):
+        frappe.throw(f"Amount is above this shortcode's transaction limit of {values.transaction_limit}")
+    if values.get("company") and values.company != company:
+        frappe.throw(f"Mpesa Settings {settings} pays for {values.company}, not {company}.")
+    if not money_in_common.mode_of_payment_for(settings):
+        frappe.throw(f"Mode of Payment Mpesa-{settings} not found: save Mpesa Settings {settings} with its Company.")
 
 
 def _check_settings(request) -> None:
@@ -369,7 +487,7 @@ def _check_planned_amounts(doc) -> None:
     planned = {}
     for row in doc.lines:
         dt, dn = _document(row)
-        if dt and row.status == PLANNED and not row.request:
+        if dt and row.status == PLANNED and not _sent(row):
             planned.setdefault((dt, dn), []).append(row)
     for (dt, dn), rows in sorted(planned.items()):
         total = flt(sum(flt(r.amount) for r in rows), 2)
@@ -409,13 +527,20 @@ def update_totals(schedule: str, bump: bool = False) -> None:
     frappe.db.set_value(SCHEDULE, schedule, totals(rows, closed), update_modified=bump)
 
 
+def _b2c_made(schedule: str) -> bool:
+    """A B2C disbursement Pay Selected made for the schedule's phone lines."""
+    meta = frappe.get_meta(B2C_DOCTYPE)
+    return meta.has_field("payment_schedule") and bool(frappe.db.exists(B2C_DOCTYPE, {"payment_schedule": schedule}))
+
+
 def check_delete(doc) -> None:
     """A schedule with any line sent (or once sent) is the record of those payments."""
     rows = frappe.db.sql(
-        f"SELECT idx, status, request FROM `tab{LINE}` WHERE parent = %s AND parenttype = %s ORDER BY idx",
+        f"""SELECT idx, status, request, b2c_disbursement FROM `tab{LINE}` WHERE parent = %s AND parenttype = %s
+        ORDER BY idx""",
         (doc.name, SCHEDULE), as_dict=True)
-    sent = [r for r in rows if r.status not in (PLANNED, CANCELLED) or r.request]
-    if sent or frappe.db.exists(B2B, {"payment_schedule": doc.name}):
+    sent = [r for r in rows if r.status not in (PLANNED, CANCELLED) or _sent(r)]
+    if sent or frappe.db.exists(B2B, {"payment_schedule": doc.name}) or _b2c_made(doc.name):
         frappe.throw(f"{doc.name} has payments sent to M-Pesa. It is their record and cannot be deleted: close it "
                      "instead.")
 
@@ -433,8 +558,8 @@ def line_problem(line, schedule=None, *, for_update: bool = False, payer=None, s
         found.problem = problem
         return found
 
-    if line.status != PLANNED or line.request:
-        return refuse(f"It is {line.status}" + (f" ({line.request})." if line.request else "."))
+    if line.status != PLANNED or _sent(line):
+        return refuse(f"It is {line.status}" + (f" ({_payout(line)})." if _sent(line) else "."))
     if getdate(line.planned_date) > _today():
         return refuse(f"Not due until {_day(line.planned_date)}.")
     if cint(schedule.closed):
@@ -461,28 +586,41 @@ def _changed(line, snapshot) -> bool:
 
 def _send_problem(line, schedule, payer) -> str | None:
     if line.route not in SUB_ACCOUNT:
-        return f"{line.route or 'This route'} is not paid by the schedule yet."
-    if not schedule.b2b_settings:
+        return f"{line.route or 'This route'} is not paid by the schedule."
+    b2c = is_b2c(line)
+    if b2c and not schedule.get("b2c_settings"):
+        return f"Pick Pay From (B2C) on {schedule.name}."
+    if not b2c and not schedule.b2b_settings:
         return f"Pick Pay From (B2B) on {schedule.name}."
     try:
         daraja.whole_shillings(line.amount)
     except ValueError as e:
         return str(e)
+    if b2c and not B2C_MIN_AMOUNT <= flt(line.amount) <= B2C_MAX_AMOUNT:
+        return f"M-Pesa B2C pays KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,} per payment."
     if line.party:
-        hold = owed.supplier_hold(line.party)
-        if hold:
-            return hold
-        acc = supplier_accounts.get_account(line.payee_account)
-        problem = supplier_accounts.usable_problem(acc, line.party)
+        account_doctype = PARTY_ACCOUNT.get(line.party_type or "")
+        if not account_doctype or line.payee_account_doctype not in (None, "", account_doctype):
+            return f"{line.party_type or 'This party type'} is not paid by the schedule."
+        if line.party_type == "Supplier":
+            hold = owed.supplier_hold(line.party)
+            if hold:
+                return hold
+        acc = party_accounts.get_account(account_doctype, line.payee_account)
+        problem = party_accounts.usable_problem(acc, line.party, account_doctype)
         if problem:
             return problem
         if destination_of(acc) != (line.route, line.destination):
             return f"Its approved account changed since the line was saved: open {line.parent} and save it again."
     else:
+        if b2c:
+            return "A phone (B2C) line pays an employee's approved phone: pick the employee."
         if not cint(frappe.db.get_single_value(supplier_accounts.SUITE, "allow_one_off_b2b")):
             return "Paying a number not saved on a supplier is switched off (M-Pesa Suite Settings)."
         if payer != "Administrator" and not set(ADMIN_ROLES) & set(frappe.get_roles(payer)):
             return "A number not saved on a supplier is paid by an M-Pesa or Accounts Manager only."
+    if b2c:
+        return _caught(check_b2c_settings, schedule.b2c_settings, flt(line.amount), schedule.company)
     return _caught(_check_settings, _request_like(schedule, line))
 
 
@@ -494,12 +632,18 @@ def _document_problem(line, schedule, found, for_update: bool) -> str | None:
         return None
     result = owed.left_to_pay(dt, dn, exclude_line=line.name, for_update=for_update)
     found.left = result.left
-    values = owed.read_document(dt, dn, for_update=for_update)
-    problems = owed.document_problems(dt, values)
+    if dt == SLIP:
+        values = owed.read_slip(dn, for_update=for_update)
+        problems = owed.slip_problems(values)
+        owner = values.employee if values else None
+    else:
+        values = owed.read_document(dt, dn, for_update=for_update)
+        problems = owed.document_problems(dt, values)
+        owner = values.supplier if values else None
     if problems:
         return problems[0]
-    if values.supplier != line.party:
-        return f"{dn} belongs to {values.supplier}, not {line.party}."
+    if owner != line.party:
+        return f"{dn} belongs to {owner}, not {line.party}."
     if values.get("company") and values.company != schedule.company:
         return f"{dn} belongs to {values.company}, not {schedule.company}."
     if flt(line.amount) > result.left + 0.001:
@@ -509,7 +653,7 @@ def _document_problem(line, schedule, found, for_update: bool) -> str | None:
 
 def _warnings(line) -> list:
     """Worth reading before paying: M-Pesa money the supplier got outside this schedule."""
-    if not line.party:
+    if not line.party or line.party_type != "Supplier":
         return []
     dt, _ = _document(line)
     if dt == PI:
@@ -556,6 +700,72 @@ def assert_line_due(doc) -> None:
                      "Payments Due.")
 
 
+B2C_LINE_FIELDS = ("name", "parent", "idx", "planned_date", "status", "b2c_disbursement", "b2c_row", "party",
+                   "party_type", "payee_account", "payee_account_doctype", "route", "destination", "amount",
+                   "reference_doctype", "reference_name", "last_problem")
+
+
+def b2c_problem(row, disbursement: str, phone=None) -> str | None:
+    """Why a B2C row made by Pay Selected may not be paid now (None: it may): it is its line's
+    own, the line is waiting to be sent and due (site time zone), amount, payee and slip are the
+    line's, and the number is the employee's approved phone, still usable. Under a lock on the line."""
+    name = cstr(row.get("mpesa_schedule_line")).strip()
+    line = frappe.db.get_value(LINE, name, list(B2C_LINE_FIELDS), as_dict=True, for_update=True)
+    if not line:
+        return f"Payment schedule line {name} not found."
+    if line.b2c_row != row.get("name") or line.b2c_disbursement != disbursement:
+        return f"{disbursement} is not the payment of its schedule line: pay it with Pay Selected in M-Pesa Payments Due."
+    if line.status != SENDING:
+        return f"Its schedule line is {line.status}, not waiting to be sent."
+    if getdate(line.planned_date) > _today():
+        return f"Not due until {_day(line.planned_date)}. A scheduled payment cannot be sent before its planned day."
+    if (flt(row.get("allocated_amount"), 2) != flt(line.amount, 2) or row.get("party") != line.party
+            or cstr(row.get("reference_name")) != cstr(line.reference_name)):
+        return "It does not match its schedule line."
+    phone = phone or row.get("partyb")
+    return employee_accounts.phone_problem(line.payee_account, line.party, phone)
+
+
+def assert_b2c_line_due(request) -> None:
+    """The B2C send of a payout made by Pay Selected (services.b2c_request_service): refused before
+    the planned day, or when it is not its line's or not to the approved phone."""
+    ref = cstr(request.get("b2c_payment_disbursement_reference")).strip()
+    if not ref or not frappe.get_meta(B2C_ROW).has_field("mpesa_schedule_line"):
+        return
+    row = frappe.db.get_value(B2C_ROW, ref, ["name", "mpesa_schedule_line", "allocated_amount", "party",
+                                             "reference_name", "partyb"], as_dict=True)
+    if not row or not cstr(row.mpesa_schedule_line).strip():
+        return
+    problem = b2c_problem(row, request.get("b2c_payment_disbursement"), phone=request.get("phone_number"))
+    if problem:
+        frappe.throw(problem)
+
+
+def check_b2c_disbursement(doc) -> None:
+    """A B2C disbursement carries schedule lines only when Pay Selected made it (flags cannot come
+    through the API); each such row pays its line's employee, to the approved phone."""
+    rows = [r for r in doc.get("references") or [] if cstr(r.get("mpesa_schedule_line")).strip()]
+    if not rows and not cstr(doc.get("payment_schedule")).strip():
+        return
+    flags = getattr(doc, "flags", None) or {}
+    if not flags.get("mpesa_from_schedule"):
+        frappe.throw("A scheduled payment is paid with Pay Selected in M-Pesa Payments Due, not by hand.")
+
+
+def check_b2c_row(row) -> None:
+    """The row's number is its line's approved phone (the row's validate): any other is refused."""
+    line = frappe.db.get_value(LINE, row.mpesa_schedule_line, list(B2C_LINE_FIELDS), as_dict=True)
+    if not line or line.route not in B2C_ROUTES:
+        frappe.throw(f"Row #{row.idx}: payment schedule line {row.mpesa_schedule_line} is not a phone line.")
+    if row.party != line.party or cstr(row.reference_name) != cstr(line.reference_name):
+        frappe.throw(f"Row #{row.idx} does not match its payment schedule line.")
+    if flt(row.allocated_amount, 2) != flt(line.amount, 2):
+        frappe.throw(f"Row #{row.idx}: the amount must be the schedule line's, KES {owed.money(line.amount)}.")
+    acc = employee_accounts.get_account(line.payee_account)
+    if not acc or cstr(row.partyb).strip() != cstr(acc.phone).strip():
+        frappe.throw(f"Row #{row.idx}: the number must be the employee's approved phone ({line.payee_account}).")
+
+
 def check_request(doc) -> None:
     """A B2B request carries a schedule line only when confirm_payment made it. Flags cannot come
     through the API, so an insert with docstatus 1 and a typed line is refused (F1)."""
@@ -589,7 +799,7 @@ def _shown(line, schedule) -> dict:
             "party_type": line.party_type, "party": line.party, "amount": flt(line.amount, 2),
             "planned_date": _norm("planned_date", line.planned_date), "route": line.route,
             "destination": line.destination, "document": dn, "document_type": dt,
-            "pay_from": schedule.b2b_settings}
+            "pay_from": pay_from(schedule, line)}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -714,26 +924,50 @@ def confirm_payment(token) -> dict:
             frappe.throw(f"Read the summary first: Confirm works {CONFIRM_DELAY} seconds after it opens.")
         get_cache().delete_value(_token_key(token))  # used once, whatever happens next
     batch = f"{now_datetime():%y%m%d%H%M%S}-{frappe.generate_hash(length=4)}"
-    sent, refused, touched = [], [], set()
+    sent, refused, touched, requests, groups = [], [], set(), [], {}
+
+    def refuse(item, e):
+        reason = _reason(e, item)
+        if frappe.db.exists(LINE, item["line"]):
+            frappe.db.set_value(LINE, item["line"], "last_problem", reason[:1000], update_modified=False)
+        refused.append({"line": item["line"], "reason": reason, **_brief(item["line"])})
+
     for item in _in_lock_order(data.get("lines") or []):
         frappe.db.savepoint("mpsa_pay_line")
         try:
-            request, line = _pay_line(item, batch, user)
+            request, line, schedule = _pay_line(item, batch, user)
         except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
             raise  # the whole transaction is gone: nothing here was paid
         except Exception as e:
             frappe.db.rollback(save_point="mpsa_pay_line")
-            reason = _reason(e, item)
-            if frappe.db.exists(LINE, item["line"]):
-                frappe.db.set_value(LINE, item["line"], "last_problem", reason[:1000], update_modified=False)
-            refused.append({"line": item["line"], "reason": reason, **_brief(item["line"])})
+            refuse(item, e)
+            continue
+        if request is None:
+            # a phone line: paid below by its group's B2C disbursement (its locks are held to commit)
+            groups.setdefault(_group_key(line, schedule), []).append((item, line, schedule))
             continue
         touched.add(line.parent)
+        requests.append(request)
         sent.append({"line": line.name, "request": request, "payee": _payee(line), "amount": flt(line.amount, 2)})
+    for _key, members in sorted(groups.items(), key=lambda kv: tuple(cstr(k) for k in kv[0])):
+        frappe.db.savepoint("mpsa_pay_b2c")
+        try:
+            disbursement = _pay_b2c_group(members, batch, user)
+        except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+            raise
+        except Exception as e:
+            frappe.db.rollback(save_point="mpsa_pay_b2c")
+            for item, _line, _schedule in members:
+                refuse(item, e)
+            continue
+        for _item, line, _schedule in members:
+            touched.add(line.parent)
+            sent.append({"line": line.name, "request": disbursement, "payee": _payee(line),
+                         "amount": flt(line.amount, 2)})
     for schedule in sorted(touched):
         update_totals(schedule, bump=True)  # a schedule form opened before must be reloaded
-    if sent:
-        _queue_send([s["request"] for s in sent], batch, enqueue_after_commit=True)
+    if requests:
+        _queue_send(requests, batch, enqueue_after_commit=True)
     return {"batch": batch, "sent": sent, "refused": refused,
             "total": flt(sum(s["amount"] for s in sent), 2)}
 
@@ -765,8 +999,10 @@ def _in_lock_order(items) -> list:
 
 
 def _pay_line(item, batch, payer) -> tuple:
-    """Check the line again under its locks and submit its B2B request (sent later)."""
-    peek = frappe.db.get_value(LINE, item["line"], ["parent", "reference_doctype", "reference_name"], as_dict=True)
+    """Check the line again under its locks and submit its B2B request (sent later). A phone line
+    is only checked here: (None, line, schedule), and its group's disbursement pays it."""
+    peek = frappe.db.get_value(LINE, item["line"], ["parent", "reference_doctype", "reference_name", "route"],
+                               as_dict=True)
     if not peek:
         raise _Refused("This line was deleted.")
     dt, dn = _document(peek)
@@ -775,11 +1011,13 @@ def _pay_line(item, batch, payer) -> tuple:
             stack.enter_context(owed.doc_lock(dt, dn))  # R4: the document's lock first
         schedule = _header(peek.parent, for_update=True)
         line = _line(item["line"], for_update=True)
-        if not schedule or not line or _document(line) != (dt, dn):
+        if not schedule or not line or _document(line) != (dt, dn) or line.route != peek.route:
             raise _Refused(CHANGED)
         check = line_problem(line, schedule, for_update=True, payer=payer, snapshot=item)
         if check.problem:
             raise _Refused(check.problem)
+        if is_b2c(line):
+            return None, line, schedule
         earlier = sorted(e.name for e in owed.earlier_payouts(line.party)) if dt == PI else []
         if set(earlier) - set(item.get("earlier") or []):
             raise _Refused(f"{line.party} got M-Pesa payments with no invoice after you pressed Pay Selected. Press it "
@@ -791,7 +1029,78 @@ def _pay_line(item, batch, payer) -> tuple:
             "batch": batch, "attempts": cint(line.attempts) + 1, "last_problem": None,
         }, update_modified=False)
         doc.submit()  # every B2B check again under the document's lock; sent later (flags)
-    return doc.name, line
+    return doc.name, line, schedule
+
+
+def _group_key(line, schedule) -> tuple:
+    """One B2C disbursement per schedule, B2C shortcode, party type, document type and Payroll Entry."""
+    dt, dn = _document(line)
+    payroll = owed.read_slip(dn).get("payroll_entry") if dt == SLIP else None
+    return (schedule.name, schedule.b2c_settings, line.party_type, dt, payroll)
+
+
+def _pay_b2c_group(members, batch, payer) -> str:
+    """One B2C Payment Disbursement for a group of checked phone lines, submitted: B2C's own guard
+    checks each salary slip again under its lock, and its jobs make and send each payout after
+    this commits. Each row carries its line and the approved phone (the row refuses another).
+    Made with ignore_permissions: the payer passed the payout roles and the line checks."""
+    _, first, schedule = members[0]
+    settings = schedule.b2c_settings
+    check_b2c_settings(settings, max(flt(m[1].amount) for m in members), schedule.company)
+    bank_account = wallet_accounts.bank_account(settings, wallet_accounts.UTILITY)
+    paid_from = frappe.db.get_value("Bank Account", bank_account, "account") if bank_account else None
+    if not paid_from:
+        raise _Refused(f"Map a Bank Account on Mpesa Settings {settings} (Accounting Mapping).")
+    dt, _dn = _document(first)
+    if dt != SLIP:
+        raise _Refused("A phone (B2C) line pays a Salary Slip.")
+    payroll = owed.read_slip(first.reference_name).payroll_entry
+    paid_to = frappe.db.get_value("Payroll Entry", payroll, "payroll_payable_account") if payroll else None
+    if not paid_to:
+        raise _Refused(f"Payroll Entry {payroll} has no Payroll Payable Account.")
+    has_payroll_column = frappe.get_meta(B2C_ROW).has_field("payroll_entry")
+    doc = frappe.new_doc(B2C_DOCTYPE)
+    doc.update({
+        "naming_series": "MPESA-B2C-.YYYY.-",
+        "company": schedule.company,
+        "posting_date": _today(),
+        "payment_type": "Mpesa Disbursement",
+        "party_type": first.party_type,
+        "transaction_to_pay_against": SLIP,
+        "mode_of_payment": money_in_common.mode_of_payment_for(settings),
+        "paid_from": paid_from,
+        "paid_from_account_currency": "KES",
+        "paid_to": paid_to,
+        "paid_to_account_currency": "KES",
+        "paid_amount": flt(sum(flt(m[1].amount) for m in members), 2),
+        "source_exchange_rate": 1,
+        "target_exchange_rate": 1,
+        "payment_schedule": schedule.name,
+    })
+    for _item, line, _schedule in members:
+        row = {"reference_doctype": SLIP, "reference_name": line.reference_name, "party_type": line.party_type,
+               "party": line.party, "allocated_amount": flt(line.amount), "partyb": line.destination,
+               "currency": "KES", "exchange_rate": 1, "mpesa_schedule_line": line.name}
+        if has_payroll_column:
+            row["payroll_entry"] = payroll
+        doc.append("references", row)
+    doc.flags.ignore_permissions = True
+    doc.flags.mpesa_from_schedule = True
+    doc.insert(ignore_permissions=True)
+    found = frappe.db.get_value("Mpesa Settings", {"payment_gateway_name": cstr(doc.mode_of_payment)[6:]}, "name")
+    if found != settings:
+        # B2C finds the shortcode by its Mode of Payment
+        raise _Refused(f"Mode of Payment {doc.mode_of_payment} belongs to Mpesa Settings {found or 'none'}, not "
+                       f"{settings}.")
+    now = now_datetime()
+    for row in doc.references:
+        line = next(m[1] for m in members if m[1].name == row.mpesa_schedule_line)
+        frappe.db.set_value(LINE, line.name, {
+            "status": SENDING, "b2c_disbursement": doc.name, "b2c_row": row.name, "approved_by": payer,
+            "approved_on": now, "batch": batch, "attempts": cint(line.attempts) + 1, "last_problem": None,
+        }, update_modified=False)
+    doc.submit()  # B2C's guard under each slip's lock; its jobs make and send the payouts after commit
+    return doc.name
 
 
 def _new_request(line, schedule, checked: bool):
@@ -806,15 +1115,20 @@ def _new_request(line, schedule, checked: bool):
         "schedule_line": line.name,
         "checked_earlier_payouts": 1 if checked else 0,
     })
-    if line.party:
+    dt, dn = _document(line)
+    if line.party and line.party_type == "Employee":
+        doc.employee = line.party
+        doc.employee_mpesa_account = line.payee_account
+        if dt == SLIP:
+            doc.salary_slip = dn
+    elif line.party:
         doc.supplier = line.party
         doc.supplier_mpesa_account = line.payee_account
     else:
         doc.command_id = supplier_accounts.COMMAND_FOR[line.one_off_type]
         doc.receiver_shortcode = line.one_off_shortcode
         doc.account_reference = line.one_off_account
-    dt, dn = _document(line)
-    if dt:
+    if dt in owed.DOC_FIELDS:
         doc.set(owed.DOC_FIELDS[dt], dn)
     doc.flags.mpesa_from_schedule = True
     doc.flags.mpesa_send_later = True
@@ -930,6 +1244,101 @@ def _mirror(values) -> dict:
             "entry_status": values.entry_status if paid else None, "last_problem": problem}
 
 
+# ---------------------------------------------------------------- a phone line follows its B2C payout
+B2C_REQUEST_FIELDS = ("name", "docstatus", "status", "transaction_id", "transaction_completed_datetime",
+                      "accounting_booked", "accounting_error", "error_message", "result_desc")
+
+
+def sync_b2c_line(row_name) -> None:
+    """Mirror a B2C row made by Pay Selected, and its B2C Disbursement Request, on its line. Never
+    raises, except a deadlock or lock wait (as sync_line)."""
+    try:
+        if not row_name or not frappe.get_meta(B2C_ROW).has_field("mpesa_schedule_line"):
+            return
+        row = frappe.db.get_value(B2C_ROW, row_name, ["name", "parent", "payment_status", "b2c_disbursement_request",
+                                                     "mpesa_schedule_line"], as_dict=True)
+        if not row or not cstr(row.mpesa_schedule_line).strip():
+            return
+        line = frappe.db.get_value(LINE, row.mpesa_schedule_line, ["name", "parent", "b2c_row", *SYSTEM], as_dict=True)
+        if not line or line.b2c_row != row.name:
+            return  # planned again since: the line belongs to another payout now
+        request = row.b2c_disbursement_request or frappe.db.get_value(
+            B2C_REQUEST, {"b2c_payment_disbursement_reference": row.name, "docstatus": ["<", 2]}, "name")
+        values = frappe.db.get_value(B2C_REQUEST, request, list(B2C_REQUEST_FIELDS), as_dict=True) if request else None
+        mirror = _mirror_b2c(row, values, line)
+        changed = {k: v for k, v in mirror.items() if _norm(k, line.get(k)) != _norm(k, v)}
+        if not changed:
+            return
+        frappe.db.set_value(LINE, line.name, changed, update_modified=False)
+        frappe.enqueue(f"{__name__}.update_totals", queue="short", timeout=300, enqueue_after_commit=True,
+                       schedule=line.parent)
+    except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+        raise
+    except Exception:
+        frappe.log_error(title="M-Pesa schedule line not updated", message=f"{row_name}\n{frappe.get_traceback()}")
+
+
+def sync_b2c_line_later(row_name) -> None:
+    """sync_b2c_line from a job once the caller commits (the B2C Result, its booking, the send)."""
+    if not row_name:
+        return
+    try:
+        frappe.enqueue(f"{__name__}.sync_b2c_line", queue="short", timeout=300, enqueue_after_commit=True,
+                       row_name=row_name)
+    except Exception:
+        frappe.log_error(title="M-Pesa schedule line update not queued", message=f"{row_name}\n{frappe.get_traceback()}")
+
+
+def _mirror_b2c(row, request, line) -> dict:
+    if not request:
+        if row.payment_status == "Failed":
+            problem = cstr(line.get("last_problem")).strip() or "Not sent: no B2C payout was made for it (see the Error Log)."
+            return {"status": FAILED, "b2c_request": None, "receipt": None, "paid_on": None, "entry_status": None,
+                    "last_problem": problem}
+        return {"status": SENDING, "b2c_request": None, "receipt": None, "paid_on": None, "entry_status": None,
+                "last_problem": None}
+    status = request.status or "Not Initiated"
+    problem, entry = None, None
+    if status == "Paid":
+        line_status = PAID
+        booked = bool(cint(request.accounting_booked))
+        entry = "Entry Made" if booked else "Entry Not Made"
+        problem = None if booked else (_plain(request.accounting_error) or None)
+    elif cint(request.docstatus) == 2:
+        line_status = FAILED
+        problem = f"{request.name} was cancelled ({status}). Plan it again if it was not paid."
+    elif status == "Failed":
+        line_status = FAILED
+        problem = _plain(request.error_message or request.result_desc) or "M-Pesa refused it."
+    elif status == "Status Unknown":
+        line_status = UNKNOWN
+        problem = (f"{_plain(request.error_message) or 'No answer from M-Pesa.'} A Transaction Status check settles "
+                   f"{request.name}; plan the line again only once it shows Failed.")
+    elif status == "Initiated":
+        line_status = SENT
+    else:
+        line_status = SENDING
+    paid = line_status == PAID
+    return {"status": line_status, "b2c_request": request.name,
+            "receipt": (cstr(request.transaction_id).strip() or None) if paid else None,
+            "paid_on": request.transaction_completed_datetime if paid else None,
+            "entry_status": entry, "last_problem": problem}
+
+
+def fail_b2c_line(row_name, message: str) -> None:
+    """A B2C row made by Pay Selected that its job did not pay (b2c_problem): its line Failed
+    with the reason, to be planned again."""
+    row = frappe.db.get_value(B2C_ROW, row_name, ["name", "mpesa_schedule_line"], as_dict=True)
+    if not row or not row.mpesa_schedule_line:
+        return
+    line = frappe.db.get_value(LINE, row.mpesa_schedule_line, ["name", "parent", "b2c_row"], as_dict=True)
+    if not line or line.b2c_row != row.name:
+        return
+    frappe.db.set_value(LINE, line.name, {"status": FAILED, "last_problem": message[:1000]}, update_modified=False)
+    frappe.enqueue(f"{__name__}.update_totals", queue="short", timeout=300, enqueue_after_commit=True,
+                   schedule=line.parent)
+
+
 def cancelled_mid_send(request) -> bool:
     """Cancelled while still Not Initiated after its send began (send_started_on): M-Pesa may have
     paid it (R1). The request's before_cancel keeps such a cancel Unknown, so only a cancel that
@@ -971,7 +1380,7 @@ def move_date(lines, date) -> dict:
             frappe.throw(f"{parent} is closed.")
         notes = []
         for line in sorted((_line(n, for_update=True) for n in members), key=lambda r: cint(r.idx)):
-            if line.status != PLANNED or line.request:
+            if line.status != PLANNED or _sent(line):
                 frappe.throw(f"Row {line.idx} of {parent} is {line.status}: only a planned line can be moved.")
             if getdate(line.planned_date) == new:
                 continue
@@ -999,11 +1408,16 @@ def plan_again(line, date=None) -> dict:
     if cint(schedule.closed):
         frappe.throw(f"{parent} is closed.")
     row = _line(line, for_update=True)
+    if row.status == UNKNOWN and row.b2c_disbursement:
+        frappe.throw(f"M-Pesa may have paid row {row.idx} ({_payout(row)}). A Transaction Status check settles it; "
+                     "plan it again only once it shows Failed.")
     if row.status == UNKNOWN:
         frappe.throw(f"M-Pesa may have paid row {row.idx} ({row.request}). A manager checks the statement and cancels "
                      f"{row.request} if it was not paid; then plan it again.")
     if row.status != FAILED:
         frappe.throw(f"Only a failed line is planned again; row {row.idx} is {row.status}.")
+    if row.b2c_disbursement:
+        _check_b2c_not_paid(row)
     if row.request:
         request = frappe.db.get_value(B2B, row.request, ["status", "docstatus", "send_started_on"], as_dict=True,
                                       for_update=True)
@@ -1016,6 +1430,7 @@ def plan_again(line, date=None) -> dict:
                          "manager checks the statement, then plans it again.")
     values = {"status": PLANNED, "request": None, "receipt": None, "paid_on": None, "entry_status": None,
               "approved_by": None, "approved_on": None, "batch": None, "last_problem": None,
+              "b2c_disbursement": None, "b2c_row": None, "b2c_request": None,
               "changed_by": frappe.session.user}
     if date:
         if getdate(date) < _today():
@@ -1024,9 +1439,22 @@ def plan_again(line, date=None) -> dict:
     frappe.db.set_value(LINE, line, values)
     frappe.get_doc(SCHEDULE, parent).add_comment(
         "Comment", f"{frappe.session.user} planned row {row.idx} ({_payee(row)}, KES {owed.money(row.amount)}) again "
-        f"after {row.request or 'it'} failed: {row.last_problem or 'no reason given'}.")
+        f"after {_payout(row) or 'it'} failed: {row.last_problem or 'no reason given'}.")
     update_totals(parent, bump=True)
     return {"line": line, "status": PLANNED}
+
+
+def _check_b2c_not_paid(row) -> None:
+    """A failed phone line is planned again only when its B2C payout is final and not Paid."""
+    payout = row.b2c_request or frappe.db.get_value(B2C_ROW, row.b2c_row, "b2c_disbursement_request")
+    if not payout:
+        status = frappe.db.get_value(B2C_ROW, row.b2c_row, "payment_status", for_update=True)
+        if status and status != "Failed":
+            frappe.throw(f"Row {row.idx} of {row.b2c_disbursement} is {status}: row {row.idx} is not planned again.")
+        return
+    request = frappe.db.get_value(B2C_REQUEST, payout, ["status", "docstatus"], as_dict=True, for_update=True)
+    if request and (request.status == "Paid" or (cint(request.docstatus) == 1 and request.status != "Failed")):
+        frappe.throw(f"{payout} is {request.status}: row {row.idx} is not planned again.")
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1042,7 +1470,7 @@ def close_schedule(name) -> dict:
     user = frappe.session.user
     cancelled = 0
     for line in _stored_lines(name).values():
-        if line.status == PLANNED and not line.request:
+        if line.status == PLANNED and not _sent(line):
             frappe.db.set_value(LINE, line.name, {"status": CANCELLED,
                                                   "last_problem": f"Cancelled when {user} closed the schedule."})
             cancelled += 1
@@ -1076,15 +1504,29 @@ def sweep(limit: int = 200) -> None:
         # not while the batch's own job (confirm's, or an earlier sweep's) is queued or running:
         # a large batch takes longer than 5 minutes
         _queue_send(names, batch, deduplicate=True)
-    for (request,) in frappe.db.sql(
+    for request, row in frappe.db.sql(
         f"""
-        SELECT request FROM `tab{LINE}`
-        WHERE parenttype = %(parenttype)s AND status IN %(states)s AND COALESCE(request, '') != ''
+        SELECT request, b2c_row FROM `tab{LINE}`
+        WHERE parenttype = %(parenttype)s AND status IN %(states)s
+          AND (COALESCE(request, '') != '' OR COALESCE(b2c_row, '') != '')
         ORDER BY modified LIMIT {cint(limit)}
         """,
         {"parenttype": SCHEDULE, "states": IN_PROGRESS},
     ):
-        _each(request, sync_line)
+        if request:
+            _each(request, sync_line)
+        else:
+            _each(row, sync_b2c_line)
+    for (row,) in frappe.db.sql(
+        f"""
+        SELECT b2c_row FROM `tab{LINE}`
+        WHERE parenttype = %(parenttype)s AND status = %(sending)s AND COALESCE(b2c_row, '') != ''
+          AND approved_on < %(cutoff)s
+        ORDER BY approved_on LIMIT {cint(limit)}
+        """,
+        {"parenttype": SCHEDULE, "sending": SENDING, "cutoff": add_to_date(now, minutes=-RESEND_WITHIN_MINUTES)},
+    ):
+        _each(row, _give_up_b2c)
 
 
 def _batch_of(request) -> str:
@@ -1118,6 +1560,29 @@ def _interrupted(name: str) -> None:
     supplier_accounts._alert(f"{name}: {INTERRUPTED}", frappe._dict(doctype=B2B, name=name))
 
 
+def _give_up_b2c(row_name: str) -> None:
+    """A phone line's B2C row that got no payout within an hour: its job was lost. A payout is
+    recorded (and committed) before it is sent, so none was sent: the row is Failed and its line
+    may be planned again. A late job refuses it (b2c_problem: the line is no longer Sending)."""
+    row = frappe.db.get_value(B2C_ROW, row_name, ["name", "parent", "idx", "payment_status", "b2c_disbursement_request",
+                                                 "mpesa_schedule_line"], as_dict=True, for_update=True)
+    if not row:
+        return
+    if (row.b2c_disbursement_request or row.payment_status in ("Paid", "Failed")
+            or frappe.db.exists(B2C_REQUEST, {"b2c_payment_disbursement_reference": row_name})):
+        sync_b2c_line(row_name)
+        return
+    frappe.db.set_value(B2C_ROW, row_name, "payment_status", "Failed", update_modified=False)
+    message = (f"No B2C payout was made for row {row.idx} of {row.parent} within an hour, so nothing was sent: "
+               "plan it again.")
+    fail_b2c_line(row_name, message)
+    line = frappe.db.get_value(LINE, row.mpesa_schedule_line, ["parent", "idx"], as_dict=True)
+    if line:
+        frappe.get_doc(SCHEDULE, line.parent).add_comment("Comment", f"Row {line.idx}: {message}")
+    frappe.log_error(title="M-Pesa scheduled B2C payout not made", message=f"{row_name}: {message}",
+                     reference_doctype=B2C_DOCTYPE, reference_name=row.parent)
+
+
 def _give_up(name: str) -> None:
     """Submitted by confirm_payment over an hour ago and never started: it cannot have reached
     M-Pesa (the marker comes first), so it is cancelled and its line is planned again."""
@@ -1141,3 +1606,13 @@ def _give_up(name: str) -> None:
         "Comment",
         f"Row {line.idx}: {name} was not sent within an hour, so it was cancelled and the line planned again.")
     update_totals(line.parent)
+
+
+# ---------------------------------------------------------------- from a Payroll Entry (HRMS)
+@frappe.whitelist(methods=["POST"])
+def from_payroll_entry(payroll_entry, b2b_settings=None, b2c_settings=None, planned_date=None) -> dict:
+    """The Payroll Entry's "Create M-Pesa Payment Schedule" button (money_out.payroll)."""
+    from . import payroll
+
+    return payroll.from_payroll_entry(payroll_entry, b2b_settings=b2b_settings, b2c_settings=b2c_settings,
+                                      planned_date=planned_date)

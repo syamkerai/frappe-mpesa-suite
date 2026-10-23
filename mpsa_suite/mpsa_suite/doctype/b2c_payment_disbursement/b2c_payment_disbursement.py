@@ -36,6 +36,9 @@ class B2CPaymentDisbursement(Document):
         for ref in self.references:
             ref.validate()
         self.validate_reference_doctypes()
+        from ....money_out.schedule import check_b2c_disbursement
+
+        check_b2c_disbursement(self)  # schedule lines only from Pay Selected
 
     def before_save(self) -> None:
         """Set missing values before saving."""
@@ -145,7 +148,15 @@ class B2CPaymentDisbursement(Document):
         already has invoices is refused (they are paid instead).
         """
         from ....money_in.common import named_lock
-        from ....money_out.owed import DOC_FIELDS, b2b_open, billed_order, busy_message, order_advances
+        from ....money_out.owed import (
+            DOC_FIELDS,
+            SLIP,
+            b2b_open,
+            b2b_slip_open,
+            billed_order,
+            busy_message,
+            order_advances,
+        )
         from ..b2c_disbursement_request.b2c_disbursement_request import paid_without_entry
 
         rows = self._rows_to_send()
@@ -172,6 +183,10 @@ class B2CPaymentDisbursement(Document):
                 if doctype in DOC_FIELDS:
                     # B2B requests for the invoice or order count too (same lock, locking read)
                     others += b2b_open(doctype, name, for_update=True)
+                elif doctype == SLIP:
+                    # B2B salary requests to the employee's bank paybill still on their way (a Paid
+                    # one is in what the slip owes already)
+                    others += b2b_slip_open(name, for_update=True)
                 if others:
                     frappe.throw(
                         _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(
@@ -953,6 +968,21 @@ def create_b2c_request(ref, settings, b2c_disbursement):
         )
         return
 
+    line = ref.get("mpesa_schedule_line")
+    if line:
+        from ....money_out import schedule
+
+        # A payout of a payment schedule line: its line is due, still this row's, and the number
+        # is the employee's approved phone (checked again at send). Refused as above: nothing sent.
+        if problem := schedule.b2c_problem(ref, b2c_disbursement.name):
+            frappe.db.set_value(ref.doctype, ref.name, "payment_status", "Failed")
+            schedule.fail_b2c_line(ref.name, f"Not sent: {problem}")
+            frappe.log_error(
+                title="M-Pesa scheduled B2C payout not sent",
+                message=f"{b2c_disbursement.name} row {ref.idx} ({line}): {problem}",
+            )
+            return
+
     try:
         data = {
             "doctype": B2C_REQUEST_DOCTYPE,
@@ -968,13 +998,23 @@ def create_b2c_request(ref, settings, b2c_disbursement):
         data["phone_number"] = ref.partyb
         data["mpesa_settings"] = settings.name
         data["payment_provider"] = "Mpesa"
+        if line:
+            remarks = frappe.db.get_value("M-Pesa Payment Schedule Line", line, "remarks")
+            data["remarks"] = (remarks or f"Salary {ref.reference_name}")[:100]
 
         b2c_request = frappe.get_doc(data)
+        if line:
+            # Pay Selected checked the payer's roles and the line; the job submits as that payer
+            b2c_request.flags.ignore_permissions = True
         b2c_request.insert(ignore_permissions=True)
         b2c_request.submit()
         frappe.db.set_value(
             ref.doctype, ref.name, "b2c_disbursement_request", b2c_request.name
         )
+        if line:
+            from ....money_out.schedule import sync_b2c_line_later
+
+            sync_b2c_line_later(ref.name)  # its line shows Sent once M-Pesa took it
 
     except Exception as e:
         frappe.log_error(
@@ -1011,20 +1051,26 @@ def current_outstanding(doctype: str | None, name: str | None, for_update: bool 
 
 
 def salary_slip_paid(
-    name: str, employee: str | None = None, payroll_entry: str | None = None, for_update: bool = False
+    name: str, employee: str | None = None, payroll_entry: str | None = None, for_update: bool = False,
+    exclude_b2b: str | None = None, exclude_b2c: str | None = None,
 ) -> float:
     """What was already paid against a Salary Slip, whose totals never go down when it is paid.
 
     Every Paid B2C payout for the slip counts, booked or not and however old, from any
     disbursement, also once its request is cancelled (as with Cancel All on a disbursement:
     the money is still gone); payouts still in flight are refused by ``open_payouts``. So
-    does a submitted bank / cash Journal Entry that pays the employee against the slip's
-    Payroll Entry and was not made by the B2C flow (payroll banking).
+    does every Paid B2B salary request for the slip (an employee's bank paybill), also once
+    cancelled. So does a submitted bank / cash Journal Entry that pays the employee against
+    the slip's Payroll Entry and was not made by the B2C or B2B flow (payroll banking): the
+    salary Journal Entries of M-Pesa payouts are tagged with their payout.
 
     ``for_update``: also read the Paid payouts through the disbursement rows with a locking
     read, as ``open_payouts`` does. The plain read sees this transaction's snapshot, and
     ``open_payouts`` stops listing a payout once it is Paid and booked, so a payout that got
     there after the snapshot would otherwise be missed by both.
+
+    ``exclude_b2b`` / ``exclude_b2c``: a payout left out (its own salary entry asks what was
+    paid before it).
     """
     # request -> amount, so a request found by both reads (or by two rows) counts once
     b2c = dict(
@@ -1053,13 +1099,28 @@ def salary_slip_paid(
                 (name,),
             )
         )
+    b2c.pop(exclude_b2c, None)
+    b2b = {}
+    if frappe.db.has_column("Mpesa B2B Payment Request", "salary_slip"):  # a site with HRMS
+        b2b = dict(
+            frappe.db.sql(
+                f"""
+                SELECT name, amount FROM `tabMpesa B2B Payment Request`
+                WHERE salary_slip = %s AND docstatus IN (1, 2) AND status = 'Paid'
+                {"FOR UPDATE" if for_update and frappe.db.db_type == "mariadb" else ""}
+                """,
+                (name,),
+            )
+        )
+        b2b.pop(exclude_b2b, None)
     bank = 0.0
     if employee and payroll_entry:
-        # without the link field a B2C entry would count twice, which only refuses more
-        not_b2c = (
-            "AND COALESCE(jea.b2c_payment_disbursement, '') = ''"
-            if frappe.get_meta("Journal Entry Account").has_field("b2c_payment_disbursement")
-            else ""
+        # without the link fields an M-Pesa salary entry would count twice, which only refuses more
+        jea_meta = frappe.get_meta("Journal Entry Account")
+        not_b2c = " ".join(
+            f"AND COALESCE(jea.{field}, '') = ''"
+            for field in ("b2c_payment_disbursement", "mpesa_b2b_payment_request")
+            if jea_meta.has_field(field)
         )
         bank = frappe.db.sql(
             f"""
@@ -1074,7 +1135,7 @@ def salary_slip_paid(
             """,
             (payroll_entry, employee),
         )[0][0]
-    return round(sum(flt(amount) for amount in b2c.values()) + flt(bank), 2)
+    return round(sum(flt(amount) for amount in b2c.values()) + sum(flt(a) for a in b2b.values()) + flt(bank), 2)
 
 
 def open_payouts(doctype: str, name: str, exclude_parent: str | None = None, exclude_requests=None) -> list:

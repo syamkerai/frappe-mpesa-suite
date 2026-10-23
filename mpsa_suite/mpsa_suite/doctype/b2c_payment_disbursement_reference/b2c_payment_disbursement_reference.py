@@ -57,6 +57,13 @@ class B2CPaymentDisbursementReference(Document):
 
             self.partyb = mobile_no
 
+        if getattr(self, "mpesa_schedule_line", None):
+            # a payment schedule's phone line: the number is its employee's approved phone, the
+            # amount and slip the line's (money_out.schedule)
+            from ....money_out.schedule import check_b2c_row
+
+            check_b2c_row(self)
+
 
 def b2c_amount_problem(amount) -> str | None:
     """Why Daraja B2C would refuse ``amount`` (whole shillings from 10 to 250,000), or None.
