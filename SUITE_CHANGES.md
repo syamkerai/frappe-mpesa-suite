@@ -1333,6 +1333,12 @@ the report of a site's own rules run in `after_migrate` (`mpsa_suite/access.py`)
   created or last saved it, nor change it while sending. One switch with the payment schedule:
   "Who Sends a Payout Must Not Be Who Prepared It" (on by default).
 
+- Salary payouts (each employee's net pay, phone and bank account) are shown only to HR User and
+  HR Manager, who read Salary Slips, to M-Pesa Payer, M-Pesa Manager and System Manager, and to
+  whoever created the record: payroll schedules and their lines, B2C payouts and B2B requests to an
+  employee, their status queries, Employee M-Pesa Accounts, and the salary rows of M-Pesa Payments
+  Due and B2C Disbursement Summary. Accounts roles and M-Pesa Viewer see supplier payouts only.
+
 **A site's own permission rules (Custom DocPerm)**
 - Frappe uses them instead of the app's rules. Trident and Astral both have them on seven M-Pesa
   DocTypes. They are reported once per change (Error Log) and never deleted automatically. An M-Pesa

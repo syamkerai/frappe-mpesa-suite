@@ -19,8 +19,8 @@ document drifts from them, and when a whitelisted function has no server-side ch
 | M-Pesa Collector | Sends STK prompts and attaches received payments to invoices. | the suite |
 | M-Pesa Viewer | Reads M-Pesa transactions and reports. Changes nothing, sees no secrets. | the suite |
 | Accounts User | Prepares payouts (drafts), books and reconciles entries, collects. | ERPNext |
-| Accounts Manager | As Accounts User, plus booking work (C2B register cancel, statement imports). Prepares payouts; does not send them or do M-Pesa admin work (decisions D1, D2). | ERPNext |
-| HR Manager / HR User | Prepare B2C payroll disbursements; an M-Pesa Payer sends them (D1). | ERPNext |
+| Accounts Manager | As Accounts User, plus booking work (C2B register cancel, statement imports). Prepares payouts; does not send them or do M-Pesa admin work (decisions D1, D2). Sees supplier payouts only, not salary payouts (D4). | ERPNext |
+| HR Manager / HR User | Prepare B2C payroll disbursements and propose employees' payee accounts; an M-Pesa Payer sends them (D1). With the pay roles, the only ones who see salary payouts (D4). | ERPNext / HRMS |
 | Sales User | Collects: STK prompts, C2B receipts on invoices. | ERPNext |
 | Purchase Manager / User | Proposes / reads supplier M-Pesa accounts. No B2B access. | ERPNext |
 
@@ -38,6 +38,10 @@ Separation of duties the code enforces:
   is checked the same way at Pay Selected.
 - **Secrets** (Daraja credentials, the callback token, API client secrets) are visible to
   `CONFIG_ROLES` only: System Manager and M-Pesa Manager.
+- **Salary payouts** (each employee's net pay, phone and bank account) are visible to
+  `SALARY_ROLES` only: HR User and HR Manager, who read Salary Slips in HRMS, and M-Pesa Payer,
+  M-Pesa Manager and System Manager, who send or administer them; and to whoever created the
+  record (D4, `salary_privacy.py`).
 
 ## 2. Audit findings, ranked
 
@@ -58,6 +62,7 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | G11 | Info (live) | Trident has no Integration User, so Safaricom callbacks run as Administrator (policy Warn). | M-Pesa Suite Settings | Rollout step 2 |
 | G12 | Info | Workspace, charts and number cards are public. Their data goes through `frappe.get_list`, so each user sees only what their permissions allow; links hide DocTypes the user cannot read. The `Payment Gateway` DocType in this app's folder comes from upstream and belongs to the payments app: left as it is, never reset by the suite. | `workspace/m_pesa`, `dashboard_chart/*`, `number_card/*` | No change |
 | G14 | Medium | **Reports refuse readers of their Link columns.** Frappe drops or refuses every report row whose Link column points at a document the reader cannot read (`frappe.desk.query_report.get_filtered_data`), but only once the report has rows. M-Pesa Payments Due had a hidden Currency Link, which a Payer or Viewer cannot read on Frappe 15, so their main screen failed as soon as a line existed. The four upstream reports link to Payment Request and Entry, invoices, Customer and Mode of Payment, which only Accounts (and for some, Sales) roles read; upstream lists Sales User on two of them and HR Manager on B2C Disbursement Summary, roles that cannot read all those links. | `m_pesa_payments_due.py` columns; the upstream report JSON | Fixed for Payments Due (the column is Data). The suite roles stay off the upstream reports (their users reach them through Accounts User / Sales User). The upstream Sales User / HR Manager listing is left as it was: a follow-up decides between dropping those roles and changing the columns |
+| G15 | **High** | **Salary data shown to roles that cannot read Salary Slips** (found in the payouts Phase 3 review). Payroll schedules and their lines in M-Pesa Payments Due, B2C payouts and B2B requests to employees, their status queries and Employee M-Pesa Accounts showed each employee's net pay, phone and bank account to Accounts User, Accounts Manager and M-Pesa Viewer. | the five payout DocTypes, Employee M-Pesa Account, the two reports | Fixed after decision D4: row-level `has_permission` and `permission_query_conditions` hooks, Employee M-Pesa Account rights, and filters in M-Pesa Payments Due and B2C Disbursement Summary |
 | G13 | Info | Supplier M-Pesa Account grants share to Accounts User, M-Pesa Payer and Purchase Manager. Frappe 15 and 16 let a user share only rights they hold, and approving needs `ADMIN_ROLES` on the server, so sharing cannot approve an account. | `supplier_m_pesa_account.json` | No change (payouts Phase 3 mirrors this DocType) |
 
 Checked and found sound (no change):
@@ -370,7 +375,7 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 | Role | Must work | Must be refused |
 |---|---|---|
-| M-Pesa Viewer | M-Pesa workspace; lists of STK, C2B, B2C, B2B, reversals; M-Pesa Payments Due; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
+| M-Pesa Viewer | M-Pesa workspace; lists of STK, C2B, supplier B2C and B2B, reversals; M-Pesa Payments Due (supplier lines); a shortcode can be picked in a Link filter | Any salary payout (employee B2C/B2B, payroll schedules and lines, Employee M-Pesa Accounts); Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
 | Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Refresh Balances on M-Pesa Payments Due; Transaction Status Query from the C2B register list | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; opening Mpesa Settings |
 | M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); Pay Selected on M-Pesa Payments Due for a line someone else prepared; submit a B2C disbursement; retry a failed B2C | Pay Selected on a line they prepared or last changed (maker-checker on); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
@@ -391,6 +396,11 @@ On every site, at once (server checks, whatever the site's own permission rules)
 - **Accounts Manager can no longer approve payee accounts** or do the other `ADMIN_ROLES` work (D2).
 - **Maker-checker** (D3): a payer cannot send a B2B request or B2C disbursement they created or
   last saved, or change it while sending. A one-person team turns the switch off.
+- **Salary payouts** (D4): Accounts User, Accounts Manager and M-Pesa Viewer no longer see B2C
+  disbursements, B2C requests, B2B requests or schedules that pay an employee, nor their lines in
+  M-Pesa Payments Due and B2C Disbursement Summary, unless they also hold HR User or HR Manager
+  (or created the record). On Astral, where staff pay salaries by B2C, give HR User to the Accounts
+  people who must keep seeing them.
 
 On a site using the suite's own rules (new installs, and DocTypes after a reset):
 
@@ -436,6 +446,12 @@ On every site, at once, whatever its own rules:
   Be Who Prepared It" (on by default; off only for a one-person team). Not checked: Administrator,
   requests a schedule makes (checked at Pay Selected), and the B2C requests a checked disbursement
   creates.
+- **D4. Salary payouts** (each employee's net pay, phone and bank account): visible only to HR User
+  and HR Manager (HRMS's Salary Slip readers), to M-Pesa Payer, M-Pesa Manager and System Manager
+  (`SALARY_ROLES`), and to whoever created the record. Accounts User, Accounts Manager and M-Pesa
+  Viewer see supplier payouts only. An Accounts user who prepares payroll also needs an HR role
+  (building a payroll schedule already needs read on the Payroll Entry, HR Manager in HRMS).
+  Employee is not a salary role: HRMS lets it read only its own slip.
 
 ## 10. Changing a permission
 
