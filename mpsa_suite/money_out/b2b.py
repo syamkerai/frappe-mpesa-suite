@@ -15,6 +15,7 @@ sent then: send_deferred sends it from a job, after committing its send_started_
 never before its line's planned day.
 """
 
+import contextlib
 import re
 
 import frappe
@@ -54,42 +55,65 @@ def send_b2b(name: str) -> None:
     apply_ack(doc, data, error)
 
 
-def send_deferred(name: str) -> None:
-    """Send a request the payment schedule submitted (send_batch's job). The send_started_on marker
-    is committed first: a worker that dies after it leaves a request the 5-minute sweep makes
-    Unknown, never one that is sent again (R1). A check that fails now marks the request Failed,
-    "Not sent: <reason>", and its line may be planned again. Nothing after the call raises."""
+def send_deferred(name: str) -> bool:
+    """Send a request the payment schedule submitted (send_batch's job); True when it was posted.
+
+    The claim is a locking read, so a marker another worker committed after this job's snapshot
+    is seen. The send_started_on marker is committed first: a worker that dies after it leaves a
+    request the 5-minute sweep makes Unknown, never one that is sent again (R1). Then the locks
+    in R4 order: the document's lock (held through the call, as at a direct submit), the request
+    row, the line row. A check that fails now marks the request Failed, "Not sent: <reason>",
+    while it is still this send's own, and its line may be planned again. Nothing after the
+    call raises."""
     from . import schedule
 
-    frappe.db.get_value(B2B_DOCTYPE, name, "name", for_update=True)
-    doc = frappe.get_doc(B2B_DOCTYPE, name)
-    if cint(doc.docstatus) != 1 or (doc.status or NOT_INITIATED) != NOT_INITIATED or doc.get("send_started_on"):
-        return  # cancelled, sent, or being sent by another worker
-    doc.db_set("send_started_on", now_datetime(), update_modified=False)
+    claim = frappe.db.get_value(B2B_DOCTYPE, name, ["docstatus", "status", "send_started_on"], as_dict=True,
+                                for_update=True)
+    if (not claim or cint(claim.docstatus) != 1 or (claim.status or NOT_INITIATED) != NOT_INITIATED
+            or claim.send_started_on):
+        return False  # cancelled, sent, or being sent by another worker
+    marker = now_datetime()
+    frappe.db.set_value(B2B_DOCTYPE, name, "send_started_on", marker, update_modified=False)
     frappe.db.commit()  # the marker stays whatever happens next
+    # the document, read without a lock, to take its lock before any row's (R4)
+    dt, dn = owed.document_of(frappe.db.get_value(B2B_DOCTYPE, name, ["purchase_invoice", "purchase_order"],
+                                                  as_dict=True) or frappe._dict())
     frappe.db.savepoint("mpsa_b2b_send_checks")
     try:
-        doc = lock_for_send(B2B_DOCTYPE, name)
-        schedule.assert_line_due(doc)
-        check_ready_to_send(doc)
-        settings, payload = _payload(doc)
+        with contextlib.ExitStack() as stack:
+            if dt:
+                stack.enter_context(owed.doc_lock(dt, dn))
+            doc = lock_for_send(B2B_DOCTYPE, name)
+            schedule.assert_line_due(doc)
+            check_ready_to_send(doc)  # re-enters the document's lock
+            settings, payload = _payload(doc)
     except Exception as e:
         try:
             frappe.db.rollback(save_point="mpsa_b2b_send_checks")  # the checks write nothing
         except Exception:
             frappe.db.rollback()  # a deadlock ended the transaction, savepoint and all
         reason = re.sub(r"<[^>]+>", "", cstr(e)).strip() or type(e).__name__
-        frappe.db.set_value(B2B_DOCTYPE, name, {"status": "Failed", "error_message": f"Not sent: {reason}"[:1000]},
-                            update_modified=False)
+        _fail_unsent(name, marker, f"Not sent: {reason}")
         frappe.db.commit()
         schedule.sync_line(name)  # nothing else is pending: the sweep repeats it if this fails
         frappe.db.commit()
-        return
+        return False
     data, error = post(
         settings, daraja.B2B_ENDPOINT, payload, doctype=B2B_DOCTYPE, name=doc.name, description="Mpesa B2B"
     )
     apply_ack(doc, data, error)  # never raises; queues the line's update
     frappe.db.commit()
+    return True
+
+
+def _fail_unsent(name: str, marker, message: str) -> None:
+    """Failed, only while the request is still Not Initiated with this send's marker (a locking
+    read): an answer or a cancel committed meanwhile is kept."""
+    current = frappe.db.get_value(B2B_DOCTYPE, name, ["status", "send_started_on"], as_dict=True, for_update=True)
+    if (current and (current.status or NOT_INITIATED) == NOT_INITIATED
+            and cstr(current.send_started_on)[:19] == cstr(marker)[:19]):
+        frappe.db.set_value(B2B_DOCTYPE, name, {"status": "Failed", "error_message": message[:1000]},
+                            update_modified=False)
 
 
 def _payload(doc) -> tuple:

@@ -1176,3 +1176,21 @@ Close, the sweep, balances, the report). Bench tests in
 `mpsa_suite/money_out/test_payment_schedule.py`, not yet run on the v15 and v16 benches. Not
 built: the write-off of balances under KES 1 (decision 5, optional); B2C phone lines, employees
 and payroll (Phase 3).
+
+**Review fixes (round 1)**
+- A schedule line is changed or removed only on its schedule. Saving or deleting a line by
+  itself (the REST API on the line, frappe.client.save) is refused, so the schedule's checks
+  always run. A row carrying the name of another schedule's line is refused too.
+- The confirm summary shows where each amount goes: one row per payee and paybill or till, with
+  the route and the supplier's ID, or "not saved on a supplier".
+- The Payments Due report clears its ticks whenever it redraws (after Pay Selected, Move Date,
+  Plan Again, a filter or Refresh Balances), so only lines ticked on screen are paid or moved.
+- A request whose send began and never recorded an answer may have been paid: only a manager
+  cancels it, and it is kept as Unknown; it cannot be deleted. A line whose request was
+  cancelled that way is planned again by a manager only.
+- The sending job takes the invoice's or order's lock first, as every other payment path does,
+  so two payments of one invoice no longer make the second fail with "being sent or booked". It
+  claims a request with a locking read, and a failed check never overwrites an answer or a
+  cancel committed meanwhile.
+- The sweep re-queues requests not yet started only when their batch's job is no longer queued
+  or running, and the job waits between payments only after one it actually sent.

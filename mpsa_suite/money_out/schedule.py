@@ -16,10 +16,13 @@ Rules on top of the B2B request's own (money_out.b2b):
 - confirm_payment submits the B2B requests but sends none: send_batch sends them one at a time
   from a job, each with a send_started_on marker committed before the call to M-Pesa (R1). The
   5-minute sweep makes a marked request still Not Initiated after 10 minutes Unknown (never sent
-  again); an unmarked one is sent again within the hour, then cancelled and its line planned again.
+  again); an unmarked one is sent again within the hour once its batch's job is gone, then
+  cancelled and its line planned again;
+- a line is changed or removed only through its schedule (its own save or delete is refused).
 
 Lock order: the document's lock, the schedule row, its line rows, then the payout rows and the
-document row (R4). A Result touches only its line; the schedule's totals follow in a job.
+document row (R4); send_deferred takes the document's lock before the request and line rows.
+A Result touches only its line; the schedule's totals follow in a job.
 """
 
 import contextlib
@@ -173,6 +176,8 @@ def validate_schedule(doc) -> None:
         old = stored.get(row.name)
         if old:
             kept.add(row.name)
+        elif row.name:
+            _check_not_elsewhere(doc, row)
         changed = not old or any(_norm(f, row.get(f)) != _norm(f, old.get(f)) for f in EDITABLE)
         if old and (old.status != PLANNED or old.request):
             if changed:
@@ -198,6 +203,14 @@ def validate_schedule(doc) -> None:
             frappe.throw(_left_planned(old, "deleted"))
     _check_planned_amounts(doc)
     doc.update(totals(doc.lines, doc.closed))
+
+
+def _check_not_elsewhere(doc, row) -> None:
+    """A row carrying the name of another schedule's line. Frappe updates rows by name only, so it
+    would move that line here and its record of a payment would be lost."""
+    parent = frappe.db.get_value(LINE, row.name, "parent")
+    if parent:
+        frappe.throw(f"Row {row.idx} is a line of {parent}: it cannot be moved to {doc.name}.")
 
 
 def _left_planned(old, what: str) -> str:
@@ -613,8 +626,11 @@ def prepare_payment(lines) -> dict:
                          "destination": cstr(line.destination), "modified": cstr(line.modified), "earlier": earlier})
     parties, routes = {}, {}
     for item in included:
-        key = (item["party_type"] or "", item["party"] or item["destination"])
-        p = parties.setdefault(key, {"payee": item["payee"], "party": item["party"], "lines": 0, "amount": 0.0})
+        # one row per payee and paybill or till, so the payer reads where each amount goes
+        key = (item["party_type"] or "", item["party"] or item["payee"], cstr(item["destination"]))
+        p = parties.setdefault(key, {"payee": item["payee"], "party_type": item["party_type"], "party": item["party"],
+                                     "route": item["route"], "destination": item["destination"], "lines": 0,
+                                     "amount": 0.0})
         p["lines"] += 1
         p["amount"] = flt(p["amount"] + item["amount"], 2)
         key = (item["pay_from"], item["route"])
@@ -636,7 +652,8 @@ def prepare_payment(lines) -> dict:
         "expires_in": TOKEN_SECONDS,
         "count": len(included),
         "total": total,
-        "parties": sorted(parties.values(), key=lambda p: (cstr(p["payee"]).lower(), p["amount"])),
+        "parties": sorted(parties.values(), key=lambda p: (cstr(p["payee"]).lower(), cstr(p["party"]),
+                                                            cstr(p["destination"]))),
         "routes": sorted(routes.values(), key=lambda r: (cstr(r["pay_from"]), cstr(r["route"]))),
         "balances": found_balances,
         "warnings": warnings,
@@ -716,8 +733,7 @@ def confirm_payment(token) -> dict:
     for schedule in sorted(touched):
         update_totals(schedule, bump=True)  # a schedule form opened before must be reloaded
     if sent:
-        frappe.enqueue(f"{__name__}.send_batch", queue="long", timeout=3600, enqueue_after_commit=True,
-                       requests=[s["request"] for s in sent], batch=batch)
+        _queue_send([s["request"] for s in sent], batch, enqueue_after_commit=True)
     return {"batch": batch, "sent": sent, "refused": refused,
             "total": flt(sum(s["amount"] for s in sent), 2)}
 
@@ -805,18 +821,28 @@ def _new_request(line, schedule, checked: bool):
     return doc
 
 
+def _queue_send(requests, batch, **kwargs) -> None:
+    """send_batch on the long queue, under one job id per batch: the sweep's deduplicate then
+    queues a batch again only once its job is no longer queued or running."""
+    frappe.enqueue(f"{__name__}.send_batch", queue="long", timeout=3600, job_id=f"mpesa_schedule_send_{batch}",
+                   requests=requests, batch=batch, **kwargs)
+
+
 def send_batch(requests, batch=None) -> None:
-    """The job confirm_payment queues: each request sent once, a few seconds apart, committed one
-    by one (b2b.send_deferred)."""
+    """The job confirm_payment queues (and the sweep, for requests still not started): each
+    request sent once, committed one by one (b2b.send_deferred). It waits the interval only after
+    a request that was posted, not after one already sent or cancelled."""
     from . import b2b
 
     interval = _interval()
-    for i, name in enumerate(requests or []):
-        if i and interval:
+    posted = False
+    for name in requests or []:
+        if posted and interval:
             time.sleep(interval)
         try:
-            b2b.send_deferred(name)
+            posted = bool(b2b.send_deferred(name))
         except Exception:
+            posted = True  # it may have been posted: keep the interval
             frappe.db.rollback()
             frappe.log_error(title="M-Pesa scheduled payment not sent",
                              message=f"{name} ({batch})\n{frappe.get_traceback()}",
@@ -842,7 +868,7 @@ def sync_line(request) -> None:
             return
         values = frappe.db.get_value(
             B2B, name, ["name", "docstatus", "status", "schedule_line", "transaction_id", "trans_completed_time",
-                        "entry_status", "error_message", "result_desc"], as_dict=True)
+                        "entry_status", "error_message", "result_desc", "send_started_on"], as_dict=True)
         if not values or not cstr(values.schedule_line).strip():
             return
         line = frappe.db.get_value(LINE, values.schedule_line, ["name", "parent", "request", *SYSTEM], as_dict=True)
@@ -882,7 +908,11 @@ def _mirror(values) -> dict:
         line_status = PAID
     elif cint(values.docstatus) == 2:
         line_status = FAILED
-        problem = f"{values.name} was cancelled ({status}). Plan it again if it was not paid."
+        if cancelled_mid_send(values):
+            problem = (f"{values.name} was cancelled after its send began, so M-Pesa may have paid it. A manager "
+                       "checks the statement, then plans it again.")
+        else:
+            problem = f"{values.name} was cancelled ({status}). Plan it again if it was not paid."
     elif status == "Initiated":
         line_status = SENT
     elif status == "Unknown":
@@ -898,6 +928,14 @@ def _mirror(values) -> dict:
     return {"status": line_status, "receipt": cstr(values.transaction_id).strip() or None,
             "paid_on": values.trans_completed_time if paid else None,
             "entry_status": values.entry_status if paid else None, "last_problem": problem}
+
+
+def cancelled_mid_send(request) -> bool:
+    """Cancelled while still Not Initiated after its send began (send_started_on): M-Pesa may have
+    paid it (R1). The request's before_cancel keeps such a cancel Unknown, so only a cancel that
+    went around it shows this."""
+    return (cint(request.get("docstatus")) == 2 and (request.get("status") or "Not Initiated") == "Not Initiated"
+            and bool(request.get("send_started_on")))
 
 
 # ---------------------------------------------------------------- staff actions on lines
@@ -950,7 +988,8 @@ def move_date(lines, date) -> dict:
 @frappe.whitelist(methods=["POST"])
 def plan_again(line, date=None) -> dict:
     """Plan a failed line again, to be paid with Pay Selected like a new one. An Unknown line may
-    have been paid: a manager checks the statement and cancels its request first."""
+    have been paid: a manager checks the statement and cancels its request first. A line whose
+    request was cancelled after its send began is planned again by a manager only."""
     require(FINANCE_ROLES)
     parent = frappe.db.get_value(LINE, line, "parent")
     if not parent:
@@ -966,9 +1005,15 @@ def plan_again(line, date=None) -> dict:
     if row.status != FAILED:
         frappe.throw(f"Only a failed line is planned again; row {row.idx} is {row.status}.")
     if row.request:
-        request = frappe.db.get_value(B2B, row.request, ["status", "docstatus"], as_dict=True, for_update=True)
+        request = frappe.db.get_value(B2B, row.request, ["status", "docstatus", "send_started_on"], as_dict=True,
+                                      for_update=True)
         if request and (request.status == "Paid" or (cint(request.docstatus) == 1 and request.status != "Failed")):
             frappe.throw(f"{row.request} is {request.status}: row {row.idx} is not planned again.")
+        user = frappe.session.user
+        if (request and cancelled_mid_send(request) and user != "Administrator"
+                and not set(ADMIN_ROLES) & set(frappe.get_roles(user))):
+            frappe.throw(f"M-Pesa may have paid row {row.idx}: {row.request} was cancelled after its send began. A "
+                         "manager checks the statement, then plans it again.")
     values = {"status": PLANNED, "request": None, "receipt": None, "paid_on": None, "entry_status": None,
               "approved_by": None, "approved_on": None, "batch": None, "last_problem": None,
               "changed_by": frappe.session.user}
@@ -1018,17 +1063,19 @@ def sweep(limit: int = 200) -> None:
     for name in frappe.get_all(B2B, filters={"docstatus": 1, "status": "Not Initiated", "send_started_on": [
             "<", add_to_date(now, minutes=-INTERRUPTED_MINUTES)]}, pluck="name", order_by="creation asc", limit=limit):
         _each(name, _interrupted)
-    resend = []
+    resend = {}
     for row in frappe.get_all(B2B, filters={"docstatus": 1, "status": "Not Initiated",
                                             "send_started_on": ["is", "not set"], "schedule_line": ["is", "set"],
                                             "creation": ["<", add_to_date(now, minutes=-RESEND_AFTER_MINUTES)]},
-                              fields=["name", "creation"], order_by="creation asc", limit=limit):
+                              fields=["name", "creation", "schedule_line"], order_by="creation asc", limit=limit):
         if get_datetime(row.creation) >= add_to_date(now, minutes=-RESEND_WITHIN_MINUTES):
-            resend.append(row.name)
+            resend.setdefault(_batch_of(row), []).append(row.name)
         else:
             _each(row.name, _give_up)
-    if resend:
-        frappe.enqueue(f"{__name__}.send_batch", queue="long", timeout=3600, requests=resend, batch="sweep")
+    for batch, names in sorted(resend.items()):
+        # not while the batch's own job (confirm's, or an earlier sweep's) is queued or running:
+        # a large batch takes longer than 5 minutes
+        _queue_send(names, batch, deduplicate=True)
     for (request,) in frappe.db.sql(
         f"""
         SELECT request FROM `tab{LINE}`
@@ -1038,6 +1085,12 @@ def sweep(limit: int = 200) -> None:
         {"parenttype": SCHEDULE, "states": IN_PROGRESS},
     ):
         _each(request, sync_line)
+
+
+def _batch_of(request) -> str:
+    """The Pay Selected batch a request was confirmed in (its line's), else the request itself."""
+    line = frappe.db.get_value(LINE, request.schedule_line, ["request", "batch"], as_dict=True)
+    return line.batch if line and line.request == request.name and line.batch else request.name
 
 
 def _each(name, fn) -> None:

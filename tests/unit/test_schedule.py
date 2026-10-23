@@ -14,6 +14,7 @@ sweep; the approximate balance.
 import datetime
 import importlib
 import itertools
+import types
 
 import pytest
 
@@ -62,6 +63,7 @@ def _b2b_doc_class(env, controller):
         def __init__(self, row):
             fake_frappe.FakeDoc.__init__(self, env.frappe, B2B, row)
             object.__setattr__(self, "flags", fake_frappe._dict())
+            object.__setattr__(self, "meta", types.SimpleNamespace(has_field=lambda field: True))
 
         def update(self, values):
             self._row.update(values)
@@ -181,7 +183,8 @@ def run_jobs(env, method_end: str):
     env.frappe.enqueued[:] = [j for j in env.frappe.enqueued if not j[0].endswith(method_end)]
     module = importlib.import_module(jobs[0][0].rsplit(".", 1)[0]) if jobs else None
     for method, kw in jobs:
-        kw = {k: v for k, v in kw.items() if k not in ("queue", "timeout", "enqueue_after_commit")}
+        kw = {k: v for k, v in kw.items()
+              if k not in ("queue", "timeout", "enqueue_after_commit", "job_id", "deduplicate")}
         getattr(module, method.rsplit(".", 1)[1])(**kw)
     return jobs
 
@@ -372,6 +375,30 @@ def test_a_line_sent_to_mpesa_cannot_be_changed_or_deleted(env, status):
     doc = form(env, [dict(line_of(env), status="Planned", request=None, receipt="QFORGED")])
     env.schedule.validate_schedule(doc)  # unchanged: saved, with the server's fields as they are
     assert (doc.lines[0].status, doc.lines[0].request, doc.lines[0].receipt) == (status, "MB2B-1", None)
+
+
+def test_a_line_cannot_be_saved_or_deleted_on_its_own(env):
+    # the REST API and frappe.client.save save or delete a row by itself, skipping validate_schedule;
+    # Frappe calls the row's own hooks only then, never when the schedule is saved or deleted
+    module = importlib.import_module(
+        "mpsa_suite.mpsa_suite.doctype.m_pesa_payment_schedule_line.m_pesa_payment_schedule_line")
+    row = module.MPesaPaymentScheduleLine()
+    for hook in (row.validate, row.on_trash):
+        with pytest.raises(env.frappe.ValidationError, match="Change payment schedule lines on their schedule."):
+            hook()
+
+
+def test_a_line_of_another_schedule_cannot_be_moved_in(env):
+    # Frappe updates rows by name only: saved here, the other schedule's paid line would move and be reset
+    env.pi()
+    schedule_row(env, "MPS-OTHER")
+    line_row(env, "L9", parent="MPS-OTHER", status="Paid", request="MB2B-9", receipt="QPAID1")
+    moved = {k: v for k, v in line_of(env, "L9").items() if k not in ("idx", "parent")}
+    with pytest.raises(env.frappe.ValidationError, match="Row 1 is a line of MPS-OTHER: it cannot be moved to MPS-1."):
+        env.schedule.validate_schedule(form(env, [moved]))
+    line = line_of(env, "L9")
+    assert (line["parent"], line["status"], line["request"], line["receipt"]) == ("MPS-OTHER", "Paid", "MB2B-9",
+                                                                                  "QPAID1")
 
 
 def test_a_document_cannot_get_more_planned_than_it_has_left(env):
@@ -573,14 +600,33 @@ def test_the_summary_groups_by_payee_and_shortcode_and_lists_what_is_left_out(en
     result = env.schedule.prepare_payment(["L1", "L2", "L3", "L4", "L5"])
     assert (result["count"], result["total"], result["delay"]) == (3, 6500, 5)
     assert result["parties"] == [
-        {"payee": "Acme Fuel Ltd", "party": "ACME", "lines": 2, "amount": 5000},
-        {"payee": "Beta Gas", "party": "BETA", "lines": 1, "amount": 1500},
+        {"payee": "Acme Fuel Ltd", "party_type": "Supplier", "party": "ACME", "route": "B2B Paybill",
+         "destination": "888880 / ACME-1", "lines": 2, "amount": 5000},
+        {"payee": "Beta Gas", "party_type": "Supplier", "party": "BETA", "route": "B2B Till", "destination": "555555",
+         "lines": 1, "amount": 1500},
     ]
     assert [(r["route"], r["lines"], r["amount"], r["shortcode"]) for r in result["routes"]] == [
         ("B2B Paybill", 2, 5000, "600999"), ("B2B Till", 1, 1500, "600999")]
     assert [(n["line"], n["reason"].split(".")[0]) for n in result["not_included"]] == [
         ("L4", "KES 900 is more than is left to pay"), ("L5", "Not due until 20 Oct 2026")]
     assert "No Working balance is known for Astral 600999: press Refresh Balances." in result["warnings"]
+
+
+def test_the_summary_shows_where_each_amount_goes(env):
+    # two numbers not saved on a supplier with the same payee name: one row each, with its paybill
+    env.frappe.db.table("M-Pesa Suite Settings")["M-Pesa Suite Settings"]["allow_one_off_b2b"] = 1
+    env.frappe.session.user, env.frappe.user_roles = OTHER, {"M-Pesa Manager"}
+    schedule_row(env)
+    one_off = {"party": None, "party_type": None, "payee_name": "KPLC", "payee_account": None,
+               "payee_account_doctype": None, "one_off_type": "Paybill", "reference_doctype": None,
+               "reference_name": None, "entry_mode": "Make the entry later"}
+    line_row(env, "L1", one_off_shortcode="888888", one_off_account="ACC-9", destination="888888 / ACC-9", amount=700,
+             **one_off)
+    line_row(env, "L2", one_off_shortcode="777777", one_off_account="ACC-9", destination="777777 / ACC-9", amount=300,
+             **one_off)
+    result = env.schedule.prepare_payment(["L1", "L2"])
+    assert [(p["payee"], p["party"], p["destination"], p["amount"]) for p in result["parties"]] == [
+        ("KPLC", None, "777777 / ACC-9", 300), ("KPLC", None, "888888 / ACC-9", 700)]
 
 
 def test_the_summary_warns_when_the_balance_is_short(env):
@@ -631,6 +677,7 @@ def test_confirm_submits_the_requests_and_sends_them_from_a_job_after_commit(env
     assert env.frappe.db.table(SCHEDULE)["MPS-1"]["total_in_progress"] == 3000
     (job,) = [j for j in env.frappe.enqueued if j[0].endswith("schedule.send_batch")]
     assert job[1]["enqueue_after_commit"] and job[1]["queue"] == "long" and job[1]["requests"] == [sent["request"]]
+    assert job[1]["job_id"] == f"mpesa_schedule_send_{answer['batch']}"  # the sweep sees it is still alive
     # the request's own checks ran again at submit under the invoice's lock, its own line not counted
     assert "b2c-pay:Purchase Invoice:PINV-1" in env.locks
 
@@ -653,11 +700,73 @@ def test_send_deferred_commits_its_marker_before_the_call(env):
     assert len(env.posted) == 1
 
 
+def test_send_deferred_takes_the_documents_lock_before_the_rows(env):
+    # R4, as confirm and the booking job do: they hold the document's lock, then lock its payouts
+    env.pi()
+    schedule_row(env)
+    line_row(env)
+    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    name = line_of(env)["request"]
+    env.locks.clear()  # a new worker holds none
+    env.log.clear()
+    assert env.b2b.send_deferred(name) is True
+    after = env.log[env.log.index(("commit",)) + 1:]  # after the marker's commit
+    doc_lock = after.index(("lock", "b2c-pay:Purchase Invoice:PINV-1"))
+    assert doc_lock < after.index(("row", B2B, name, True)) < after.index(("row", LINE, "L1", True))
+    assert after.index(("row", LINE, "L1", True)) < after.index(("post", name))
+
+
+def test_send_deferred_claims_with_a_locking_read(env, monkeypatch):
+    # another worker committed its marker after this job's snapshot: a plain read would miss it (R1)
+    env.pi()
+    schedule_row(env)
+    line_row(env)
+    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    name = line_of(env)["request"]
+    row = env.frappe.db.table(B2B)[name]
+    stale = dict(row)
+    row["send_started_on"] = NOW
+    plain_get_doc = env.frappe.get_doc
+    monkeypatch.setattr(env.frappe, "get_doc", lambda doctype, docname=None, **kw: (
+        env.B2BDoc(dict(stale)) if doctype == B2B and not kw.get("for_update") else plain_get_doc(doctype, docname,
+                                                                                                    **kw)))
+    assert env.b2b.send_deferred(name) is False
+    assert env.posted == [] and (row["status"], row["send_started_on"]) == ("Not Initiated", NOW)
+
+
+def test_a_failed_check_keeps_what_was_committed_meanwhile(env, monkeypatch):
+    # a manager's cancel took the row between the marker's commit and the lock: it stays Unknown
+    env.pi()
+    schedule_row(env)
+    line_row(env)
+    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    name = line_of(env)["request"]
+    real = env.b2b.lock_for_send
+
+    def cancelled_first(doctype, docname):
+        env.frappe.db.table(B2B)[docname].update(docstatus=2, status="Unknown")
+        return real(doctype, docname)
+
+    monkeypatch.setattr(env.b2b, "lock_for_send", cancelled_first)
+    assert env.b2b.send_deferred(name) is False
+    row = env.frappe.db.table(B2B)[name]
+    assert (row["docstatus"], row["status"]) == (2, "Unknown") and env.posted == []
+
+
 def test_send_batch_waits_between_payments(env, monkeypatch):
     calls = []
-    monkeypatch.setattr(env.b2b, "send_deferred", lambda name: calls.append(name))
+    monkeypatch.setattr(env.b2b, "send_deferred", lambda name: calls.append(name) or True)
     env.schedule.send_batch(["A", "B", "C"])
     assert calls == ["A", "B", "C"] and [e for e in env.log if e[0] == "sleep"] == [("sleep", 2), ("sleep", 2)]
+
+
+def test_send_batch_waits_only_after_a_payment_was_posted(env, monkeypatch):
+    # already sent or cancelled ones (a batch the sweep queued again) take no time
+    posted = {"A": False, "B": False, "C": True, "D": True}
+    calls = []
+    monkeypatch.setattr(env.b2b, "send_deferred", lambda name: calls.append(name) or posted[name])
+    env.schedule.send_batch(["A", "B", "C", "D"])
+    assert calls == ["A", "B", "C", "D"] and [e for e in env.log if e[0] == "sleep"] == [("sleep", 2)]
 
 
 def test_a_send_that_fails_its_checks_is_failed_and_can_be_planned_again(env):
@@ -800,16 +909,54 @@ def test_a_request_never_started_is_sent_again_within_the_hour_then_planned_agai
     line_row(env, "L1", status="Sending", request="MB2B-1")
     line_row(env, "L2", status="Sending", request="MB2B-2")
     line_row(env, "L3", status="Sending", request="MB2B-3")
+    line_of(env, "L2")["batch"] = "B-7"
     for name, line, minutes in (("MB2B-1", "L1", 2), ("MB2B-2", "L2", 20), ("MB2B-3", "L3", 61)):
         env.request(name, status="Not Initiated", transaction_id=None, schedule_line=line, payment_schedule="MPS-1",
                     send_started_on=None, creation=NOW - datetime.timedelta(minutes=minutes))
     env.schedule.sweep()
     (job,) = [j for j in env.frappe.enqueued if j[0].endswith("schedule.send_batch")]
     assert job[1]["requests"] == ["MB2B-2"]  # the 2-minute one may still be in the queue
+    # under its batch's job id, and not while that job (confirm's or an earlier sweep's) is alive
+    assert (job[1]["job_id"], job[1]["deduplicate"], job[1]["batch"]) == ("mpesa_schedule_send_B-7", True, "B-7")
     assert env.frappe.db.table(B2B)["MB2B-3"]["docstatus"] == 2  # it never reached M-Pesa
     assert (line_of(env, "L3")["status"], line_of(env, "L3")["request"]) == ("Planned", None)
     assert "was not sent within an hour" in line_of(env, "L3")["last_problem"]
     assert env.frappe.db.table(B2B)["MB2B-1"]["docstatus"] == 1 and env.posted == []
+
+
+def test_a_request_whose_send_began_is_cancelled_by_a_manager_only_and_stays_unknown(env):
+    # its worker died after the marker, or the call is still out: M-Pesa may have paid it (R1)
+    env.pi()
+    schedule_row(env)
+    line_row(env)
+    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    name = line_of(env)["request"]
+    row = env.frappe.db.table(B2B)[name]
+    row["send_started_on"] = NOW - datetime.timedelta(minutes=2)
+    with pytest.raises(env.frappe.PermissionError):
+        env.frappe.get_doc(B2B, name).cancel()  # the payer: M-Pesa Payer may cancel requests
+    assert row["docstatus"] == 1
+    env.frappe.session.user, env.frappe.user_roles = OTHER, {"M-Pesa Manager"}
+    env.frappe.get_doc(B2B, name).cancel()  # after checking the statement
+    assert (row["docstatus"], row["status"], row["error_message"]) == (2, "Unknown", env.schedule.INTERRUPTED)
+
+
+def test_a_line_whose_request_was_cancelled_mid_send_is_planned_again_by_a_manager_only(env):
+    # a cancel that went around before_cancel (it keeps such a request Unknown)
+    schedule_row(env)
+    line_row(env, status="Sending", request="MB2B-1")
+    env.request("MB2B-1", docstatus=2, status="Not Initiated", transaction_id=None, schedule_line="L1",
+                payment_schedule="MPS-1", send_started_on=NOW - datetime.timedelta(minutes=2))
+    env.schedule.sync_line("MB2B-1")
+    line = line_of(env)
+    assert line["status"] == "Failed" and "after its send began, so M-Pesa may have paid it" in line["last_problem"]
+    env.frappe.session.user, env.frappe.user_roles = ACCOUNTS, {"Accounts User"}
+    with pytest.raises(env.frappe.ValidationError,
+                       match="M-Pesa may have paid row 1: MB2B-1 was cancelled after its send began"):
+        env.schedule.plan_again("L1")
+    env.frappe.session.user, env.frappe.user_roles = OTHER, {"Accounts Manager"}
+    env.schedule.plan_again("L1")
+    assert (line_of(env)["status"], line_of(env)["request"]) == ("Planned", None)
 
 
 # ---------------------------------------------------------------- approximate balance

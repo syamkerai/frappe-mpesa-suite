@@ -62,9 +62,10 @@ def initiator_settings(settings_name: str):
 
 
 def lock_for_send(doctype: str, name: str):
-    """Row-lock and reload; only a submitted, unsent document may be sent."""
+    """Row-lock and reload; only a submitted, unsent document may be sent. The reload is a locking
+    read too, so a cancel or an answer committed after this transaction's snapshot is seen."""
     frappe.db.get_value(doctype, name, "name", for_update=True)
-    doc = frappe.get_doc(doctype, name)
+    doc = frappe.get_doc(doctype, name, for_update=True)
     if doc.docstatus != 1:
         frappe.throw(f"{doctype} {name} must be submitted before it is sent")
     if doc.status not in (NOT_INITIATED, "", None):
