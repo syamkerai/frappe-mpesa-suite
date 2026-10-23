@@ -81,6 +81,7 @@ class B2CDisbursementRequest(Document):
         A Paid payout that a row of this disbursement links (a row an amend copied from the
         cancelled original, which is not sent again) is this disbursement's own.
         """
+        from ....money_out.owed import DOC_FIELDS, b2b_open
         from ..b2c_payment_disbursement.b2c_payment_disbursement import (
             current_outstanding,
             open_payouts,
@@ -98,6 +99,10 @@ class B2CDisbursementRequest(Document):
                 paid = paid_without_entry(dt, dn)
                 elsewhere |= {o.parent for o in paid if mine not in (o.parents or [o.parent])}
                 others += paid
+            if dt in DOC_FIELDS:  # B2B requests for the invoice or order (same lock, locking read)
+                b2b = b2b_open(dt, dn, for_update=True)
+                elsewhere |= {o.parent for o in b2b}
+                others += b2b
             elsewhere = sorted(elsewhere)
             if elsewhere:
                 frappe.throw(

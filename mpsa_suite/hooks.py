@@ -64,6 +64,8 @@ doctype_js = {
     "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
     "Integration Request": "public/js/c2b_verification.js",
     "Supplier": "public/js/supplier.js",
+    "Purchase Invoice": "public/js/purchase_invoice.js",
+    "Purchase Order": "public/js/purchase_order.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -185,9 +187,14 @@ doc_events = {
     "Payment Entry": {
         "before_insert": "mpsa_suite.money_in.payment_entry.before_insert",
         "before_validate": "mpsa_suite.money_in.payment_entry.before_validate",
+        # an entry a B2B request links can still be cancelled, or deleted as a draft
+        "on_cancel": "mpsa_suite.money_out.b2b_entries.allow_cancel",
+        "on_trash": "mpsa_suite.money_out.b2b_entries.unlink_deleted",
     },
     "Journal Entry": {
         "before_insert": "mpsa_suite.money_in.payment_entry.journal_before_insert",
+        "on_cancel": "mpsa_suite.money_out.b2b_entries.allow_cancel",
+        "on_trash": "mpsa_suite.money_out.b2b_entries.unlink_deleted",
     },
     "Payment Request": {
         "before_validate": "mpsa_suite.money_in.payment_request.before_validate",
@@ -204,6 +211,7 @@ scheduler_events = {
             "mpsa_suite.services.b2c_scheduler_service.update_b2c_disbursement_statuses",
             "mpsa_suite.services.b2c_postprocess_service.retry_unbooked_payouts",
             "mpsa_suite.services.b2c_scheduler_service.check_unsettled_payouts",
+            "mpsa_suite.money_out.b2b_entries.refresh_entries",
         ],
         "*/2 * * * *": ["mpsa_suite.money_in.events.every_two_minutes"],
         "*/5 * * * *": [
@@ -239,7 +247,9 @@ scheduler_events = {
 # 	"Task": "mpsa_suite.task.get_dashboard_data"
 # }
 override_doctype_dashboards = {
-    "Supplier": "mpsa_suite.money_out.supplier_dashboard.get_data"
+    "Supplier": "mpsa_suite.money_out.supplier_dashboard.get_data",
+    "Purchase Invoice": "mpsa_suite.money_out.document_dashboards.get_data",
+    "Purchase Order": "mpsa_suite.money_out.document_dashboards.get_data",
 }
 
 # exempt linked doctypes from being automatically cancelled

@@ -22,8 +22,18 @@
   "supplier_mpesa_account",
   "column_break_b",
   "purchase_invoice",
-  "payment_entry",
+  "purchase_order",
+  "checked_earlier_payouts",
+  "entry_mode",
   "amended_from",
+  "accounting_entry_section",
+  "entry_status",
+  "entry_note",
+  "column_break_entry",
+  "payment_entry",
+  "journal_entry",
+  "entry_attempted_on",
+  "entry_alerted_on",
   "response_section",
   "conversation_id",
   "originator_conversation_id",
@@ -325,10 +335,91 @@
    "read_only": 1,
    "allow_on_submit": 1,
    "no_copy": 1
+  },
+  {
+   "fieldname": "purchase_order",
+   "fieldtype": "Link",
+   "label": "Purchase Order",
+   "options": "Purchase Order",
+   "search_index": 1,
+   "depends_on": "eval:!doc.purchase_invoice",
+   "description": "Optional. Paid as an advance on the order; the invoice made from it picks it up under Get Advances."
+  },
+  {
+   "fieldname": "checked_earlier_payouts",
+   "fieldtype": "Check",
+   "label": "I checked the earlier M-Pesa payments listed above: none of them paid this invoice",
+   "default": "0",
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "entry_mode",
+   "fieldtype": "Select",
+   "label": "When Paid",
+   "options": "Book automatically\nMake the entry later",
+   "default": "Book automatically",
+   "description": "Book automatically: the Payment Entry is made when M-Pesa confirms (an advance to the supplier if no invoice or order is linked). Make the entry later: nothing is booked; press Make Entry when you know what it paid for."
+  },
+  {
+   "fieldname": "accounting_entry_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting Entry",
+   "depends_on": "eval:doc.status==\"Paid\""
+  },
+  {
+   "fieldname": "entry_status",
+   "fieldtype": "Select",
+   "label": "Accounting Entry",
+   "options": "\nEntry Not Made\nDraft Entry\nNeeds Checking\nEntry Made",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "entry_note",
+   "fieldtype": "Small Text",
+   "label": "Entry Note",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_entry",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Link",
+   "label": "Journal Entry",
+   "options": "Journal Entry",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "entry_attempted_on",
+   "fieldtype": "Datetime",
+   "label": "Entry Attempted On",
+   "hidden": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "entry_alerted_on",
+   "fieldtype": "Datetime",
+   "label": "Entry Alerted On",
+   "hidden": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
   }
  ],
  "links": [],
- "modified": "2026-10-19 12:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2B Payment Request",

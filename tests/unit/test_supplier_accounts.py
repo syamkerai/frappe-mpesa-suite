@@ -207,6 +207,20 @@ def test_tampered_destination_blocks_send(env):
         env.sa.check_before_send(doc)
 
 
+def test_send_without_an_account_is_refused_unless_one_offs_are_on(env):
+    # a one-off destination an admin saved: a Payer may not send it, nor anyone with the switch off (R7)
+    doc = request(env, docstatus=1)
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    with pytest.raises(env.frappe.ValidationError, match="Pick the supplier's approved M-Pesa account"):
+        env.sa.check_before_send(doc)
+    env.frappe.db.table(SUITE)[SUITE]["allow_one_off_b2b"] = 1
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with pytest.raises(env.frappe.PermissionError):
+        env.sa.check_before_send(doc)
+    env.frappe.user_roles = {"Accounts Manager"}
+    env.sa.check_before_send(doc)  # switch on and a manager: sent as typed
+
+
 # ---------------------------------------------------------------- after payment
 @pytest.mark.parametrize(
     "expected, received, ok",

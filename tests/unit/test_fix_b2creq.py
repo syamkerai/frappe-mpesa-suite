@@ -523,7 +523,12 @@ def retry(monkeypatch):
                     frappe.row_locks_before.append(list(frappe.db.locks))
                 yield
 
-            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], owed=50000)
+            env = fake_frappe._dict(frappe=frappe, sends=sends, others=[], stale=[], b2b=[], owed=50000)
+            owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
+
+            def b2b_open(doctype, name, exclude=None, for_update=False):
+                frappe.calls.append(("b2b_open", doctype, name, for_update, list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.b2b]
 
             def open_payouts(doctype, name, exclude_parent=None, exclude_requests=None):
                 frappe.calls.append(("open_payouts", doctype, name, exclude_parent, exclude_requests,
@@ -543,6 +548,7 @@ def retry(monkeypatch):
             monkeypatch.setattr(disb, "open_payouts", open_payouts)
             monkeypatch.setattr(disb, "current_outstanding", current_outstanding)
             monkeypatch.setattr(mod, "paid_without_entry", paid_without_entry)
+            monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
             env.use_real_outstanding = lambda: monkeypatch.setattr(
                 disb, "current_outstanding", real_current_outstanding
             )
@@ -619,6 +625,13 @@ def test_retry_refused_while_another_disbursement_awaits_accounting(retry):
     _refused(retry, request, "D-2")
 
 
+def test_retry_refused_while_a_b2b_request_pays_the_document(retry):
+    # an Initiated M-Pesa B2B request for the same invoice (B2C's guard sees B2B, R3)
+    request = retry.failed()
+    retry.b2b = [{"parent": "MB2B-26-10-000001", "allocated_amount": 50000, "request_status": "Initiated"}]
+    _refused(retry, request, "awaiting accounting: MB2B-26-10-000001")
+
+
 def test_retry_refused_by_an_old_paid_payout_nothing_booked(retry):
     # D-2's payout is older than the accounting retry window, so open_payouts no longer lists
     # it, but no entry books it and the invoice still shows the full amount owed
@@ -649,6 +662,7 @@ def test_retry_sends_when_the_document_still_owes_it(retry):
     assert retry.frappe.calls == [
         ("open_payouts", "Purchase Invoice", "PI-1", None, None, [key]),
         ("paid_without_entry", "Purchase Invoice", "PI-1", [key]),
+        ("b2b_open", "Purchase Invoice", "PI-1", True, [key]),  # B2B counts too, under the same lock
         ("current_outstanding", "Purchase Invoice", "PI-1", True, [key]),
     ]
     # the document lock before the request's row lock, in the order a disbursement submit takes them

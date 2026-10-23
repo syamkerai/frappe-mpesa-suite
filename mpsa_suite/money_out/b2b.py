@@ -3,27 +3,34 @@
 Same safety rules as B2C payouts: sent only from a submitted document under a row lock,
 whole shillings, the ack sets ``Initiated`` (never ``Paid``), only the Result sets
 Paid/Failed, a re-sent Result is ignored, and the queue timeout has its own URL.
+
+A request may pay a Purchase Invoice, a Purchase Order (an advance its invoice picks up under
+Get Advances) or neither. Every check runs on save, again at submit under the document's lock
+and again right before sending: the approved destination, the shortcode, the supplier's hold,
+the document, and what is left to pay with B2B, B2C, draft entries and order advances counted
+(money_out.owed). The entry is booked when M-Pesa confirms, or later (money_out.b2b_entries).
 """
 
 import frappe
-from frappe.utils import flt, getdate, nowdate
+from frappe.utils import cint, cstr, flt
 
 from ..daraja import apis
 from ..daraja import money_out as daraja
+from ..permissions import PAYOUT_ROLES, require
 from ..utils.phone import normalize_msisdn
-from . import supplier_accounts
+from . import owed, supplier_accounts
 from .common import apply_ack, callback_url, initiator_settings, lock_for_send, log_callback, post
 from .results import find_request
 
 B2B_DOCTYPE = "Mpesa B2B Payment Request"
 FINAL = ("Paid", "Failed")
-# Requests that still count against the invoice's outstanding amount.
-LIVE = ("Not Initiated", "Initiated", "Unknown", "Paid")
+# When Paid: book the Payment Entry at once, or wait for Make Entry (b2b_entries).
+AUTO, LATER = "Book automatically", "Make the entry later"
 
 
 def send_b2b(name: str) -> None:
     doc = lock_for_send(B2B_DOCTYPE, name)
-    supplier_accounts.check_before_send(doc)
+    check_ready_to_send(doc)
     settings = initiator_settings(doc.mpesa_settings)
     apis.require(settings, apis.B2B)
     payload = daraja.b2b_payload(
@@ -58,8 +65,10 @@ def handle_result(result: dict, ref: str | None) -> None:
 
     values = daraja.result_values(result)
     outcome = daraja.b2b_outcome(result)
+    entry = {"entry_status": "Entry Not Made", "entry_note": "Booking the entry…"} if outcome == "Paid" else {}
     doc.db_set(
         {
+            **entry,
             "status": outcome,
             "result_code": daraja.result_code(result),
             "result_desc": result.get("ResultDesc"),
@@ -84,7 +93,8 @@ def handle_result(result: dict, ref: str | None) -> None:
         try:
             supplier_accounts.record_receiver_name(doc, values.get("ReceiverPartyPublicName"))
         except Exception:
-            frappe.log_error(frappe.get_traceback(), f"M-Pesa B2B {doc.name}: receiver name check failed")
+            frappe.log_error(title="M-Pesa B2B receiver name check failed",
+                             message=f"{doc.name}\n{frappe.get_traceback()}")
         frappe.enqueue(
             "mpsa_suite.money_out.b2b.book_payment_entry",
             queue="short",
@@ -102,10 +112,46 @@ def handle_queue_timeout(payload: dict, ref: str | None) -> None:
 
 
 # ---------------------------------------------------------------- validation
-def validate_request(doc) -> None:
-    if doc.purchase_invoice and not doc.supplier:
-        doc.supplier = frappe.db.get_value("Purchase Invoice", doc.purchase_invoice, "supplier")
+def validate_request(doc, at_submit: bool = False) -> None:
+    """Every check a request must pass: on save, again at submit (under the document's lock) and,
+    through check_ready_to_send, again right before the money leaves."""
+    dt, dn = owed.linked_document(doc)
+    if dt:
+        _take_from_document(doc, dt, dn)
     supplier_accounts.apply_destination(doc)
+    _check_fields(doc)
+    _check_settings(doc, fill=True)
+    if not doc.supplier:
+        doc.entry_mode = LATER  # nothing to book it on until someone says what it paid for
+    elif not doc.get("entry_mode"):
+        doc.entry_mode = AUTO
+    hold = owed.supplier_hold(doc.supplier)
+    if hold:
+        frappe.throw(hold)
+    if dt:
+        if at_submit:
+            with owed.doc_lock(dt, dn):
+                _check_document(doc, dt, dn, for_update=True)
+        else:
+            _check_document(doc, dt, dn)
+    if dt == "Purchase Invoice":
+        _check_earlier_payouts(doc, at_submit)
+
+
+def _take_from_document(doc, dt: str, dn: str) -> None:
+    """Supplier and company come from the invoice or order; typed ones must agree."""
+    values = owed.read_document(dt, dn)
+    if not values:
+        frappe.throw(f"{dt} {dn} not found")
+    if doc.supplier and doc.supplier != values.supplier:
+        frappe.throw(f"{dn} belongs to {values.supplier}, not {doc.supplier}.")
+    if doc.company and values.company and doc.company != values.company:
+        frappe.throw(f"{dn} belongs to {values.company}, not {doc.company}.")
+    doc.supplier = values.supplier
+    doc.company = doc.company or values.company
+
+
+def _check_fields(doc) -> None:
     try:
         daraja.whole_shillings(doc.amount)
     except ValueError as e:
@@ -125,153 +171,147 @@ def validate_request(doc) -> None:
             frappe.throw(f"Invalid requester phone number {doc.requester!r}")
         doc.requester = msisdn
 
-    settings = doc.mpesa_settings and frappe.db.get_value(
-        "Mpesa Settings",
-        doc.mpesa_settings,
-        ["name", "business_shortcode", "till_number", "sandbox", "transaction_limit", *apis.ALL],
-        as_dict=True,
-    )
-    if settings:
-        apis.require(settings, apis.B2B)
-    if settings and doc.receiver_shortcode in {
-        str(settings.business_shortcode or "").strip(),
-        apis.initiator_party_a(settings),
-    }:
-        frappe.throw("Receiver is this business's own shortcode")
-    if settings and flt(settings.transaction_limit) and flt(doc.amount) > flt(settings.transaction_limit):
-        frappe.throw(f"Amount is above this shortcode's transaction limit of {settings.transaction_limit}")
 
-    if doc.purchase_invoice:
-        validate_against_invoice(doc)
+def _check_settings(doc, fill: bool = True) -> None:
+    """The shortcode may send B2B, is not paying itself, is within its limit and pays for the
+    request's company. ``fill``: take the company from Mpesa Settings when the request has none."""
+    if not doc.mpesa_settings:
+        return  # a mandatory field: the form asks for it, and sending refuses without it
+    fields = ["name", "business_shortcode", "till_number", "sandbox", "transaction_limit", *apis.ALL]
+    if frappe.get_meta("Mpesa Settings").has_field("company"):
+        fields.append("company")
+    settings = frappe.db.get_value("Mpesa Settings", doc.mpesa_settings, fields, as_dict=True)
+    if not settings:
+        frappe.throw(f"Mpesa Settings {doc.mpesa_settings} not found")
+    apis.require(settings, apis.B2B)
+    if doc.receiver_shortcode in {str(settings.business_shortcode or "").strip(), apis.initiator_party_a(settings)}:
+        frappe.throw("Receiver is this business's own shortcode")
+    if flt(settings.transaction_limit) and flt(doc.amount) > flt(settings.transaction_limit):
+        frappe.throw(f"Amount is above this shortcode's transaction limit of {settings.transaction_limit}")
+    company = settings.get("company")
+    if company:
+        if not doc.company and fill:
+            doc.company = company
+        elif doc.company != company:
+            frappe.throw(f"Mpesa Settings {doc.mpesa_settings} pays for {company}, not {doc.company or 'no company'}.")
+
+
+def _check_document(doc, dt: str, dn: str, for_update: bool = False) -> None:
+    """The document can be paid and still needs at least this amount. ``for_update``: under the
+    document's lock, payouts first and the document row last (R3, R4)."""
+    result = owed.left_to_pay(dt, dn, exclude_request=doc.name, for_update=for_update)
+    values = owed.read_document(dt, dn, for_update=for_update)
+    problems = owed.document_problems(dt, values)
+    if problems:
+        frappe.throw(problems[0])
+    if doc.supplier and values.supplier != doc.supplier:
+        frappe.throw(f"{dn} belongs to {values.supplier}, not {doc.supplier}.")
+    if flt(doc.amount) > result.left + 0.001:
+        frappe.throw(f"KES {owed.money(doc.amount)} is more than is left to pay. {owed.explain(dn, result)}")
 
 
 def validate_against_invoice(doc) -> None:
-    pi = frappe.db.get_value(
-        "Purchase Invoice",
-        doc.purchase_invoice,
-        ["docstatus", "supplier", "company", "outstanding_amount", "currency"],
-        as_dict=True,
-    )
-    if not pi or pi.docstatus != 1:
-        frappe.throw(f"Purchase Invoice {doc.purchase_invoice} must be submitted")
-    if pi.currency and pi.currency != "KES":
-        frappe.throw(f"Purchase Invoice {doc.purchase_invoice} is in {pi.currency}; M-Pesa pays KES only")
-    if doc.supplier and doc.supplier != pi.supplier:
-        frappe.throw(f"Purchase Invoice {doc.purchase_invoice} belongs to {pi.supplier}, not {doc.supplier}")
-    doc.supplier = pi.supplier
-    doc.company = doc.company or pi.company
+    """Kept for callers of the old name: the document check above."""
+    dt, dn = owed.linked_document(doc)
+    if dt:
+        _check_document(doc, dt, dn)
 
-    # Other requests not yet booked still count against the outstanding amount, so two
-    # requests (or a request and a manual payment) cannot pay the same invoice twice.
-    pending = frappe.get_all(
-        B2B_DOCTYPE,
-        filters={
-            "purchase_invoice": doc.purchase_invoice,
-            "name": ["!=", doc.name or ""],
-            "docstatus": ["<", 2],
-            "status": ["in", LIVE],
-            "payment_entry": ["is", "not set"],
-        },
-        pluck="amount",
-        order_by="creation asc",
-    )
-    available = flt(pi.outstanding_amount) - sum(flt(a) for a in pending)
-    if flt(doc.amount) > available + 0.001:
+
+def _check_earlier_payouts(doc, at_submit: bool) -> None:
+    """M-Pesa money the supplier already got with no document may have paid this invoice."""
+    earlier = owed.earlier_payouts(doc.supplier)
+    if not earlier:
+        return
+    listed = "; ".join(e.label for e in earlier[:10])
+    if at_submit and not cint(doc.get("checked_earlier_payouts")):
         frappe.throw(
-            f"Amount {doc.amount} is more than what is left to pay on {doc.purchase_invoice} ({available})"
+            f"{doc.supplier} already got M-Pesa payments that are not on any invoice: {listed}. Check that none "
+            "of them paid this invoice, then tick the box under Purchase Invoice."
         )
+    if not at_submit:
+        frappe.msgprint(
+            f"{doc.supplier} already got M-Pesa payments that are not on any invoice: {listed}. Check that none "
+            "of them paid this invoice before you send this one.",
+            title="Earlier M-Pesa payments",
+            indicator="orange",
+        )
+
+
+def check_ready_to_send(doc) -> None:
+    """Every check once more, right before the money leaves. Changes nothing and only throws,
+    always before post(): server code may submit with flags.ignore_validate."""
+    require(PAYOUT_ROLES)
+    supplier_accounts.check_before_send(doc)
+    if not doc.mpesa_settings:
+        frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")
+    _check_settings(doc, fill=False)
+    hold = owed.supplier_hold(doc.supplier)
+    if hold:
+        frappe.throw(hold)
+    dt, dn = owed.linked_document(doc)
+    if dt:
+        with owed.doc_lock(dt, dn):
+            _check_document(doc, dt, dn, for_update=True)
+
+
+@frappe.whitelist()
+def amount_left(doctype: str, name: str, request: str | None = None) -> dict:
+    """What the request form shows for an invoice or order: who and what to pay, how much is left
+    and why, and anything that stops it being paid."""
+    if doctype not in owed.DOC_FIELDS:
+        frappe.throw("Pick a Purchase Invoice or a Purchase Order")
+    frappe.has_permission(doctype, "read", doc=name, throw=True)
+    values = owed.read_document(doctype, name)
+    if not values:
+        frappe.throw(f"{doctype} {name} not found")
+    result = owed.left_to_pay(doctype, name, exclude_request=request)
+    filters = {"use_b2b": 1}
+    if frappe.get_meta("Mpesa Settings").has_field("company"):
+        filters["company"] = values.company
+    shortcodes = [
+        s.name
+        for s in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "initiator_name"],
+                                order_by="creation asc")
+        if s.initiator_name
+    ]
+    earlier = owed.earlier_payouts(values.supplier) if doctype == "Purchase Invoice" else []
+    return {
+        "supplier": values.supplier,
+        "company": values.company,
+        "mpesa_settings": shortcodes,
+        "owed": result.owed,
+        "left": result.left,
+        "parts": [p.label for p in result.parts],
+        "summary": owed.summary(result),
+        "problems": owed.document_problems(doctype, values),
+        "supplier_hold": owed.supplier_hold(values.supplier),
+        "earlier_payouts": [e.label for e in earlier],
+        "supplier_mpesa_account": supplier_accounts.pick_account(values.supplier) if values.supplier else None,
+    }
+
+
+@frappe.whitelist()
+def order_advances(purchase_orders) -> list:
+    """M-Pesa or other advances still on these orders, for the headline of a draft invoice made
+    from them ("press Get Advances Paid to use it")."""
+    if isinstance(purchase_orders, str):
+        purchase_orders = frappe.parse_json(purchase_orders)
+    found = []
+    for po in sorted({cstr(p).strip() for p in purchase_orders or []} - {""})[:20]:
+        if not frappe.has_permission("Purchase Order", "read", doc=po):
+            continue
+        amount = owed.order_advance(po)
+        if amount > owed.MIN:
+            found.append({"purchase_order": po, "amount": amount})
+    return found
 
 
 # ---------------------------------------------------------------- accounting
 def book_payment_entry(name: str) -> str | None:
-    """Payment Entry for a Paid request, then its statement lines. Idempotent; errors are
-    logged, not raised."""
+    """The Result's job: the Payment Entry of a Paid request, then its statement lines. Idempotent."""
+    from . import b2b_entries
     from .statement import after_payout
 
-    pe = _book_payment_entry(name)
+    entry = b2b_entries.book_automatically(name)
     after_payout(B2B_DOCTYPE, name)  # reconciled with the entry just booked
-    return pe
-
-
-def _book_payment_entry(name: str) -> str | None:
-    frappe.db.get_value(B2B_DOCTYPE, name, "name", for_update=True)
-    doc = frappe.get_doc(B2B_DOCTYPE, name)
-    if doc.status != "Paid" or not doc.transaction_id:
-        return None
-    if doc.payment_entry and frappe.db.get_value("Payment Entry", doc.payment_entry, "docstatus") in (0, 1):
-        return doc.payment_entry
-    existing = frappe.db.get_value(
-        "Payment Entry",
-        {"reference_no": doc.transaction_id, "docstatus": ["<", 2], "payment_type": "Pay"},
-        "name",
-        order_by="creation asc",
-    )
-    if existing:
-        doc.db_set("payment_entry", existing)
-        return existing
-    if not doc.supplier:
-        doc.add_comment("Comment", "Paid, but no Supplier is set: book the Payment Entry by hand.")
-        return None
-
-    savepoint = "mpesa_b2b_pe"
-    frappe.db.savepoint(savepoint)
-    try:
-        pe = _build_payment_entry(doc)
-        pe.insert(ignore_permissions=True)
-        if frappe.db.get_value("Mpesa Settings", doc.mpesa_settings, "submit_b2c_accounting_entries"):
-            pe.submit()
-        doc.db_set("payment_entry", pe.name)
-        return pe.name
-    except Exception:
-        frappe.db.rollback(save_point=savepoint)
-        frappe.log_error(frappe.get_traceback(), f"M-Pesa B2B {name}: Payment Entry failed")
-        doc.add_comment("Comment", "Paid, but the Payment Entry could not be created. See Error Log.")
-        return None
-
-
-def _build_payment_entry(doc):
-    from erpnext.accounts.party import get_party_account
-
-    from ..money_in.common import mode_of_payment_for
-    from ..wallet import accounts
-
-    # B2B pays from the Working (MMF) account: its own Bank Account when mapped
-    sub_account = accounts.from_balance_text(doc.get("debit_account_balance")) or accounts.WORKING
-    bank_account = accounts.bank_account(doc.mpesa_settings, sub_account)
-    if not bank_account:
-        frappe.throw(f"Map a Bank Account on Mpesa Settings {doc.mpesa_settings} (Accounting Mapping)")
-    bank = frappe.db.get_value("Bank Account", bank_account, ["account", "company"], as_dict=True)
-    company = doc.company or bank.company
-    amount = flt(doc.amount)
-    reference_date = getdate(doc.trans_completed_time) if doc.trans_completed_time else getdate(nowdate())
-
-    if doc.purchase_invoice:
-        from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-
-        pe = get_payment_entry(
-            "Purchase Invoice", doc.purchase_invoice, party_amount=amount, bank_account=bank.account
-        )
-        for ref in pe.references:
-            if ref.reference_doctype == "Purchase Invoice" and ref.reference_name == doc.purchase_invoice:
-                ref.allocated_amount = min(amount, flt(ref.outstanding_amount))
-    else:
-        pe = frappe.new_doc("Payment Entry")
-        pe.payment_type = "Pay"
-        pe.company = company
-        pe.party_type = "Supplier"
-        pe.party = doc.supplier
-        pe.paid_from = bank.account
-        pe.paid_to = get_party_account("Supplier", doc.supplier, company)
-        pe.source_exchange_rate = 1
-        pe.target_exchange_rate = 1
-
-    pe.paid_amount = amount
-    pe.received_amount = amount
-    pe.bank_account = bank_account
-    pe.mode_of_payment = mode_of_payment_for(doc.mpesa_settings) or pe.get("mode_of_payment")
-    pe.reference_no = doc.transaction_id
-    pe.reference_date = reference_date
-    pe.posting_date = reference_date
-    pe.remarks = f"M-Pesa B2B {doc.command_id} to {doc.receiver_shortcode} ({doc.name}), receipt {doc.transaction_id}"
-    pe.flags.ignore_permissions = True
-    return pe
+    return entry

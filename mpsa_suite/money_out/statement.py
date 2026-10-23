@@ -72,6 +72,7 @@ OWN_FIELDS = {
         "trans_completed_time",
         "supplier",
         "purchase_invoice",
+        "purchase_order",
         "receiver_shortcode",
         "receiver_public_name",
         "command_id",
@@ -81,6 +82,12 @@ OWN_FIELDS = {
 }
 # Custom fields (migrate.create_custom_erpnext_fields): absent until the site is migrated.
 LINK_FIELDS = ("bank_transaction", "mpesa_charge", "charge_bank_transaction")
+
+
+def fed_docstatus(doctype: str) -> tuple:
+    """Paid payouts that get lines. A B2B request may be Paid after it was cancelled (a late
+    Result on an Unknown request): the money left, so it gets its line and charge too."""
+    return (1, 2) if doctype == B2B else (1,)
 
 
 # ---------------------------------------------------------------- charges (pure)
@@ -202,7 +209,8 @@ def description(p) -> str:
         on = " ".join(filter(None, [p.reference_doctype, p.reference_name])) or "-"
         return f"M-Pesa B2C payout to {to} | {on} | {p.name}"
     to = p.receiver_public_name or p.receiver_shortcode or "-"
-    return f"M-Pesa B2B {p.command_id or ''} to {to} | {p.purchase_invoice or p.supplier or '-'} | {p.name}"
+    on = p.purchase_invoice or p.get("purchase_order") or p.supplier or "-"
+    return f"M-Pesa B2B {p.command_id or ''} to {to} | {on} | {p.name}"
 
 
 def party(p) -> tuple:
@@ -320,7 +328,7 @@ def after_payout(doctype: str, name: str) -> None:
 def feed(doctype: str, name: str) -> str | None:
     """Payout line, charge line and charge entry for one Paid payout, reconciled. Idempotent."""
     p = load(doctype, name)
-    if not p or p.docstatus != 1 or p.status != "Paid" or not p.receipt:
+    if not p or p.docstatus not in fed_docstatus(doctype) or p.status != "Paid" or not p.receipt:
         return None
     start = lines_from()
     if start and p.date < start:
@@ -477,6 +485,9 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         je.cheque_no = key
         je.cheque_date = row.date
         je.user_remark = f"Safaricom charge on M-Pesa {KIND.get(p.doctype, 'payout')} {p.receipt} ({p.name})"
+        if frappe.get_meta(JE).has_field("custom_remark"):  # v16 builds its own remark unless told
+            je.custom_remark = 1
+            je.remark = je.user_remark
         je.append(
             "accounts",
             {
@@ -584,7 +595,8 @@ def sweep_missing(limit: int = 200) -> None:
             missing["charge_bank_transaction"] = ["is", "not set"]
         rows = frappe.get_all(
             doctype,
-            filters={"docstatus": 1, "status": "Paid", "transaction_id": ["is", "set"], "creation": [">=", since]},
+            filters={"docstatus": ["in", list(fed_docstatus(doctype))], "status": "Paid",
+                     "transaction_id": ["is", "set"], "creation": [">=", since]},
             or_filters=missing,
             fields=["name", "bank_transaction", *(("debit_party_charges",) if doctype == B2B else ())],
             order_by="creation desc",

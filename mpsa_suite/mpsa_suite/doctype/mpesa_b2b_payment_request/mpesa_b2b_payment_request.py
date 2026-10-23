@@ -16,11 +16,14 @@ class MpesaB2BPaymentRequest(Document):
             validate_request(self)
 
     def before_submit(self):
+        # Every check again, under the document's lock: validate() above runs only on drafts,
+        # and Frappe also submits an insert that carries docstatus 1 (F1).
         require(PAYOUT_ROLES)
+        validate_request(self, at_submit=True)
         self.status = "Not Initiated"
 
     def on_submit(self):
-        send_b2b(self.name)
+        send_b2b(self.name)  # sending checks everything once more (check_ready_to_send)
 
     def before_cancel(self):
         if self.status in ("Not Initiated", "Failed"):

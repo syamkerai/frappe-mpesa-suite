@@ -277,7 +277,8 @@ def payout(monkeypatch):
             req_mod = importlib.import_module(REQ_MODULE)
             common = importlib.import_module("mpsa_suite.money_in.common")
             disb = importlib.import_module(DISB_MODULE)
-            env = fake_frappe._dict(frappe=frappe, open=[], stale=[], owed=100000, calls=[], locks=[])
+            owed_mod = importlib.import_module("mpsa_suite.money_out.owed")
+            env = fake_frappe._dict(frappe=frappe, open=[], stale=[], b2b=[], owed=100000, calls=[], locks=[])
 
             @contextlib.contextmanager
             def named_lock(key, timeout=10):
@@ -299,10 +300,15 @@ def payout(monkeypatch):
                 env.calls.append(("current_outstanding", doctype, name, for_update))
                 return env.owed
 
+            def b2b_open(doctype, name, exclude=None, for_update=False):
+                env.calls.append(("b2b_open", doctype, name, for_update, list(env.locks)))
+                return [fake_frappe._dict(o) for o in env.b2b]
+
             monkeypatch.setattr(common, "named_lock", named_lock)
             monkeypatch.setattr(disb, "open_payouts", open_payouts)
             monkeypatch.setattr(disb, "current_outstanding", current_outstanding)
             monkeypatch.setattr(req_mod, "paid_without_entry", paid_without_entry)
+            monkeypatch.setattr(owed_mod, "b2b_open", b2b_open)
 
             def disbursement(name, *rows):
                 doc = disb.B2CPaymentDisbursement()
@@ -333,6 +339,23 @@ def test_submit_refused_by_another_disbursements_paid_payout_nothing_books(payou
         doc.validate_no_double_payout()
     key = "b2c-pay:Purchase Invoice:PI-1"
     assert ("paid_without_entry", "Purchase Invoice", "PI-1", [key]) in payout.calls, "read under the document lock"
+
+
+def test_submit_refused_while_a_b2b_request_pays_the_invoice(payout):
+    # an Initiated M-Pesa B2B request for PI-1: B2C's guard counts B2B too, under the same lock (R3)
+    payout.b2b = [{"parent": "MB2B-26-10-000001", "allocated_amount": 30000, "request_status": "Initiated"}]
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 50000})
+    with pytest.raises(payout.frappe.ValidationError, match="in progress or awaiting accounting: MB2B-26-10-000001"):
+        doc.validate_no_double_payout()
+    key = "b2c-pay:Purchase Invoice:PI-1"
+    assert ("b2b_open", "Purchase Invoice", "PI-1", True, [key]) in payout.calls, "a locking read under the lock"
+
+
+def test_b2b_is_not_asked_about_for_other_documents(payout):
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 500, "reference_doctype": "Expense Claim",
+                                        "reference_name": "EC-1"})
+    doc.validate_no_double_payout()
+    assert not [c for c in payout.calls if c[0] == "b2b_open"]
 
 
 def test_amended_disbursement_counts_its_own_paid_payout_against_what_is_owed(payout):

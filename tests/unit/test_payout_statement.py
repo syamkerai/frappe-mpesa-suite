@@ -237,6 +237,37 @@ def test_b2b_without_charges_gets_only_its_line(env):
     assert env.calls.entries == []
 
 
+def test_b2b_paid_after_its_request_was_cancelled_still_gets_its_lines(env):
+    # a late Result on a cancelled Unknown request: the money left, so the line and charge are made
+    b2b(env, docstatus=2)
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM", "CHG-UJMTM632YM"]
+
+
+@pytest.mark.parametrize("state", [{"status": "Failed", "docstatus": 2}, {"status": "Unknown", "docstatus": 2},
+                                   {"status": "Initiated"}])
+def test_a_b2b_that_is_not_paid_gets_no_lines(env, state):
+    b2b(env, **state)
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert env.calls.lines == []
+
+
+def test_b2b_line_names_the_order_it_paid(env):
+    b2b(env, purchase_order="PUR-ORD-2026-00007")
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert "| PUR-ORD-2026-00007 |" in env.calls.lines[0]["description"]
+
+
+def test_sweep_also_feeds_cancelled_b2b_requests_that_were_paid(env, monkeypatch):
+    b2b(env, docstatus=2)
+    fed = []
+    monkeypatch.setattr(env.statement, "feed", lambda doctype, name: fed.append((doctype, name)))
+    env.frappe.get_all = lambda doctype, **kw: env.frappe.db.get_all(doctype, filters=kw.get("filters"))
+    b2c(env, docstatus=2)  # a B2C request is never fed once cancelled
+    env.statement.sweep_missing()
+    assert fed == [(B2B, "MB2B-26-10-000012")]
+
+
 @pytest.mark.parametrize("state", [{"status": "Failed"}, {"status": "Initiated"}, {"docstatus": 2},
                                    {"transaction_id": ""}, {"transaction_id": None}])
 def test_only_a_paid_payout_with_a_receipt_gets_lines(env, state):
@@ -407,8 +438,9 @@ def test_b2c_result_job_books_then_makes_the_lines(env, monkeypatch):
 
 def test_b2b_booking_job_books_then_makes_the_lines(env, monkeypatch):
     b2b_module = importlib.import_module("mpsa_suite.money_out.b2b")
+    entries = importlib.import_module("mpsa_suite.money_out.b2b_entries")
     calls = []
-    monkeypatch.setattr(b2b_module, "_book_payment_entry", lambda name: calls.append(("book", name)) or "ACC-PAY-22")
+    monkeypatch.setattr(entries, "book_automatically", lambda name: calls.append(("book", name)) or "ACC-PAY-22")
     monkeypatch.setattr(env.statement, "after_payout", lambda doctype, name: calls.append(("lines", doctype, name)))
     assert b2b_module.book_payment_entry("MB2B-26-10-000013") == "ACC-PAY-22"
     assert calls == [("book", "MB2B-26-10-000013"), ("lines", B2B, "MB2B-26-10-000013")]

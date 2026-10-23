@@ -184,8 +184,12 @@ def apply_destination(doc) -> None:
 
 
 def check_before_send(doc) -> None:
-    """The account may have been cancelled between saving the request and sending it."""
+    """The account may have been cancelled between saving the request and sending it. A request
+    without one is a one-off destination: the switch and a manager are checked again now (R7)."""
     if not doc.supplier_mpesa_account:
+        if not cint(frappe.db.get_single_value(SUITE, "allow_one_off_b2b")):
+            frappe.throw("Pick the supplier's approved M-Pesa account")
+        require(ADMIN_ROLES)
         return
     acc = get_account(doc.supplier_mpesa_account)
     problem = usable_problem(acc, doc.supplier)

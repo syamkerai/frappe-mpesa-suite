@@ -142,6 +142,7 @@ class B2CPaymentDisbursement(Document):
         a locking read, so two disbursements submitted at the same moment cannot both pass.
         """
         from ....money_in.common import named_lock
+        from ....money_out.owed import DOC_FIELDS, b2b_open
         from ..b2c_disbursement_request.b2c_disbursement_request import paid_without_entry
 
         rows = self._rows_to_send()
@@ -165,6 +166,9 @@ class B2CPaymentDisbursement(Document):
                             allocated += flt(paid.allocated_amount)  # this disbursement's own, not sent again
                         else:
                             others.append(paid)
+                if doctype in DOC_FIELDS:
+                    # B2B requests for the invoice or order count too (same lock, locking read)
+                    others += b2b_open(doctype, name, for_update=True)
                 if others:
                     frappe.throw(
                         _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(

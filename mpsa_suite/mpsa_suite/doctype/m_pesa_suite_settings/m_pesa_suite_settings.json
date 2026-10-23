@@ -76,6 +76,8 @@
   "b2c_charge_bands",
   "column_break_payout_lines",
   "payout_lines_from",
+  "b2b_entries_section",
+  "entry_reminder_days",
   "accounts_tab",
   "accounts_intro",
   "statement_import_section",
@@ -566,11 +568,23 @@
    "label": "Ask Safaricom for Balances Every (Minutes)",
    "default": "0",
    "description": "0: never (balances are still recorded whenever someone presses Get Account Balance). Needs an Initiator with the Balance Query role on Mpesa Settings. Each balance is checked against the last imported statement plus the lines since; a difference is listed as a Gap in M-Pesa Balance Snapshot."
+  },
+  {
+   "fieldname": "b2b_entries_section",
+   "fieldtype": "Section Break",
+   "label": "B2B Accounting Entries"
+  },
+  {
+   "fieldname": "entry_reminder_days",
+   "fieldtype": "Int",
+   "label": "Remind When a Paid B2B Has No Entry After (Days)",
+   "default": "3",
+   "description": "A Paid B2B payment whose accounting entry is still not made (or not submitted, or needs checking) after this many days alerts the Notify Role once. 0 = never. Failed automatic bookings are tried again every 15 minutes for 30 days either way."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-22 22:00:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

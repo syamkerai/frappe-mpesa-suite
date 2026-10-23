@@ -32,6 +32,19 @@
   {
    "child": 0,
    "collapsible": 1,
+   "filters": "[[\"Mpesa B2B Payment Request\", \"status\", \"=\", \"Paid\"], [\"Mpesa B2B Payment Request\", \"entry_status\", \"in\", [\"Entry Not Made\", \"Draft Entry\", \"Needs Checking\"]]]",
+   "icon": "receipt",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "B2B Paid, Entry Not Made",
+   "link_to": "Mpesa B2B Payment Request",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
    "icon": "settings",
    "indent": 1,
    "keep_closed": 1,
@@ -140,7 +153,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-10-22 20:35:00.000000",
+ "modified": "2026-10-23 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa",

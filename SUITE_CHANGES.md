@@ -975,3 +975,78 @@ old names as history.
 Shown on a throwaway Frappe v15 site: the hand-over with R1, R2, R3 and R5, nothing lost, the old
 paths over HTTP, and the bench tests. Not yet shown: Frappe Cloud, a Navari-era site, R6 and
 the R8 restore route on a real site (docs/RENAME_SPIKE.md, "Not shown yet").
+
+## Payouts Phase 1: B2B from Purchase Invoices and Orders, pay first and make the entry later (2026-10-23)
+
+Design: [docs/PAYOUTS_DESIGN.md](docs/PAYOUTS_DESIGN.md), Phase 1 and "Rules every flow keeps".
+No patch: the new fields come from the DocType JSON, their defaults from the Suite settings
+backfill, and old rows get their state in after_migrate.
+
+**Pay a Purchase Invoice or a Purchase Order**
+- A Purchase Invoice has M-Pesa > "Pay via M-Pesa (B2B)"; a Purchase Order has "Pay Advance via
+  M-Pesa (B2B)". Both open a new B2B request with the supplier, company, shortcode, approved
+  account and amount filled in. Both forms list the requests under Connections > M-Pesa.
+- A request may link an invoice or an order, not both. An order is paid as an advance; the
+  invoice made from it picks the advance up under Get Advances Paid. A draft invoice made from an
+  order that holds an advance says so at the top.
+- The request form shows what is left to pay and why: the outstanding, less payouts in progress
+  (B2B and B2C), draft entries and advances still on the invoice's orders.
+- Before an invoice is paid, M-Pesa money the supplier already got with no invoice is listed.
+  Submitting is refused until someone ticks that none of it paid this invoice.
+
+**Every check again at submit and at send**
+- Submitting runs every check again, under the same per-document lock B2C uses. It used to run
+  only on save, so an insert already marked submitted (the API) skipped them, typed paybill included.
+- Sending checks once more, right before the money leaves, and changes nothing: the approved
+  account, a one-off destination (switch and a manager), the shortcode's switch, limit and
+  company, the supplier's hold, the document, and what is left to pay.
+- What is left to pay counts B2B and B2C together: a B2B request in flight or Paid without a
+  submitted entry on the document, B2C payouts, draft entries and order advances. B2C's own
+  guards now count B2B requests too. Only a submitted entry allocated to the document frees it.
+- Refused: an invoice on hold (whatever its release date), a debit note, not KES, not submitted;
+  an order closed, on hold, completed or already invoiced; a supplier on hold for payments.
+
+**When M-Pesa confirms: "When Paid"**
+- "Book automatically" (the default) makes the Payment Entry at once: on the invoice (by payment
+  term when the template says so), on the order, or as an advance to the supplier when nothing is
+  linked. "Make the entry later" books nothing.
+- The entry is built by hand: it always pays from the payout's own M-Pesa account (an invoice's
+  Mode of Payment no longer swaps it), on the M-Pesa completion date, with the receipt as its
+  reference and without the charge, so it reconciles with the payout's statement line. It is
+  booked as Administrator, so a restricted Integration User does not stop it.
+- If the invoice was paid or put on hold before M-Pesa confirmed, the money is booked as an
+  unallocated advance, marked "Needs Checking" and the Notify Role is alerted.
+- The new Accounting Entry section says where each Paid payment stands: Entry Not Made, Draft
+  Entry, Needs Checking or Entry Made, with a note in plain words. The list shows "Paid, no
+  entry", "Paid, draft entry", "Paid, check entry" or "Paid". The M-Pesa workspace has a
+  shortcut to the ones that need an entry.
+- **Make Entry** (Accounts users with ERPNext's own permissions): against an invoice, an order,
+  as a supplier advance, or as a Journal Entry to an expense or bank account. It is refused when
+  an entry already carries the receipt. Moving a payment to another document or supplier, and
+  an entry for a cancelled request, need a manager. **Check Entry Again** looks again.
+- One entry per receipt: an entry staff made by hand with the receipt (Bank Reconciliation's
+  Create Voucher too) is found and linked, never booked twice. An entry a request links can be
+  cancelled, or deleted as a draft; the request then shows it and the payment counts against
+  its document again.
+
+**The 15-minute sweep**
+- It looks again at every Paid request whose entry is not made, not submitted or changed. A
+  failed automatic booking is tried again for 30 days. Requests paid before this release are only
+  looked at, never booked.
+- "Remind When a Paid B2B Has No Entry After (Days)" (Money Out tab, default 3, 0 = never) alerts
+  the Notify Role once per request.
+
+**Paid after it was cancelled**
+- A late Result on a cancelled Unknown request is recorded, because the money left. It gets its
+  statement line and charge, keeps counting against its document and is never booked
+  automatically: it shows "Needs Checking" and the Notify Role is alerted. A manager makes the entry.
+
+**Smaller fixes**
+- Journal Entries on v16 (the charge entry and Make Entry) keep our remark.
+- A payout's statement line names its order when it paid one.
+
+Tests: unit tests for every rule (`tests/unit/test_b2b_owed.py`, `test_b2b_entries.py`, and
+additions to the money-out, statement, supplier account and B2C guard tests; their SQL runs on
+SQLite). Bench tests for the booking routes in `mpsa_suite/money_out/test_b2b_documents.py`.
+Not yet run on the v15 and v16 benches. Not built: the Sandbox Lab scenarios b2b_pay_order and
+b2b_pay_first_then_entry.

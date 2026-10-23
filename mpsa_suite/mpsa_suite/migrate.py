@@ -22,9 +22,18 @@ def after_migrate():
         create_custom_erpnext_fields()
         create_erpnext_property_setters()
         create_payment_entry_mpesa_fields()
+        backfill_b2b_entry_status()
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
+
+
+def backfill_b2b_entry_status():
+    """Paid B2B requests from before the Accounting Entry fields get their state (looked at only,
+    never booked). Idempotent: only rows with no state yet are read."""
+    from mpsa_suite.money_out.b2b_entries import backfill_entry_status
+
+    backfill_entry_status()
 
 
 def update_settings_module():

@@ -6,7 +6,9 @@ ack's IDs; a re-sent result never books twice; queue timeouts never settle anyth
 a status query settles a payout only while it is unsettled.
 """
 
+import datetime
 import importlib
+import types
 
 import pytest
 import requests
@@ -64,7 +66,15 @@ def env(monkeypatch):
             return nxt
 
         monkeypatch.setattr(common.requests, "post", fake_post)
+        frappe.db.db_type = "fake"  # named locks are no-ops here
+        frappe.get_meta = lambda doctype: types.SimpleNamespace(has_field=lambda field: True)
         frappe.db.table("Mpesa Settings")[SETTINGS["name"]] = dict(SETTINGS)
+        frappe.db.table("M-Pesa Suite Settings")["M-Pesa Suite Settings"] = {"allow_one_off_b2b": 0}
+        frappe.db.table("Supplier M-Pesa Account")["MSA-1"] = {
+            "name": "MSA-1", "docstatus": 1, "supplier": "Total Kenya", "account_type": "Paybill",
+            "shortcode": "888880", "account_number": "INV-1", "expected_name": "Total Kenya",
+            "active_from": datetime.datetime(2026, 10, 1), "is_default": 1, "name_mismatch": 0,
+        }
         yield fake_frappe._dict(mods)
     finally:
         fake_frappe.uninstall(saved)
@@ -77,7 +87,7 @@ ACK = {"OriginatorConversationID": "OCID-1", "ConversationID": "AG_1", "Response
 def b2b_row(env, **kw):
     row = {"name": "MB2B-1", "docstatus": 1, "status": "Not Initiated", "mpesa_settings": SETTINGS["name"],
            "command_id": "BusinessPayBill", "receiver_shortcode": "888880", "account_reference": "INV-1",
-           "amount": 1500.0, "remarks": "Fuel", "supplier": "Total Kenya"}
+           "amount": 1500.0, "remarks": "Fuel", "supplier": "Total Kenya", "supplier_mpesa_account": "MSA-1"}
     row.update(kw)
     env.frappe.db.table("Mpesa B2B Payment Request")[row["name"]] = row
     return row
@@ -141,6 +151,8 @@ def test_token_error_refreshes_once_and_resends(env):
 
 def test_b2b_buy_goods_sends_account_reference(env):
     # Daraja's BusinessBuyGoods body lists AccountReference without marking it optional.
+    env.frappe.db.table("Supplier M-Pesa Account")["MSA-1"].update(
+        account_type="Till (Buy Goods)", shortcode="123456", account_number=None)
     b2b_row(env, command_id="BusinessBuyGoods", receiver_shortcode="123456", account_reference=None)
     env.responses.append(Resp(ACK))
     env.b2b.send_b2b("MB2B-1")
@@ -575,3 +587,133 @@ def test_status_unknown_payout_is_queried_by_originator_id_and_settled(env):
     env.api.b2c_status_result(Result=status_result(), ref=name)
     assert row["status"] == "Paid" and row["result_code"] == "0"
     assert [e for e in env.frappe.enqueued if e[0].endswith("update_b2c_reference_status")]
+
+
+# ---------------------------------------------------------------- B2B: checked again at send (payouts Phase 1)
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda env, row: row.update(supplier_mpesa_account=None), "Pick the supplier's approved M-Pesa account"),
+        (lambda env, row: row.update(receiver_shortcode="999999"), "does not match Supplier M-Pesa Account"),
+        (lambda env, row: env.frappe.db.table("Supplier M-Pesa Account")["MSA-1"].update(docstatus=2), "cancelled"),
+        (lambda env, row: env.frappe.db.table("Mpesa Settings")[SETTINGS["name"]].update(transaction_limit=1000),
+         "transaction limit of 1000"),
+        (lambda env, row: env.frappe.db.table("Mpesa Settings")[SETTINGS["name"]].update(company="Other Co"),
+         "pays for Other Co, not Astral"),
+        (lambda env, row: env.frappe.db.table("Supplier").update(
+            {"Total Kenya": {"name": "Total Kenya", "on_hold": 1, "hold_type": "Payments", "release_date": None}}),
+         "Total Kenya is on hold for payments"),
+    ],
+)
+def test_b2b_send_refuses_what_changed_after_submit_with_no_http_call(env, change, message):
+    row = b2b_row(env, company="Astral")
+    env.frappe.db.table("Mpesa Settings")[SETTINGS["name"]]["company"] = "Astral"
+    change(env, row)
+    with pytest.raises(env.frappe.ValidationError, match=message):
+        env.b2b.send_b2b("MB2B-1")
+    assert env.sent == [] and row["status"] == "Not Initiated"
+
+
+def test_b2b_one_off_destination_needs_the_switch_and_a_manager_at_send(env):
+    row = b2b_row(env, supplier_mpesa_account=None, receiver_shortcode="999999")
+    env.frappe.db.table("M-Pesa Suite Settings")["M-Pesa Suite Settings"]["allow_one_off_b2b"] = 1
+    with pytest.raises(env.frappe.PermissionError):  # a Payer may not send a typed number (R7)
+        env.b2b.send_b2b("MB2B-1")
+    assert env.sent == []
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    env.responses.append(Resp(ACK))
+    env.b2b.send_b2b("MB2B-1")
+    assert row["status"] == "Initiated"
+
+
+def test_b2b_send_needs_a_payout_role(env):
+    b2b_row(env)
+    env.frappe.user_roles = {"Accounts User"}
+    with pytest.raises(env.frappe.PermissionError):
+        env.b2b.send_b2b("MB2B-1")
+    assert env.sent == []
+
+
+def test_b2b_send_refuses_an_invoice_put_on_hold_after_submit(env, monkeypatch):
+    owed = importlib.import_module("mpsa_suite.money_out.owed")
+    row = b2b_row(env, purchase_invoice="PINV-1")
+    env.frappe.db.table("Purchase Invoice")["PINV-1"] = {
+        "name": "PINV-1", "docstatus": 1, "supplier": "Total Kenya", "currency": "KES", "on_hold": 1,
+        "outstanding_amount": 5000}
+    locks = []
+    monkeypatch.setattr(owed, "doc_lock", lambda dt, dn: locks.append((dt, dn)) or __import__("contextlib").nullcontext())
+    monkeypatch.setattr(owed, "left_to_pay", lambda dt, dn, **kw: fake_frappe._dict(owed=5000, parts=[], left=5000))
+    with pytest.raises(env.frappe.ValidationError, match="PINV-1 is on hold. Release the hold"):
+        env.b2b.send_b2b("MB2B-1")
+    assert env.sent == [] and row["status"] == "Not Initiated"
+    assert locks == [("Purchase Invoice", "PINV-1")]  # under the document's lock
+
+
+def test_b2b_send_refuses_more_than_is_left_now(env, monkeypatch):
+    owed = importlib.import_module("mpsa_suite.money_out.owed")
+    b2b_row(env, purchase_invoice="PINV-1")
+    env.frappe.db.table("Purchase Invoice")["PINV-1"] = {
+        "name": "PINV-1", "docstatus": 1, "supplier": "Total Kenya", "currency": "KES", "outstanding_amount": 5000}
+    seen = []
+
+    def left_to_pay(dt, dn, exclude_request=None, exclude_line=None, for_update=False):
+        seen.append((exclude_request, for_update))
+        part = fake_frappe._dict(kind="b2c", name="D-9", amount=4000, label="B2C D-9 Initiated 4,000")
+        return fake_frappe._dict(owed=5000, parts=[part], left=1000)
+
+    monkeypatch.setattr(owed, "left_to_pay", left_to_pay)
+    with pytest.raises(env.frappe.ValidationError, match="B2C D-9 Initiated 4,000: 1,000 is left to pay"):
+        env.b2b.send_b2b("MB2B-1")
+    assert env.sent == [] and seen == [("MB2B-1", True)]
+
+
+def test_b2b_paid_result_marks_the_entry_as_being_booked(env):
+    row = b2b_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.b2b_result(Result=b2b_result(), ref="MB2B-1")
+    assert (row["entry_status"], row["entry_note"]) == ("Entry Not Made", "Booking the entry…")
+
+
+def test_b2b_failed_result_writes_no_entry_state(env):
+    row = b2b_row(env, status="Initiated", conversation_id="AG_1", originator_conversation_id="OCID-1")
+    env.api.b2b_result(Result=dict(b2b_result(code="2001"), ResultParameters=None), ref="MB2B-1")
+    assert not row.get("entry_status")
+
+
+def test_b2b_late_result_on_a_cancelled_unknown_request_is_recorded(env):
+    # an admin cancelled it after checking the statement; the money still left (R2)
+    row = b2b_row(env, status="Unknown", docstatus=2)
+    env.api.b2b_result(Result=b2b_result(), ref="MB2B-1")
+    assert row["status"] == "Paid" and row["transaction_id"] == "QKA81LK5CY"
+    assert [e for e in env.frappe.enqueued if e[0].endswith("b2b.book_payment_entry")]  # it books Needs Checking
+
+
+def _controller(env, monkeypatch):
+    env.frappe.utils.logger = types.SimpleNamespace(set_log_level=lambda *a, **kw: None)
+    env.frappe.logger = lambda *a, **kw: None
+    module = importlib.import_module(
+        "mpsa_suite.mpsa_suite.doctype.mpesa_b2b_payment_request.mpesa_b2b_payment_request")
+    calls = []
+    monkeypatch.setattr(module, "validate_request", lambda doc, at_submit=False: calls.append(at_submit))
+    monkeypatch.setattr(module, "send_b2b", lambda name: calls.append(("send", name)))
+    doc = module.MpesaB2BPaymentRequest()
+    doc.name, doc.docstatus, doc.status = "MB2B-1", 1, None
+    return doc, calls
+
+
+def test_b2b_submit_runs_every_check_again(env, monkeypatch):
+    # validate() runs the checks only on drafts; Frappe runs before_submit on submit and on an
+    # insert that carries docstatus 1 (the typed-paybill bypass, F1)
+    doc, calls = _controller(env, monkeypatch)
+    doc.validate()
+    assert calls == []  # docstatus 1: not here
+    doc.before_submit()
+    doc.on_submit()
+    assert calls == [True, ("send", "MB2B-1")] and doc.status == "Not Initiated"
+
+
+def test_b2b_submit_needs_a_payout_role(env, monkeypatch):
+    doc, calls = _controller(env, monkeypatch)
+    env.frappe.user_roles = {"Accounts User"}
+    with pytest.raises(env.frappe.PermissionError):
+        doc.before_submit()
+    assert calls == []
