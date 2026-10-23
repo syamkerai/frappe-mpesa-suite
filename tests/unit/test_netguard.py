@@ -1,6 +1,6 @@
 import pytest
 
-from mpsa_suite.gateway.netguard import is_public_url
+from frappe_mpsa_payments.gateway.netguard import is_public_url
 
 
 def fake_resolver(mapping):

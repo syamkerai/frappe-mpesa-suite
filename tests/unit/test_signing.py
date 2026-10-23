@@ -1,4 +1,4 @@
-from mpsa_suite.gateway.signing import sign, verify
+from frappe_mpsa_payments.gateway.signing import sign, verify
 
 BODY = '{"event":"payment.succeeded","intent":"MPI-26-10-000001"}'
 

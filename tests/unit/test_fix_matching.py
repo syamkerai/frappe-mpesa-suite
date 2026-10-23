@@ -33,7 +33,7 @@ INTENT = "Mpesa Payment Intent"
 SUITE = "M-Pesa Suite Settings"
 MATCH_LOG = "Mpesa Match Log"
 REPO = Path(__file__).resolve().parents[2]
-MATCH_LOG_JSON = REPO / "mpsa_suite/mpsa_suite/doctype/mpesa_match_log/mpesa_match_log.json"
+MATCH_LOG_JSON = REPO / "frappe_mpsa_payments/frappe_mpsa_payments/doctype/mpesa_match_log/mpesa_match_log.json"
 
 
 def _select_options() -> dict:
@@ -198,7 +198,7 @@ def callback(receipt="R1A", paid=True, amount=1000) -> str:
 
 # ================================================================ C27: STK review rows
 def stk_verify(env, query=None, query_error=None):
-    stk_poll = types.ModuleType("mpsa_suite.money_in.stk_poll")
+    stk_poll = types.ModuleType("frappe_mpsa_payments.money_in.stk_poll")
 
     def stk_query(req):
         if query_error:
@@ -207,7 +207,7 @@ def stk_verify(env, query=None, query_error=None):
 
     stk_poll.stk_query = stk_query
     sys.modules[stk_poll.__name__] = stk_poll  # dropped again by fake_frappe.uninstall
-    module = importlib.import_module("mpsa_suite.money_in.stk_verify")
+    module = importlib.import_module("frappe_mpsa_payments.money_in.stk_verify")
     env.booked = []
     env.monkeypatch.setattr(module, "book", lambda name: env.booked.append(name) or True)
     return module
@@ -216,7 +216,7 @@ def stk_verify(env, query=None, query_error=None):
 def test_every_method_stk_verify_logs_is_a_match_log_option():
     options = _select_options()["method"]
     assert "STK Callback" in options
-    source = (REPO / "mpsa_suite/money_in/stk_verify.py").read_text(encoding="utf-8")
+    source = (REPO / "frappe_mpsa_payments/money_in/stk_verify.py").read_text(encoding="utf-8")
     methods = set(re.findall(r'log_match\(\s*"[^"]+",\s*"([^"]+)"', source))
     assert methods and methods <= set(options), methods - set(options)
 
@@ -247,7 +247,7 @@ def test_contradicted_callback_is_left_for_review_in_the_match_log(env):
 
 # ================================================================ C06: orphan STK adoption
 def matching(env):
-    return importlib.import_module("mpsa_suite.money_in.matching")
+    return importlib.import_module("frappe_mpsa_payments.money_in.matching")
 
 
 def orphan_receipt(amount=1000):
@@ -430,11 +430,11 @@ def express_module(env):
     exceptions = types.ModuleType("frappe.exceptions")
     exceptions.DoesNotExistError = env.frappe.DoesNotExistError
     env.monkeypatch.setitem(sys.modules, "frappe.exceptions", exceptions)
-    api = types.ModuleType("mpsa_suite.mpsa_suite.api.m_pesa_api")
+    api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api")
     api.check_transaction_status = api.initiate_stk_push = lambda **kw: None
     sys.modules[api.__name__] = api  # dropped again by fake_frappe.uninstall
     return importlib.import_module(
-        "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request"
+        "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request"
     )
 
 
@@ -515,11 +515,11 @@ def test_cancelled_register_or_none_is_left_alone(env):
 
 
 def register_controller(env):
-    pe = types.ModuleType("mpsa_suite.mpsa_suite.api.payment_entry")
+    pe = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry")
     pe.create_and_reconcile_payment_reconciliation = pe.create_payment_entry = pe.get_outstanding_invoices = None
     sys.modules[pe.__name__] = pe  # dropped again by fake_frappe.uninstall
     module = importlib.import_module(
-        "mpsa_suite.mpsa_suite.doctype.mpesa_c2b_payment_register.mpesa_c2b_payment_register"
+        "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_c2b_payment_register.mpesa_c2b_payment_register"
     )
     doc = module.MpesaC2BPaymentRegister()
     env.steps = []
@@ -553,8 +553,8 @@ def gateway(env):
                                               "use_c2b": 1, "use_stk": 1, "company": company}
     f.db.table("Mpesa API Client")["Shop"] = {"name": "Shop", "mpesa_settings": "Astral 4134019"}
     f.db.table("Sales Invoice")["SINV-9"] = {"name": "SINV-9", "customer": "Jane", "docstatus": 1}
-    intents = importlib.import_module("mpsa_suite.gateway.intents")
-    webhooks = importlib.import_module("mpsa_suite.gateway.webhooks")
+    intents = importlib.import_module("frappe_mpsa_payments.gateway.intents")
+    webhooks = importlib.import_module("frappe_mpsa_payments.gateway.webhooks")
     env.booked = []
 
     def book_direct(intent, receipt, amount, paid_at, settings_name, note=None):

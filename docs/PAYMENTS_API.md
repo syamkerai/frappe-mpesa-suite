@@ -3,9 +3,7 @@
 For chatbots (WhatsApp, web chat), online shops and any outside system that needs to
 **ask a customer to pay by M-Pesa** and **know when the money arrived**.
 
-- Base URL: `https://<your-erp>/api/method/mpsa_suite.gateway.v1.<endpoint>`. The base URL used
-  before the app was renamed, `https://<your-erp>/api/method/frappe_mpsa_payments.gateway.v1.<endpoint>`,
-  keeps working (same endpoints, keys and responses), so existing clients need no change.
+- Base URL: `https://<your-erp>/api/method/frappe_mpsa_payments.gateway.v1.<endpoint>`
 - Works on Frappe/ERPNext v15 and v16.
 - Body: JSON (`Content-Type: application/json`) or form-encoded.
 

@@ -12,7 +12,7 @@ import fake_frappe
 def mod():
     frappe, saved = fake_frappe.install()
     try:
-        yield importlib.import_module("mpsa_suite.connectors.base_connector")
+        yield importlib.import_module("frappe_mpsa_payments.connectors.base_connector")
     finally:
         fake_frappe.uninstall(saved)
 

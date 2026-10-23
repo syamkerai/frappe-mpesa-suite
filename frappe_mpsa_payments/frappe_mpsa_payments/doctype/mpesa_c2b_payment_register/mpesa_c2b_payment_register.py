@@ -1,0 +1,452 @@
+# Copyright (c) 2024, Navari Limited and contributors
+# For license information, please see license.txt
+
+import frappe
+from frappe import _
+from frappe.model.document import Document
+from frappe.utils import cstr, flt
+
+from frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry import (
+    create_and_reconcile_payment_reconciliation,
+    create_payment_entry,
+    get_outstanding_invoices,
+)
+
+# The receipt as Safaricom sent it, and the currency set on insert (it is the currency the
+# Payment Entry books the amount in). read_only only locks the form: over the API a user who
+# may edit a draft could change any of these and submit it into a Payment Entry.
+RECEIPT_FIELDS = (
+    "currency",
+    "transactiontype",
+    "transid",
+    "transtime",
+    "transamount",
+    "businessshortcode",
+    "billrefnumber",
+    "invoicenumber",
+    "orgaccountbalance",
+    "thirdpartytransid",
+    "msisdn",
+    "firstname",
+    "middlename",
+    "lastname",
+)
+
+
+class MpesaC2BPaymentRegister(Document):
+    def validate(self):
+        self.validate_receipt_unchanged()
+
+    def validate_receipt_unchanged(self):
+        # validate runs before before_submit, so a changed receipt never reaches a Payment Entry
+        before = self.get_doc_before_save()
+        if not before:
+            return
+        changed = [
+            f
+            for f in RECEIPT_FIELDS
+            if self.meta.has_field(f)  # currency is an ERPNext custom field
+            and (
+                flt(self.get(f)) != flt(before.get(f))
+                if f == "transamount"
+                else cstr(self.get(f)) != cstr(before.get(f))
+            )
+        ]
+        if changed:
+            frappe.throw(
+                _("M-Pesa receipt details cannot be changed: {0}").format(
+                    ", ".join(_(self.meta.get_label(f)) for f in changed)
+                ),
+                frappe.CannotChangeConstantError,
+            )
+
+    def before_insert(self):
+        if self.thirdpartytransid:
+            er = frappe.db.get_value(
+                "Mpesa Express Request",
+                {"merchant_request_id": self.thirdpartytransid},
+                ["name", "status"],
+                as_dict=True,
+            )
+            if er:
+                frappe.log_error(
+                    message=f"Blocked C2B because matching Express Request {er.name} "
+                    f"already exists (status={er.status})",
+                    title="Mpesa C2B Insert Blocked",
+                )
+                frappe.throw(
+                    _(
+                        "Cannot record C2B payment: Express Request {0} already exists"
+                    ).format(er.name)
+                )
+
+        if self.transid:
+            er2 = frappe.db.get_value(
+                "Mpesa Express Request",
+                {"transaction_id": self.transid},
+                ["name", "status"],
+                as_dict=True,
+            )
+            if er2:
+                frappe.log_error(
+                    message=f"Duplicate C2B payment detected: {self.transid} "
+                    f"already exists in Express Request {er2.name}",
+                    title="Mpesa C2B Duplicate",
+                )
+                frappe.throw(
+                    _(
+                        "Cannot record C2B payment: Transaction already captured in Express Request {0}"
+                    ).format(er2.name)
+                )
+
+        self.set_missing_values()
+
+    def after_insert(self):
+        from frappe_mpsa_payments.money_in.common import settings_for_shortcode
+
+        # by paybill or till, the same record every other C2B step uses
+        settings_name = settings_for_shortcode(self.businessshortcode)
+        auto_reconcile = settings_name and frappe.db.get_value(
+            "Mpesa Settings", settings_name, "auto_reconcile_c2b"
+        )
+        if not auto_reconcile:
+            return
+
+        # A failed auto-submit must not leave half a Payment Entry behind, and must not
+        # lose the receipt: undo to here and keep the register as a draft for matching/staff.
+        frappe.db.savepoint("mpesa_c2b_auto_submit")
+        try:
+            self.db_set("submit_payment", 1)
+            self.submit()
+        except Exception as e:
+            frappe.db.rollback(save_point="mpesa_c2b_auto_submit")
+            self.docstatus = 0
+            self.payment_entry = None
+            frappe.log_error(frappe.get_traceback(), f"C2B Auto-submit Error: {str(e)}"[:140])
+
+    def set_missing_values(self):
+        self.currency = "KES"
+        # Store the text fields as text: a number (OrgAccountBalance 500.0) would be saved as
+        # '500' while this copy keeps 500.0, and after_insert's auto-submit would see a changed receipt.
+        for f in RECEIPT_FIELDS:
+            value = self.get(f)
+            if f != "transamount" and value is not None and not isinstance(value, str):
+                self.set(f, cstr(value))
+        self.full_name = self.full_name = " ".join(
+            filter(None, [self.firstname, self.middlename, self.lastname])
+        )
+
+        if "erpnext" in frappe.get_installed_apps():
+            register_url_list = frappe.get_all(
+                "Mpesa C2B Payment Register URL",
+                filters={
+                    "business_shortcode": self.businessshortcode,
+                    "register_status": "Success",
+                },
+                fields=["company", "mode_of_payment"],
+                order_by="creation asc",
+            )
+            if len(register_url_list) > 0:
+                self.company = register_url_list[0].company
+                self.mode_of_payment = register_url_list[0].mode_of_payment
+
+            # Tills (Buy Goods) and shortcodes without a Register URL row: use Mpesa Settings.
+            if not self.company or not self.mode_of_payment:
+                from frappe_mpsa_payments.money_in.common import (
+                    mode_of_payment_for,
+                    settings_for_shortcode,
+                )
+
+                settings_name = settings_for_shortcode(self.businessshortcode)
+                if settings_name:
+                    settings_company = (
+                        frappe.db.get_value("Mpesa Settings", settings_name, "company")
+                        if frappe.get_meta("Mpesa Settings").has_field("company")
+                        else None
+                    )
+                    # insert() pre-fills Company from the user's default company; on a site with
+                    # several companies the shortcode's own company must win over that.
+                    if settings_company and (not self.company or (self.is_new() and not register_url_list)):
+                        self.company = settings_company
+                    self.mode_of_payment = self.mode_of_payment or mode_of_payment_for(settings_name)
+
+            if self.billrefnumber and not self.customer:
+                self._find_customer_from_billref(self.billrefnumber)
+
+    def before_submit(self):
+        if not self.transamount:
+            frappe.throw(_("Trans Amount is required"))
+        self.refuse_if_reversed()
+        if "erpnext" not in frappe.get_installed_apps():
+            return
+        if not self.company:
+            frappe.throw(_("Company is required"))
+        if not self.customer:
+            frappe.throw(_("Customer is required"))
+        if not self.mode_of_payment:
+            frappe.throw(_("Mode of Payment is required"))
+
+        if self.submit_payment:
+            from frappe_mpsa_payments.money_in.common import receipt_date, settings_for_shortcode
+
+            refs = []
+            invoice, order = self._get_matching_refs()
+
+            # Never allocate more than is owed; the rest stays as an unallocated advance.
+            if invoice:
+                outstanding = frappe.db.get_value("Sales Invoice", invoice, "outstanding_amount")
+                allocated = min(flt(self.transamount), flt(outstanding))
+                if allocated > 0:
+                    refs.append(
+                        {
+                            "reference_doctype": "Sales Invoice",
+                            "reference_name": invoice,
+                            "allocated_amount": allocated,
+                        }
+                    )
+
+            elif order:
+                so = frappe.db.get_value(
+                    "Sales Order", order, ["rounded_total", "grand_total", "advance_paid"], as_dict=True
+                )
+                balance = flt(so.rounded_total or so.grand_total) - flt(so.advance_paid)
+                allocated = min(flt(self.transamount), balance)
+                if allocated > 0:
+                    refs.append(
+                        {
+                            "reference_doctype": "Sales Order",
+                            "reference_name": order,
+                            "allocated_amount": allocated,
+                        }
+                    )
+
+            # The customer's SMS shows the receipt, so that is what reconciliation matches on.
+            paid_on = receipt_date(self)
+            cost_center = None
+            settings_name = settings_for_shortcode(self.businessshortcode)
+            if settings_name and frappe.get_meta("Mpesa Settings").has_field("cost_center"):
+                cost_center = frappe.db.get_value("Mpesa Settings", settings_name, "cost_center")
+
+            payment_entry = create_payment_entry(
+                self.company,
+                self.customer,
+                self.transamount,
+                self.currency,
+                self.mode_of_payment,
+                "Customer",
+                paid_on,
+                self.transid or self.name,
+                paid_on,
+                cost_center,
+                self.submit_payment,
+                references=refs or None,
+            )
+
+            self.payment_entry = payment_entry.name
+
+    def refuse_if_reversed(self):
+        """One choke point for every way a receipt gets booked: by hand, the matcher, prepaid
+        orders, POS quick pay (which books it on the invoice even without submit_payment)."""
+        from frappe_mpsa_payments.money_in.common import reversal_holding
+
+        # locking read: a reversal submitted while this booking runs is waited for, not missed
+        reversal = reversal_holding(self.name, for_update=True, receipt=self.transid)
+        if reversal:
+            frappe.throw(
+                _(
+                    "M-Pesa receipt {0} cannot be booked: reversal {1} is {2}, so the money is "
+                    "(or may be) back with the payer. Only a Failed or cancelled reversal frees it."
+                ).format(self.transid, reversal.name, reversal.status)
+            )
+
+    def on_submit(self):
+        if self.transid:
+            # Locking read: it sees a receipt an STK prompt committed after this transaction's
+            # snapshot (a plain read misses it in a long matcher run, and both would book the
+            # receipt), and a prompt still writing it waits for this booking, whose register its
+            # own duplicate check then finds submitted and cancels.
+            exists = frappe.db.get_value(
+                "Mpesa Express Request", {"transaction_id": self.transid}, "name", for_update=True
+            )
+            if exists:
+                frappe.db.savepoint("before_c2b_submit")
+                try:
+                    self.cancel()
+                    frappe.throw(
+                        _(
+                            "Duplicate C2B transaction {0}. Cancelled automatically."
+                        ).format(self.transid)
+                    )
+                except Exception:
+                    frappe.db.rollback(save_point="before_c2b_submit")
+                    raise
+
+        # Reconciliation is optional: on failure undo its partial writes, keep the payment.
+        frappe.db.savepoint("mpesa_c2b_reconcile")
+        try:
+            self._reconcile_payment()
+
+        except Exception as e:
+            frappe.db.rollback(save_point="mpesa_c2b_reconcile")
+            frappe.log_error(
+                frappe.get_traceback(), f"C2B Reconciliation Error: {str(e)}"[:140]
+            )
+
+    def on_cancel(self):
+        """Cancel the linked Payment Entry too.
+
+        A failure is raised, not logged: the register must not show as cancelled while its
+        Payment Entry still books the money.
+        """
+        if self.payment_entry:
+            pe = frappe.get_doc("Payment Entry", self.payment_entry)
+            if pe.docstatus == 1:
+                pe.flags.ignore_permissions = self.flags.ignore_permissions
+                pe.cancel()
+                frappe.msgprint(
+                    _("Linked Payment Entry {0} cancelled").format(pe.name),
+                    alert=True,
+                )
+
+    def _find_customer_from_billref(self, billrefnumber: str) -> str | None:
+        if not billrefnumber:
+            return
+
+        sources = [
+            ("Sales Invoice", "customer", {"docstatus": 1}),
+            ("Sales Order", "customer", {"docstatus": 1}),
+            ("Quotation", "party_name", {"docstatus": 1, "quotation_to": "Customer"}),
+            ("Customer", "name", {}),
+        ]
+
+        for doctype, customer_field, extra_filters in sources:
+            filters = {"name": billrefnumber}
+            filters.update(extra_filters)
+
+            customer = frappe.db.get_value(doctype, filters, customer_field)
+            if customer:
+                self.customer = customer
+                return
+
+    def _reconcile_payment(self):
+        from frappe_mpsa_payments.money_in.common import settings_for_shortcode
+
+        settings_name = settings_for_shortcode(self.businessshortcode)
+        settings = settings_name and frappe.db.get_value(
+            "Mpesa Settings",
+            settings_name,
+            ["auto_reconcile_c2b", "auto_create_sales_invoice"],
+            as_dict=True,
+        )
+
+        if not settings or not settings.auto_reconcile_c2b or not self.payment_entry:
+            return
+
+        invoice, order = self._get_matching_refs()
+
+        if order and settings.auto_create_sales_invoice:
+            self._create_sales_invoice_from_order(order)
+
+        else:
+            # Fallback: FIFO
+            outstanding_invoices = get_outstanding_invoices(
+                customer=self.customer, company=self.company
+            )
+
+            if outstanding_invoices:
+                self._reconcile_against_invoice(outstanding_invoices)
+
+    def _get_matching_refs(self):
+        """
+        Returns a tuple (invoice, sales_order), where exactly one is non-None if billrefnumber matched either.
+        Otherwise both are None.
+        """
+        matched_type = self.get("matched_reference_doctype")
+        matched_name = self.get("matched_reference_name")
+        if matched_type == "Sales Invoice" and matched_name:
+            if frappe.db.get_value(
+                "Sales Invoice",
+                {"name": matched_name, "docstatus": 1, "outstanding_amount": (">", 0)},
+                "name",
+            ):
+                return matched_name, None
+        elif matched_type == "Sales Order" and matched_name:
+            if frappe.db.get_value(
+                "Sales Order",
+                {"name": matched_name, "docstatus": 1, "status": ("not in", ["Closed", "Completed"])},
+                "name",
+            ):
+                return None, matched_name
+
+        invoice = self._find_matching_invoice()
+        if invoice:
+            return invoice, None
+
+        order = self._find_matching_sales_order()
+        if order:
+            return None, order
+
+        return None, None
+
+    def _find_matching_invoice(self):
+        if not self.billrefnumber:
+            return None
+
+        return frappe.get_value(
+            "Sales Invoice",
+            {
+                "name": self.billrefnumber,
+                "docstatus": 1,
+                "company": self.company,
+                "customer": self.customer,
+                "outstanding_amount": (">", 0),
+            },
+            "name",
+        )
+
+    def _find_matching_sales_order(self):
+        if not self.billrefnumber:
+            return None
+
+        return frappe.get_value(
+            "Sales Order",
+            {
+                "name": self.billrefnumber,
+                "docstatus": 1,
+                "company": self.company,
+                "customer": self.customer,
+                "status": ("not in", ["Closed", "Completed"]),
+            },
+            "name",
+        )
+
+    def _create_sales_invoice_from_order(self, sales_order):
+        try:
+            from erpnext.selling.doctype.sales_order.sales_order import (
+                make_sales_invoice,
+            )
+
+            si = make_sales_invoice(sales_order)
+            # si.allocate_advances_automatically = True
+            si.insert(ignore_permissions=True)
+            si.submit()
+
+            return si.name
+
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"Sales Invoice Creation Failed for SO {sales_order}",
+            )
+            return None
+
+    def _reconcile_against_invoice(self, invoice_list):
+        if isinstance(invoice_list, str):
+            invoice_list = [invoice_list]
+
+        create_and_reconcile_payment_reconciliation(
+            outstanding_invoices=invoice_list,
+            customer=self.customer,
+            company=self.company,
+            payment_entries=[self.payment_entry],
+        )

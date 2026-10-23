@@ -1,11 +1,9 @@
-## Mpsa Suite
+## Astral M-Pesa Suite
 
 M-Pesa for Frappe / ERPNext **v15 and v16**, built and maintained by **Astral Industries Limited**
 (Nairobi, Kenya). One app for everything Astral does with M-Pesa: collecting money (C2B paybill
 and till payments, STK prompts), paying people (B2C, B2B), reversals, the bank side of every
 receipt, Payment Entries, reconciliation, and an external Payments API for chatbots and shops.
-Until 2026-10-22 it was called "Astral M-Pesa Suite", with the Python package
-`frappe_mpsa_payments` (see [Package name](#package-name)).
 
 What changed against the upstream app, release by release, is in [SUITE_CHANGES.md](SUITE_CHANGES.md).
 The external API is documented in [docs/PAYMENTS_API.md](docs/PAYMENTS_API.md).
@@ -34,37 +32,21 @@ The external API is documented in [docs/PAYMENTS_API.md](docs/PAYMENTS_API.md).
   accounting entries are retried until they are booked.
 - **B2B** paybill / till payments, **Reversals**, and **B2C Transaction Status** checks.
 
-**External Payments API** (`/api/method/mpsa_suite.gateway.v1.*`; the old base
-`/api/method/frappe_mpsa_payments.gateway.v1.*` keeps working)
+**External Payments API** (`/api/method/frappe_mpsa_payments.gateway.v1.*`)
 - API clients with keys, limits and IP allow-lists. Payment intents settle from STK, C2B, Pull or a
   typed receipt, and signed webhooks report the outcome.
 
 ### Install
 
 ```bash
-bench get-app https://github.com/syamkerai/frappe-mpesa-suite.git --branch mpsa-suite
-bench --site <site> install-app mpsa_suite
+bench get-app https://github.com/syamkerai/frappe-mpesa-suite.git --branch astral-suite
+bench --site <site> install-app frappe_mpsa_payments
 bench --site <site> migrate
 ```
 
 Requires ERPNext; HRMS is optional (Salary Slip, Expense Claim and Employee Advance payouts).
-
-Uninstalling mpsa_suite would drop every M-Pesa table and delete the settings with their secrets,
-so it is refused unless the site's config has `mpsa_allow_uninstall: 1`.
-
-### Package name
-
-The Python package is `mpsa_suite` (module "Mpsa Suite"). Up to release `ee5b201` on branch
-`astral-suite` it kept the upstream name `frappe_mpsa_payments`. DocType names, tables, roles and
-settings did not change.
-
-- **Old URLs keep working.** `override_whitelisted_methods` in `mpsa_suite/hooks.py` sends each of
-  the 70 old `/api/method/frappe_mpsa_payments...` paths to the same function in mpsa_suite. This
-  covers the callback URLs already registered with Safaricom, the Payments API and the pay page.
-  The table stays for good.
-- **A site that runs `frappe_mpsa_payments`** moves by a hand-over: install mpsa_suite next to it,
-  then uninstall the old app. Never uninstall the old app first. The safeguards and the test
-  evidence are in [docs/RENAME_SPIKE.md](docs/RENAME_SPIKE.md).
+The Python package keeps the upstream name `frappe_mpsa_payments`, so the callback URLs already
+registered with Safaricom keep working.
 
 ### Configure
 
@@ -88,7 +70,7 @@ access they need.
 
 ### Licence
 
-Mpsa Suite (formerly Astral M-Pesa Suite) is a modified version of
+Astral M-Pesa Suite is a modified version of
 [navariltd/frappe-mpsa-payments](https://github.com/navariltd/frappe-mpsa-payments)
 (© Navari Limited and contributors), which is licensed under the **GNU Affero General Public
 License v3.0**. This modified version is distributed under the same licence; see

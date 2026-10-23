@@ -1,9 +1,9 @@
 [project]
-name = "mpsa_suite"
+name = "frappe_mpsa_payments"
 authors = [
     { name = "Astral Industries Limited", email = "finance@astralind.com"}
 ]
-description = "Mpsa Suite: Daraja C2B, STK, B2C, B2B, bank feeds, payment entries and reconciliation for Frappe/ERPNext v15 and v16"
+description = "Astral M-Pesa Suite: Daraja C2B, STK, B2C, B2B, bank feeds, payment entries and reconciliation for Frappe/ERPNext v15 and v16"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]

@@ -15,7 +15,7 @@ import types
 import openpyxl
 import pytest
 
-from mpsa_suite.wallet import statement_file as sf
+from frappe_mpsa_payments.wallet import statement_file as sf
 
 HEADER = ["Receipt No.", "Completion Time", "Initiation Time", "Details", "Transaction Status", "Paid In",
           "Withdrawn", "Balance", "Balance Confirmed", "Reason Type", "Other Party Info", "Linked Transaction ID",

@@ -81,8 +81,8 @@ def env(monkeypatch):
         frappe.db.table("Mpesa API Client")[CLIENT] = {"name": CLIENT, "mpesa_settings": "Astral 4134019",
                                                        "webhook_url": "https://shop.example.com/hook"}
 
-        intents = importlib.import_module("mpsa_suite.gateway.intents")
-        webhooks = importlib.import_module("mpsa_suite.gateway.webhooks")
+        intents = importlib.import_module("frappe_mpsa_payments.gateway.intents")
+        webhooks = importlib.import_module("frappe_mpsa_payments.gateway.webhooks")
         booked, queued = [], []
 
         def fake_book_direct(intent, receipt, amount, paid_at, settings_name, note=None):
@@ -138,7 +138,7 @@ def match_logs(env, receipt=None):
 
 def on_payment_authorized(env, name="MPI-26-10-000001"):
     module = importlib.import_module(
-        "mpsa_suite.mpsa_suite.doctype.mpesa_payment_intent.mpesa_payment_intent"
+        "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_payment_intent.mpesa_payment_intent"
     )
     doc = module.MpesaPaymentIntent()
     doc.name = name
@@ -147,7 +147,7 @@ def on_payment_authorized(env, name="MPI-26-10-000001"):
 
 # ---------------------------------------------------------------- C22: webhooks never block a status
 def test_delivery_url_field_holds_a_long_callback_url():
-    meta = json.loads((REPO / "mpsa_suite/mpsa_suite/doctype/mpesa_webhook_delivery/"
+    meta = json.loads((REPO / "frappe_mpsa_payments/frappe_mpsa_payments/doctype/mpesa_webhook_delivery/"
                                "mpesa_webhook_delivery.json").read_text(encoding="utf-8"))
     url = next(f for f in meta["fields"] if f["fieldname"] == "url")
     # Data is varchar(140) and refuses longer values; intents accept callback_url up to 1000 chars
@@ -424,7 +424,7 @@ def test_sync_open_books_no_extras_with_matching_off(env, monkeypatch):
 
 
 def test_resend_refused_while_a_paid_prompt_awaits_confirmation(env, monkeypatch):
-    from mpsa_suite.gateway.auth import ApiError
+    from frappe_mpsa_payments.gateway.auth import ApiError
 
     monkeypatch.setattr(env.intents, "refresh", lambda name: None)
     paid_callback = {"ResultCode": 0, "CallbackMetadata": {"Item": [{"Name": "MpesaReceiptNumber", "Value": "R1"}]}}
@@ -505,7 +505,7 @@ def test_one_companys_records_on_a_number_book_with_the_collecting_one(env):
 
 
 def test_client_shortcodes_choose_like_settings_for_shortcode(env):
-    from mpsa_suite.money_in.common import settings_for_shortcode
+    from frappe_mpsa_payments.money_in.common import settings_for_shortcode
 
     settings = env.frappe.db.table("Mpesa Settings")
     rows = dict(settings)

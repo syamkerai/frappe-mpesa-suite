@@ -35,7 +35,7 @@ class NewDoc(fake_frappe.FakeDoc):
 def env(monkeypatch):
     frappe, saved = fake_frappe.install()
     # m_pesa_api imports the security-credential helper, which needs `cryptography`
-    stub = types.ModuleType("mpsa_suite.utils.encoding_initiator_password")
+    stub = types.ModuleType("frappe_mpsa_payments.utils.encoding_initiator_password")
     stub.generate_security_credential = lambda *a, **kw: ""
     sys.modules[stub.__name__] = stub
     try:
@@ -49,10 +49,10 @@ def env(monkeypatch):
         }
         mods = fake_frappe._dict(
             frappe=frappe,
-            receipts=importlib.import_module("mpsa_suite.money_in.receipts"),
-            c2b_verify=importlib.import_module("mpsa_suite.money_in.c2b_verify"),
-            handler=importlib.import_module("mpsa_suite.mpsa_suite.api.mpesa_response_handler"),
-            hourly=importlib.import_module("mpsa_suite.services.b2c_pull_transaction_scheduler_service"),
+            receipts=importlib.import_module("frappe_mpsa_payments.money_in.receipts"),
+            c2b_verify=importlib.import_module("frappe_mpsa_payments.money_in.c2b_verify"),
+            handler=importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.api.mpesa_response_handler"),
+            hourly=importlib.import_module("frappe_mpsa_payments.services.b2c_pull_transaction_scheduler_service"),
             queried=[],
         )
         monkeypatch.setattr(mods.c2b_verify, "send_query", lambda ir_name: mods.queried.append(ir_name))

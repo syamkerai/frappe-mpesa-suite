@@ -1,0 +1,143 @@
+{
+ "actions": [],
+ "creation": "2026-10-18 18:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "intent",
+  "client",
+  "event",
+  "column_break_a",
+  "status",
+  "attempts",
+  "next_attempt_at",
+  "request_section",
+  "url",
+  "payload",
+  "response_section",
+  "response_code",
+  "response_body",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "intent",
+   "fieldtype": "Link",
+   "options": "Mpesa Payment Intent",
+   "label": "Payment Intent",
+   "in_list_view": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "client",
+   "fieldtype": "Link",
+   "options": "Mpesa API Client",
+   "label": "Client",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "event",
+   "fieldtype": "Data",
+   "label": "Event",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "options": "Pending\nDelivered\nFailed",
+   "label": "Status",
+   "default": "Pending",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts"
+  },
+  {
+   "fieldname": "next_attempt_at",
+   "fieldtype": "Datetime",
+   "label": "Next Attempt At",
+   "search_index": 1
+  },
+  {
+   "fieldname": "request_section",
+   "fieldtype": "Section Break",
+   "label": "Request"
+  },
+  {
+   "fieldname": "url",
+   "fieldtype": "Small Text",
+   "label": "URL"
+  },
+  {
+   "fieldname": "payload",
+   "fieldtype": "Code",
+   "options": "JSON",
+   "label": "Payload"
+  },
+  {
+   "fieldname": "response_section",
+   "fieldtype": "Section Break",
+   "label": "Last Response"
+  },
+  {
+   "fieldname": "response_code",
+   "fieldtype": "Int",
+   "label": "HTTP Status"
+  },
+  {
+   "fieldname": "response_body",
+   "fieldtype": "Small Text",
+   "label": "Response Body (first 1000 chars)"
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-20 21:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Mpsa Payments",
+ "name": "Mpesa Webhook Delivery",
+ "owner": "Administrator",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "autoname": "hash",
+ "in_create": 1,
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "share": 1,
+   "email": 1
+  },
+  {
+   "read": 1,
+   "role": "M-Pesa Manager",
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "share": 1,
+   "email": 1
+  }
+ ]
+}

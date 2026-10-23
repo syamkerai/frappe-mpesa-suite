@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from mpsa_suite.utils.phone import (
+from frappe_mpsa_payments.utils.phone import (
     is_safaricom,
     looks_like_sha256,
     mask,

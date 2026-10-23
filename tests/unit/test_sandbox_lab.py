@@ -12,7 +12,7 @@ import pytest
 import fake_frappe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RUN_JSON = os.path.join(ROOT, "mpsa_suite", "mpsa_suite", "doctype",
+RUN_JSON = os.path.join(ROOT, "frappe_mpsa_payments", "frappe_mpsa_payments", "doctype",
                         "mpesa_sandbox_test_run", "mpesa_sandbox_test_run.json")
 NOW = datetime.datetime(2026, 10, 18, 12, 0, 0)
 
@@ -26,11 +26,11 @@ def env():
         frappe.db.table("M-Pesa Suite Settings")["M-Pesa Suite Settings"] = {}
         mods = {
             "frappe": frappe,
-            "payloads": importlib.import_module("mpsa_suite.sandbox_lab.payloads"),
-            "guard": importlib.import_module("mpsa_suite.sandbox_lab.guard"),
-            "fw": importlib.import_module("mpsa_suite.sandbox_lab.framework"),
-            "sc": importlib.import_module("mpsa_suite.sandbox_lab.scenarios"),
-            "runner": importlib.import_module("mpsa_suite.sandbox_lab.runner"),
+            "payloads": importlib.import_module("frappe_mpsa_payments.sandbox_lab.payloads"),
+            "guard": importlib.import_module("frappe_mpsa_payments.sandbox_lab.guard"),
+            "fw": importlib.import_module("frappe_mpsa_payments.sandbox_lab.framework"),
+            "sc": importlib.import_module("frappe_mpsa_payments.sandbox_lab.scenarios"),
+            "runner": importlib.import_module("frappe_mpsa_payments.sandbox_lab.runner"),
         }
         yield fake_frappe._dict(mods)
     finally:
@@ -39,7 +39,7 @@ def env():
 
 # ---------------------------------------------------------------- payloads (pure)
 def test_simulate_paybill_and_buy_goods():
-    from mpsa_suite.sandbox_lab import payloads as p
+    from frappe_mpsa_payments.sandbox_lab import payloads as p
 
     body = p.c2b_simulate("600999", 10, bill_ref="SINV-1")
     assert body == {"ShortCode": "600999", "CommandID": "CustomerPayBillOnline", "Amount": 10,
@@ -51,7 +51,7 @@ def test_simulate_paybill_and_buy_goods():
 
 
 def test_fake_receipts_are_recognisable():
-    from mpsa_suite.sandbox_lab import payloads as p
+    from frappe_mpsa_payments.sandbox_lab import payloads as p
 
     r = p.fake_receipt(random.Random(1))
     assert len(r) == 10 and r.startswith("ZZ") and r.isalnum() and r.isupper()
@@ -59,14 +59,14 @@ def test_fake_receipts_are_recognisable():
 
 
 def test_typo_variant_is_what_the_matcher_repairs():
-    from mpsa_suite.sandbox_lab import payloads as p
+    from frappe_mpsa_payments.sandbox_lab import payloads as p
 
     assert p.typo_variant("ACC-SINV-2026-00012") == "accsinv202600012"
     assert p.typo_variant("abc123") == "ABC123"  # never returns the reference unchanged
 
 
 def test_stk_callbacks_paid_and_cancelled():
-    from mpsa_suite.sandbox_lab import payloads as p
+    from frappe_mpsa_payments.sandbox_lab import payloads as p
 
     paid = p.stk_callback("ws_CO_1", "M1", 0, 10, "ZZ12345678", "254712345678", NOW)["Body"]["stkCallback"]
     items = {i["Name"]: i["Value"] for i in paid["CallbackMetadata"]["Item"]}
@@ -79,7 +79,7 @@ def test_stk_callbacks_paid_and_cancelled():
 
 
 def test_confirmation_rebuilt_from_register():
-    from mpsa_suite.sandbox_lab import payloads as p
+    from frappe_mpsa_payments.sandbox_lab import payloads as p
 
     row = {"transid": "SBX1", "transamount": 10, "businessshortcode": "600999", "billrefnumber": "SINV-1",
            "msisdn": "254708374149", "transtime": "20261018120000", "firstname": "John"}
@@ -249,71 +249,3 @@ def test_rejected_answer_detection(env):
     assert env.fw.rejected({"ResultCode": 1, "ResultDesc": "Rejected"})
     assert not env.fw.rejected({"ResultCode": 0, "ResultDesc": "Accepted"})
     assert not env.fw.rejected({"_raw": "Internal Server Error"})
-
-
-# ---------------------------------------------------------------- B2B
-def test_b2b_pay_ticks_the_earlier_payouts_box_for_its_own_test_supplier(env, monkeypatch):
-    # earlier lab runs left supplier advances to the test supplier: submit would be refused
-    # until someone ticks that none of them paid the test invoice
-    env.frappe.db.table("Mpesa Settings")["SBX B2B"] = {"name": "SBX B2B"}
-    made = []
-
-    class Request(fake_frappe._dict):
-        def insert(self):
-            self.name = "MB2B-LAB"
-            made.append(dict(self))
-            return self
-
-        def submit(self):
-            made.append("submitted")
-
-    real_get_doc = env.frappe.get_doc
-    monkeypatch.setattr(env.frappe, "get_doc",
-                        lambda d, *a, **kw: Request(d) if isinstance(d, dict) else real_get_doc(d, *a, **kw))
-    run = make_run(env, ("b2b_pay", "Pending"), b2b_settings="SBX B2B", test_supplier="Lab Supplier", amount=10,
-                   test_purchase_invoice="PINV-LAB")
-    env.sc.start_b2b_pay(env.fw.Ctx(run, run.cases[0]))
-    assert made[0]["checked_earlier_payouts"] == 1 and made[0]["purchase_invoice"] == "PINV-LAB"
-    assert made[1] == "submitted"
-
-
-@pytest.mark.parametrize("values, minutes, status, text", [
-    ({"entry_status": "Entry Made", "payment_entry": "ACC-PAY-1"}, 1, "Passed", "booked by ACC-PAY-1 (Entry Made)"),
-    ({"entry_status": "Draft Entry", "payment_entry": "ACC-PAY-1"}, 1, "Passed", "(Draft Entry)"),
-    ({"entry_status": "Needs Checking", "payment_entry": "ACC-PAY-1", "entry_note": "KES 10 is not allocated"}, 1,
-     "Failed", "the entry needs checking: KES 10 is not allocated"),
-    ({"entry_status": "Entry Not Made", "entry_note": "Booking the entry…"}, 1, "Waiting", "waiting for the accounting"),
-    ({"entry_status": "Entry Not Made", "entry_note": "Could not book automatically: closed."}, 7, "Failed",
-     "no accounting entry after 6 minutes: Could not book automatically: closed."),
-])
-def test_b2b_pay_check_reads_the_accounting_entry(env, values, minutes, status, text):
-    env.frappe.db.table("Mpesa B2B Payment Request")["MB2B-LAB"] = {
-        "name": "MB2B-LAB", "status": "Paid", "transaction_id": "SBX1", "receiver_public_name": "600000 - LAB",
-        **values}
-    run = make_run(env, ("b2b_pay", "Waiting"))
-    ctx = env.fw.Ctx(run, run.cases[0])
-    ctx.state.update(request="MB2B-LAB", since=NOW - datetime.timedelta(minutes=minutes))
-    result, message = env.sc.check_b2b_pay(ctx)
-    assert result == status and text in message
-
-
-def test_b2b_pay_skips_when_sending_is_refused(env, monkeypatch):
-    # the test invoice has nothing left to pay (earlier runs paid it), the supplier is on hold...:
-    # refused at submit, before anything is sent
-    env.frappe.db.table("Mpesa Settings")["SBX B2B"] = {"name": "SBX B2B"}
-
-    class Request(fake_frappe._dict):
-        def insert(self):
-            self.name = "MB2B-LAB"
-            return self
-
-        def submit(self):
-            raise env.frappe.ValidationError("KES 10 is more than is left to pay.")
-
-    real_get_doc = env.frappe.get_doc
-    monkeypatch.setattr(env.frappe, "get_doc",
-                        lambda d, *a, **kw: Request(d) if isinstance(d, dict) else real_get_doc(d, *a, **kw))
-    run = make_run(env, ("b2b_pay", "Pending"), b2b_settings="SBX B2B", test_supplier="Lab Supplier", amount=10,
-                   test_purchase_invoice="PINV-LAB")
-    with pytest.raises(env.fw.Skip, match="^Could not send the B2B payment: KES 10 is more than is left to pay.$"):
-        env.sc.start_b2b_pay(env.fw.Ctx(run, run.cases[0]))

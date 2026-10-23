@@ -1,0 +1,241 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "MB2CQ-.YY.-.MM.-.######",
+ "creation": "2026-10-18 20:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "b2c_request",
+  "mpesa_settings",
+  "query_by",
+  "query_value",
+  "column_break_a",
+  "status",
+  "outcome",
+  "outcome_reason",
+  "applied",
+  "result_section",
+  "transaction_status",
+  "receipt_no",
+  "amount",
+  "finalised_time",
+  "column_break_b",
+  "result_code",
+  "result_desc",
+  "debit_party_name",
+  "credit_party_name",
+  "ids_section",
+  "conversation_id",
+  "column_break_c",
+  "originator_conversation_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "b2c_request",
+   "fieldtype": "Link",
+   "label": "B2C Request",
+   "options": "B2C Disbursement Request",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "mpesa_settings",
+   "fieldtype": "Link",
+   "label": "Mpesa Settings",
+   "options": "Mpesa Settings",
+   "read_only": 1
+  },
+  {
+   "fieldname": "query_by",
+   "fieldtype": "Select",
+   "label": "Query By",
+   "options": "TransactionID\nOriginalConversationID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "query_value",
+   "fieldtype": "Data",
+   "label": "Query Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_a",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Queued\nSent\nFailed to Send\nTimed Out\nResult Received",
+   "default": "Queued",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "label": "Outcome",
+   "options": "\nPaid\nFailed\nUnresolved",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "outcome_reason",
+   "fieldtype": "Small Text",
+   "label": "Outcome Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "applied",
+   "fieldtype": "Check",
+   "label": "Applied to Payout",
+   "default": "0",
+   "read_only": 1
+  },
+  {
+   "fieldname": "result_section",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "transaction_status",
+   "fieldtype": "Data",
+   "label": "Transaction Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "receipt_no",
+   "fieldtype": "Data",
+   "label": "Receipt",
+   "search_index": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "finalised_time",
+   "fieldtype": "Datetime",
+   "label": "Finalised At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_b",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "result_code",
+   "fieldtype": "Data",
+   "label": "Result Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "result_desc",
+   "fieldtype": "Small Text",
+   "label": "Result Description",
+   "read_only": 1
+  },
+  {
+   "fieldname": "debit_party_name",
+   "fieldtype": "Data",
+   "label": "Debit Party",
+   "read_only": 1
+  },
+  {
+   "fieldname": "credit_party_name",
+   "fieldtype": "Data",
+   "label": "Credit Party",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ids_section",
+   "fieldtype": "Section Break",
+   "label": "IDs",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "conversation_id",
+   "fieldtype": "Data",
+   "label": "Conversation ID",
+   "search_index": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_c",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "originator_conversation_id",
+   "fieldtype": "Data",
+   "label": "Originator Conversation ID",
+   "search_index": 1,
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-18 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Mpsa Payments",
+ "name": "Mpesa B2C Status Query",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "delete": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Payer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Viewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "in_create": 1
+}

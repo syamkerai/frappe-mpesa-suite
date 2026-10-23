@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from mpsa_suite.daraja import money_out as m
+from frappe_mpsa_payments.daraja import money_out as m
 
 URLS = dict(result_url="https://x/r?ref=A&t=s", queue_timeout_url="https://x/q?ref=A&t=s")
 CRED = dict(initiator="api_user", security_credential="c2VjcmV0")

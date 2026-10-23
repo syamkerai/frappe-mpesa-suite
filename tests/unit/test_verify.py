@@ -1,4 +1,4 @@
-from mpsa_suite.daraja.verify import (
+from frappe_mpsa_payments.daraja.verify import (
     FAILED,
     MISMATCH,
     PENDING,
@@ -8,7 +8,7 @@ from mpsa_suite.daraja.verify import (
     parse_stk_callback,
     stk_verification,
 )
-from mpsa_suite.utils.payouts import owed
+from frappe_mpsa_payments.utils.payouts import owed
 
 # ---------------------------------------------------------------- STK
 PAID_CALLBACK = {

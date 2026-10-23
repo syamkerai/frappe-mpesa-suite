@@ -137,7 +137,7 @@ def env(monkeypatch):
         frappe.db.table(SUITE)[SUITE] = {"name": SUITE, "poll_stk_status": 1, "verify_stk_callbacks": 1,
                                          "amount_tolerance": 1}
         # The security-credential helper needs the cryptography package, not under test here.
-        enc = types.ModuleType("mpsa_suite.utils.encoding_initiator_password")
+        enc = types.ModuleType("frappe_mpsa_payments.utils.encoding_initiator_password")
         enc.generate_security_credential = lambda *a, **kw: ""
         monkeypatch.setitem(sys.modules, enc.__name__, enc)
         yield fake_frappe._dict(frappe=frappe, monkeypatch=monkeypatch)
@@ -157,7 +157,7 @@ def prompt(env, name, **kw):
 
 # ================================================================ C03: windows on the latest prompt
 def test_poller_keys_its_window_on_the_latest_prompt(env):
-    stk_poll = importlib.import_module("mpsa_suite.money_in.stk_poll")
+    stk_poll = importlib.import_module("frappe_mpsa_payments.money_in.stk_poll")
     polled = []
     env.monkeypatch.setattr(stk_poll, "poll", polled.append)
     prompt(env, "OLD-REPROMPT", creation=ago(hours=3), timestamp=ago(minutes=10))  # lost callback, re-prompt
@@ -176,7 +176,7 @@ def test_poller_keys_its_window_on_the_latest_prompt(env):
     (20, ["CR-5", "TS-5", "CR-4", "TS-4", "CR-3", "TS-3", "CR-2", "TS-2", "CR-1", "TS-1"]),
 ])
 def test_prompted_between_keeps_the_oldest_prompts_across_both_queries(env, limit, expected):
-    stk_poll = importlib.import_module("mpsa_suite.money_in.stk_poll")
+    stk_poll = importlib.import_module("frappe_mpsa_payments.money_in.stk_poll")
     for i in range(1, 6):  # each query alone has more rows than the smaller limits
         prompt(env, f"TS-{i}", creation=ago(hours=5), timestamp=ago(minutes=10 * i + 1))  # re-prompted
         prompt(env, f"CR-{i}", creation=ago(minutes=10 * i + 5))  # no timestamp: its creation counts
@@ -200,8 +200,8 @@ def _callback(receipt="SJK1ABC2DE", amount=1000):
     (None, "Unverified"),  # no timestamp: from creation
 ])
 def test_give_up_counts_from_the_latest_prompt(env, sent, expected):
-    stk_verify = importlib.import_module("mpsa_suite.money_in.stk_verify")
-    stk_poll = importlib.import_module("mpsa_suite.money_in.stk_poll")
+    stk_verify = importlib.import_module("frappe_mpsa_payments.money_in.stk_verify")
+    stk_poll = importlib.import_module("frappe_mpsa_payments.money_in.stk_poll")
     env.monkeypatch.setattr(stk_poll, "stk_query", lambda req: None)  # no final answer (spike arrest)
     env.monkeypatch.setattr(stk_verify, "log_match", lambda *a, **kw: None)
     prompt(env, "MEXP-1", creation=ago(hours=8), timestamp=sent, verification_status="Pending",
@@ -211,7 +211,7 @@ def test_give_up_counts_from_the_latest_prompt(env, sent, expected):
 
 
 def test_sweep_retries_a_failed_booking_of_a_late_reprompt(env):
-    stk_verify = importlib.import_module("mpsa_suite.money_in.stk_verify")
+    stk_verify = importlib.import_module("frappe_mpsa_payments.money_in.stk_verify")
     booked = []
     env.monkeypatch.setattr(stk_verify, "book", booked.append)
     paid = {"status": "Completed", "verification_status": "Verified", "transaction_id": "SJK1ABC2DE"}
@@ -233,7 +233,7 @@ class ExpressDoc(fake_frappe.FakeDoc):
 
 
 def reversal_env(env):
-    stk_verify = importlib.import_module("mpsa_suite.money_in.stk_verify")
+    stk_verify = importlib.import_module("frappe_mpsa_payments.money_in.stk_verify")
     env.frappe.calls, env.logged = [], []
     plain = env.frappe.get_doc
     env.frappe.get_doc = lambda dt, name=None, **kw: (
@@ -326,7 +326,7 @@ class NewExpress:
 
 
 def settings(env, limit=150000, **kw):
-    module = importlib.import_module("mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings")
+    module = importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_settings.mpesa_settings")
     env.frappe.inserted, env.frappe.sent, env.frappe.kes_rate = [], [], 129
     env.frappe.new_doc = lambda doctype: NewExpress(env.frappe)
     env.monkeypatch.setattr(module, "convert_amount_to_kes", lambda currency, amount, *a, **kw: amount * 129)
@@ -523,7 +523,7 @@ def booking_env(env, per_billed=100, outstanding=50000, meta=None, invoice_owes=
                                    mode_of_payment=mode_of_payment, reference_no=reference_no, submit=submit,
                                    party_account=party_account, references=references))
 
-    pe_module = types.ModuleType("mpsa_suite.mpsa_suite.api.payment_entry")
+    pe_module = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.payment_entry")
     pe_module.create_payment_entry = create_payment_entry
     pe_module.get_bank_cash_account = lambda company, mode_of_payment, bank_account=None: (
         fake_frappe._dict(account="Mpesa MoP - TC", account_currency="KES") if mode_of_payment == "Mpesa-TEST" else None
@@ -544,7 +544,7 @@ def booking_env(env, per_billed=100, outstanding=50000, meta=None, invoice_owes=
         env.monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     for module in (pe_module, party, accounts_utils, so_module):
         env.monkeypatch.setitem(sys.modules, module.__name__, module)
-    return importlib.import_module("mpsa_suite.utils.utils")
+    return importlib.import_module("frappe_mpsa_payments.utils.utils")
 
 
 def test_prompt_on_a_request_whose_order_was_billed_books_against_its_invoice(env):
@@ -643,7 +643,7 @@ def test_old_erpnext_without_party_account_currency_still_books(env):
 
 
 # ================================================================ desk: Initiate STK Push button
-JS = REPO / "mpsa_suite/mpsa_suite/doctype/mpesa_express_request/mpesa_express_request.js"
+JS = REPO / "frappe_mpsa_payments/frappe_mpsa_payments/doctype/mpesa_express_request/mpesa_express_request.js"
 JS_HARNESS = r"""
 const src = require("fs").readFileSync(process.argv[1], "utf8");
 let handlers;

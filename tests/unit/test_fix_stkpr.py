@@ -158,7 +158,7 @@ def env(monkeypatch):
         exceptions = types.ModuleType("frappe.exceptions")
         exceptions.DoesNotExistError = frappe.DoesNotExistError
         monkeypatch.setitem(sys.modules, "frappe.exceptions", exceptions)
-        api = types.ModuleType("mpsa_suite.mpsa_suite.api.m_pesa_api")
+        api = types.ModuleType("frappe_mpsa_payments.frappe_mpsa_payments.api.m_pesa_api")
         api.check_transaction_status = api.initiate_stk_push = lambda **kw: None
         sys.modules[api.__name__] = api  # dropped again by fake_frappe.uninstall
 
@@ -172,9 +172,9 @@ def env(monkeypatch):
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
         monkeypatch.setitem(sys.modules, so_module.__name__, so_module)
 
-        utils = importlib.import_module("mpsa_suite.utils.utils")
+        utils = importlib.import_module("frappe_mpsa_payments.utils.utils")
         mer = importlib.import_module(
-            "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request"
+            "frappe_mpsa_payments.frappe_mpsa_payments.doctype.mpesa_express_request.mpesa_express_request"
         )
         yield fake_frappe._dict(frappe=frappe, utils=utils, mer=mer)
     finally:

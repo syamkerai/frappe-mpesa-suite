@@ -17,7 +17,7 @@ import pytest
 
 import fake_frappe
 
-STATEMENT = "mpsa_suite.money_out.statement"
+STATEMENT = "frappe_mpsa_payments.money_out.statement"
 B2C, B2B, BT = "B2C Disbursement Request", "Mpesa B2B Payment Request", "Bank Transaction"
 BANDS = "100 = 0\n1500 = 5\n5000 = 9\n20000 = 11\n250000 = 13"
 
@@ -237,37 +237,6 @@ def test_b2b_without_charges_gets_only_its_line(env):
     assert env.calls.entries == []
 
 
-def test_b2b_paid_after_its_request_was_cancelled_still_gets_its_lines(env):
-    # a late Result on a cancelled Unknown request: the money left, so the line and charge are made
-    b2b(env, docstatus=2)
-    env.statement.after_payout(B2B, "MB2B-26-10-000012")
-    assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM", "CHG-UJMTM632YM"]
-
-
-@pytest.mark.parametrize("state", [{"status": "Failed", "docstatus": 2}, {"status": "Unknown", "docstatus": 2},
-                                   {"status": "Initiated"}])
-def test_a_b2b_that_is_not_paid_gets_no_lines(env, state):
-    b2b(env, **state)
-    env.statement.after_payout(B2B, "MB2B-26-10-000012")
-    assert env.calls.lines == []
-
-
-def test_b2b_line_names_the_order_it_paid(env):
-    b2b(env, purchase_order="PUR-ORD-2026-00007")
-    env.statement.after_payout(B2B, "MB2B-26-10-000012")
-    assert "| PUR-ORD-2026-00007 |" in env.calls.lines[0]["description"]
-
-
-def test_sweep_also_feeds_cancelled_b2b_requests_that_were_paid(env, monkeypatch):
-    b2b(env, docstatus=2)
-    fed = []
-    monkeypatch.setattr(env.statement, "feed", lambda doctype, name: fed.append((doctype, name)))
-    env.frappe.get_all = lambda doctype, **kw: env.frappe.db.get_all(doctype, filters=kw.get("filters"))
-    b2c(env, docstatus=2)  # a B2C request is never fed once cancelled
-    env.statement.sweep_missing()
-    assert fed == [(B2B, "MB2B-26-10-000012")]
-
-
 @pytest.mark.parametrize("state", [{"status": "Failed"}, {"status": "Initiated"}, {"docstatus": 2},
                                    {"transaction_id": ""}, {"transaction_id": None}])
 def test_only_a_paid_payout_with_a_receipt_gets_lines(env, state):
@@ -421,11 +390,11 @@ def test_reconciled_line_is_left_alone(env, recon, monkeypatch):
 # ---------------------------------------------------------------- result jobs
 def test_b2c_result_job_books_then_makes_the_lines(env, monkeypatch):
     calls = []
-    post = types.ModuleType("mpsa_suite.services.b2c_postprocess_service")
+    post = types.ModuleType("frappe_mpsa_payments.services.b2c_postprocess_service")
     post.handle_successful_payment = lambda disbursement, row: calls.append(("book", disbursement, row))
     monkeypatch.setitem(sys.modules, post.__name__, post)
     monkeypatch.setattr(env.statement, "after_payout", lambda doctype, name: calls.append(("lines", doctype, name)))
-    resp = importlib.import_module("mpsa_suite.services.b2c_response_service")
+    resp = importlib.import_module("frappe_mpsa_payments.services.b2c_response_service")
     b2c(env, b2c_payment_disbursement="D-1", b2c_payment_disbursement_reference=None)
 
     resp.update_b2c_reference_status("B2C-1", enqueue_next=True)
@@ -437,10 +406,9 @@ def test_b2c_result_job_books_then_makes_the_lines(env, monkeypatch):
 
 
 def test_b2b_booking_job_books_then_makes_the_lines(env, monkeypatch):
-    b2b_module = importlib.import_module("mpsa_suite.money_out.b2b")
-    entries = importlib.import_module("mpsa_suite.money_out.b2b_entries")
+    b2b_module = importlib.import_module("frappe_mpsa_payments.money_out.b2b")
     calls = []
-    monkeypatch.setattr(entries, "book_automatically", lambda name: calls.append(("book", name)) or "ACC-PAY-22")
+    monkeypatch.setattr(b2b_module, "_book_payment_entry", lambda name: calls.append(("book", name)) or "ACC-PAY-22")
     monkeypatch.setattr(env.statement, "after_payout", lambda doctype, name: calls.append(("lines", doctype, name)))
     assert b2b_module.book_payment_entry("MB2B-26-10-000013") == "ACC-PAY-22"
     assert calls == [("book", "MB2B-26-10-000013"), ("lines", B2B, "MB2B-26-10-000013")]
@@ -451,7 +419,7 @@ def test_settings_refuse_unreadable_bands(env):
     env.frappe.utils.logger = types.SimpleNamespace(set_log_level=lambda *a, **kw: None)
     env.frappe.logger = lambda *a, **kw: None
     module = importlib.import_module(
-        "mpsa_suite.mpsa_suite.doctype.m_pesa_suite_settings.m_pesa_suite_settings")
+        "frappe_mpsa_payments.frappe_mpsa_payments.doctype.m_pesa_suite_settings.m_pesa_suite_settings")
     doc = module.MPesaSuiteSettings()
     doc.get_password = lambda *a, **kw: "token"
     doc.enforce_ip_allowlist = 0
@@ -469,10 +437,9 @@ def test_settings_refuse_unreadable_bands(env):
     ([], None),                                                          # never saved: nothing fed
 ])
 def test_upgrade_starts_payout_lines_at_the_upgrade_date(env, stored, expected):
-    patch = importlib.import_module("mpsa_suite.mpsa_suite.patches.payout_lines_from_upgrade_date")
+    patch = importlib.import_module("frappe_mpsa_payments.frappe_mpsa_payments.patches.payout_lines_from_upgrade_date")
     written = []
-    # the Settings DocType exists; the old-name twin of the patch never ran (R8)
-    env.frappe.db.exists = lambda doctype, name=None: doctype != "Patch Log"
+    env.frappe.db.exists = lambda doctype, name=None: True
     env.frappe.db.sql = lambda query, values=None, **kw: stored
     env.frappe.db.set_single_value = lambda doctype, field, value: written.append((field, value))
     patch.nowdate = lambda: "2026-10-22"
@@ -482,7 +449,7 @@ def test_upgrade_starts_payout_lines_at_the_upgrade_date(env, stored, expected):
 
 def test_a_receipt_on_both_sides_of_one_account_is_two_lines(env):
     # a B2B between two shortcodes mapped to one Bank Account: out of one, into the other
-    bank_transaction = importlib.import_module("mpsa_suite.money_in.bank_transaction")
+    bank_transaction = importlib.import_module("frappe_mpsa_payments.money_in.bank_transaction")
     env.frappe.db.table(BT)["ACC-BTN-IN"] = {"name": "ACC-BTN-IN", "reference_number": "UJMTM632YM",
                                               "transaction_id": "UJMTM632YM", "bank_account": "Mpesa",
                                               "docstatus": 1, "deposit": 10.0, "withdrawal": 0}

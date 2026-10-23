@@ -8,7 +8,7 @@ site** before going live. It refuses to run on live keys.
 
 1. Create a separate Frappe Cloud site (a copy of the live site, or a fresh ERPNext with a test
    company). Tests post real Payment Entries and GL entries on it.
-2. Install `mpsa_suite` (branch `mpsa-suite`) and run `migrate`.
+2. Install `frappe_mpsa_payments` (branch `astral-suite`) and run `migrate`.
 3. Switch the lab on for that site only:
    `bench --site <test-site> set-config mpesa_sandbox_lab 1`
    (Frappe Cloud: Site → Site Config → add `mpesa_sandbox_lab` = `1`).
