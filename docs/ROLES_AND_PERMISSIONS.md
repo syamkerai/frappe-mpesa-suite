@@ -46,7 +46,7 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | # | Risk | Finding | Where | Status |
 |---|---|---|---|---|
 | G1 | **High** | **Role gates skipped on Frappe's v2 API.** `require_for_direct_call` recognised a direct call only by a path ending `.<function>`. `/api/v2/method/<DocType>/<function>` runs any whitelisted name the DocType's controller module holds, imported ones too, and its path ends `/<function>`. Any logged-in user, portal users included, could send STK prompts from any shortcode to any phone (`/api/v2/method/Mpesa Express Request/initiate_stk_push`), query balances and transaction status, and make the one-way Pull registration at Safaricom with a callback URL of their choosing (`/api/v2/method/Mpesa Settings/register_pull_transaction`). | `permissions.py:71`; reached through `mpesa_express_request.py:13`, `mpesa_settings.py:42`; targets `m_pesa_api.py:193`, `:255`, `:339`, `mpesa_settings.py:498`, `:704` | Fixed: every route counts (v1 path and `cmd`, v2 method and DocType-method, `run_doc_method`) |
-| G2 | **High** | **Credentials readable below M-Pesa Manager.** On Mpesa Settings, Consumer Key, Initiator Name, Security Credential (the encrypted initiator password Daraja accepts in place of it) and Access Token were level-0 fields. Accounts Manager could read, export, print and email them; Accounts User and M-Pesa Viewer could read them. On both live sites the site's own rules give read and export to Accounts Manager, Accounts User and other local roles. | `mpesa_settings.json` | Fixed: nine credential fields on permission level 1, held by System Manager and M-Pesa Manager only; export, print and email removed below them; the browser no longer reads those fields (`mpesa_c2b_payment_register_list.js:68`, `mpesa_settings.js`) and the server checks the initiator instead |
+| G2 | **High** | **Credentials readable below M-Pesa Manager.** On Mpesa Settings, Consumer Key, Initiator Name, Security Credential (the encrypted initiator password Daraja accepts in place of it) and Access Token were level-0 fields. Accounts Manager could read, export, print and email them; Accounts User and M-Pesa Viewer could read them. On both live sites the site's own rules give read and export to Accounts Manager, Accounts User and other local roles. | `mpesa_settings.json` | Fixed: nine credential fields on permission level 1, held by System Manager and M-Pesa Manager only; below them Mpesa Settings is `select` only (picked in Link fields, never opened, listed or exported; found by the payouts browser check); the browser no longer reads those fields (`mpesa_c2b_payment_register_list.js:68`, `mpesa_settings.js`) and the server checks the initiator instead |
 | G3 | **High (live)** | **The live sites do not use the app's permissions.** Both have Custom DocPerm rows on B2C Disbursement Request, B2C Payment Disbursement, Mpesa C2B Payment Register, Mpesa C2B Payment Register URL, Mpesa Express Request, Mpesa Settings and Payment Gateway. Frappe then ignores the app's rules for those DocTypes entirely, so JSON hardening alone never reaches production. | live sites (section 5) | Fixed in code: detected and reported on every migrate (one Error Log per change), never deleted; a Manager-only **Check Permissions** dialog compares them with the suite and resets chosen DocTypes; credential fields stay reachable for the site's editors (`access.py`). The reset itself is a rollout step (section 7) |
 | G4 | **High** | **Many people can send money.** Submitting a B2C document sends money. Its submit permission is held by Accounts Manager, HR Manager and System Manager, and nothing on the server checks a role at B2C submit (B2B and reversals do). On the live sites about 15 people per site hold one of those roles. | `b2c_payment_disbursement.py:47`, `b2c_disbursement_request.py:28`, their JSON | Fixed after decisions D1 to D3 (section 9): only the pay roles send, checked at submit, by someone other than who prepared it |
 | G5 | Medium | **Form buttons ran for anyone who can read.** `run_doc_method` asks only for read. So M-Pesa Viewer could start a Safaricom balance query (`get_account_balance_info`), a reader could re-send an STK prompt (`initiate_request`), any reader of a B2C disbursement could pull other documents' outstanding amounts past their permissions (`get_outstanding_reference_documents`, `allocate_amount_to_references`) or rewrite its status (`update_disbursement_status`), and a refused retry (`retry_failed_payments`) was only logged. | `mpesa_settings.py:337`, `mpesa_express_request.py:135`, `b2c_payment_disbursement.py:287`, `:305`, `:383`, `:889` | Fixed |
@@ -101,7 +101,7 @@ Generated from `permission_matrix.py`; do not edit by hand (section 10).
 <!-- BEGIN GENERATED: permission_matrix -->
 ### DocType rights by role
 
-Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d` delete, `R` report, `e` export, `p` print, `m` email, `h` share. `L1:` is permission level 1 (the credential fields). A blank cell is no access.
+Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d` delete, `R` report, `e` export, `p` print, `m` email, `h` share, `S` select. `L1:` is permission level 1 (the credential fields). A blank cell is no access.
 
 | DocType | SysMgr | M-Pesa Mgr | Payer | Collector | Viewer | Acc Mgr | Acc User | HR Mgr | HR User | Sales User | Pur Mgr | Pur User |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -121,7 +121,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | Mpesa Public Key Certificate | `rwcdpmh` | `rwc` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa Reversal Request | `rwcsxadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |
 | Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `r` | `r` | `r` | `rR` | `rR` |  |  |  |  |  |
+| Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `S` | `S` | `S` | `S` | `S` |  |  |  |  |  |
 | Mpesa Statement Import | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rwcdRep` | `rRep` |  |  |  |  |  |
 | Mpesa Statement Row | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Webhook Delivery | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
@@ -346,9 +346,9 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 
 | Role | Must work | Must be refused |
 |---|---|---|
-| M-Pesa Viewer | M-Pesa workspace; lists and reports of STK, C2B, B2C, B2B, reversals; Mpesa Settings opens | Mpesa Settings shows no Consumer Key, Initiator, Security Credential or Access Token; Get Account Balance; any New/Submit/Cancel; Export of Mpesa Settings |
+| M-Pesa Viewer | M-Pesa workspace; lists and reports of STK, C2B, B2C, B2B, reversals; a shortcode can be picked in a Link filter | Mpesa Settings is not in the sidebar and does not open; Refresh Balances / Get Account Balance; any New/Submit/Cancel |
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
-| Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Get Account Balance; transaction status | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; Mpesa Settings credentials or edit |
+| Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Refresh Balances on M-Pesa Payments Due; Transaction Status Query from the C2B register list | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; opening Mpesa Settings |
 | M-Pesa Payer | Submit a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user); Pay Selected on M-Pesa Payments Due for a line someone else prepared; submit a B2C disbursement; retry a failed B2C | Pay Selected on a line they prepared or last changed (maker-checker on); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
 | M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; Check Permissions | Approving an account they entered themselves |
 | Portal / website user | nothing M-Pesa | `/api/v2/method/Mpesa Express Request/initiate_stk_push` and `/api/v2/method/Mpesa Settings/get_account_balance?name=<record>` answer 403 |
@@ -369,8 +369,10 @@ On every site, at once (server checks, whatever the site's own permission rules)
 
 On a site using the suite's own rules (new installs, and DocTypes after a reset):
 
-- Accounts Manager, Accounts User, M-Pesa Viewer: no longer see the nine credential fields of
-  Mpesa Settings; Accounts Manager loses export, print and email of Mpesa Settings.
+- Everyone below M-Pesa Manager (Accounts Manager, Accounts User and the Payer, Collector and
+  Viewer roles) can pick a shortcode in a Link field but no longer opens Mpesa Settings, lists it
+  or sees it in the sidebar (`select` only). Balances: Refresh Balances on M-Pesa Payments Due;
+  transaction status: the C2B register list. Both stay `FINANCE_ROLES`.
 - M-Pesa Viewer: can no longer start a balance query; can now read B2C, STK and C2B records.
 - M-Pesa Payer: can now read, edit and submit (send) B2C documents and read C2B registers.
 - M-Pesa Collector: can now create and submit STK requests and read C2B registers.

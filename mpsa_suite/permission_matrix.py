@@ -23,6 +23,7 @@ RIGHTS = {
     "p": "print",
     "m": "email",
     "h": "share",
+    "S": "select",  # pick the record in a Link field; no form, list or sidebar entry (read implies it)
 }
 
 SM = "System Manager"
@@ -100,10 +101,11 @@ DOCTYPES = {
     "Mpesa Public Key Certificate": {SM: "rwcdpmh", MM: "rwc"},
     "Mpesa Reversal Request": {SM: ALL, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
     "Mpesa Sandbox Test Run": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
+    # Below M-Pesa Manager: pick a shortcode in a Link field only. Balances: Payments Due's Refresh
+    # Balances; transaction status: the C2B register list (both FINANCE_ROLES, no read needed).
     "Mpesa Settings": {
         SM: "rwcdRepmh", MM: "rwcdRepmh",
-        AM: "rR", AU: "rR",
-        MP: "r", MC: "r", MV: "r",
+        AM: "S", AU: "S", MP: "S", MC: "S", MV: "S",
         SM + "@1": "rw", MM + "@1": "rw",
     },
     "Mpesa Statement Import": {SM: "rwcdRep", MM: "rwcdRep", AM: "rwcdRep", AU: "rRep", MV: "rRep"},

@@ -204,7 +204,7 @@ def test_overrides_show_extra_and_missing_rights(site):
     found = {item["doctype"]: item for item in access.overrides()}
     assert sorted(found) == ["B2C Payment Disbursement", "Mpesa Settings"]
     settings = found["Mpesa Settings"]
-    assert {"role": "Accounts User", "permlevel": 0, "rights": ["export"]} in settings["extra"]
+    assert {"role": "Accounts User", "permlevel": 0, "rights": ["export", "read", "report"]} in settings["extra"]
     assert {"role": "M-Pesa Manager", "permlevel": 1, "rights": ["read", "write"]} in settings["missing"]
     b2c = found["B2C Payment Disbursement"]
     assert b2c["extra"] == [{"role": "B2C User", "permlevel": 0, "rights": ["create", "read", "submit", "write"]}]

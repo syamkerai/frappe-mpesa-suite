@@ -20,7 +20,8 @@ from mpsa_suite.money_in import testing as t
 
 DOMAIN = "roles.example.com"
 ROLES = (M.MM, M.MP, M.MC, M.MV, M.AM, M.AU, M.HM, M.HU, M.SU, M.PM, M.PU)
-PTYPES = ("read", "write", "create", "submit", "cancel", "amend", "delete", "report", "export", "print", "email", "share")
+PTYPES = ("read", "select", "write", "create", "submit", "cancel", "amend", "delete", "report", "export", "print",
+          "email", "share")
 SECRETS = M.SECRET_FIELDS["Mpesa Settings"]
 API = "mpsa_suite.mpsa_suite.api.m_pesa_api"
 SETTINGS_MODULE = "mpsa_suite.mpsa_suite.doctype.mpesa_settings.mpesa_settings"
@@ -115,7 +116,8 @@ class TestRolesPermissions(IntegrationTestCase):
                     continue
                 rows = M.rows(doctype)
                 for ptype in PTYPES:
-                    expected = any(ptype in rights for (r, level), rights in rows.items() if r in held and level == 0)
+                    expected = any(ptype in rights or (ptype == "select" and "read" in rights)  # read implies select
+                                   for (r, level), rights in rows.items() if r in held and level == 0)
                     if ptype in ("submit", "cancel", "amend") and not frappe.get_meta(doctype).is_submittable:
                         expected = False
                     actual = bool(frappe.has_permission(doctype, ptype, user=user))
@@ -123,14 +125,24 @@ class TestRolesPermissions(IntegrationTestCase):
                         wrong.append(f"{role}: {doctype} {ptype} is {actual}, matrix {expected}")
         self.assertEqual(wrong, [])
 
-    def test_credentials_hidden_below_mpesa_manager(self):
+    def test_settings_below_mpesa_manager_are_picked_not_opened(self):
+        """Select only: the record can be chosen in a Link field; its form and fields stay closed."""
+        from frappe.desk.search import search_link
+
         for role in (M.AM, M.AU, M.MV, M.MC, M.MP):
             with self.as_user(user_for(role)):
-                doc = frappe.client.get("Mpesa Settings", t.SETTINGS)
-                self.assertEqual([f for f in SECRETS if doc.get(f)], [], role)
-                self.assertTrue(doc.get("business_shortcode"), role)  # the record itself is readable
-                rows = frappe.get_list("Mpesa Settings", fields=["name", "consumer_key", "security_credential",
-                                                                 "initiator_name"], filters={"name": t.SETTINGS})
+                self.assertTrue(frappe.has_permission("Mpesa Settings", "select"), role)
+                self.assertFalse(frappe.has_permission("Mpesa Settings", "read"), role)
+                with self.assertRaises(frappe.PermissionError, msg=role):
+                    frappe.client.get("Mpesa Settings", t.SETTINGS)
+                found = search_link("Mpesa Settings", t.SETTINGS)
+                found = found if found is not None else frappe.response.get("results")
+                self.assertIn(t.SETTINGS, str(found), role)
+                try:
+                    rows = frappe.get_list("Mpesa Settings", fields=["name", "consumer_key", "security_credential",
+                                                                     "initiator_name"], filters={"name": t.SETTINGS})
+                except frappe.PermissionError:
+                    rows = []
                 self.assertEqual([k for r in rows for k, v in r.items() if k != "name" and v], [], role)
         with self.as_user(user_for(M.MM)):
             doc = frappe.client.get("Mpesa Settings", t.SETTINGS)
@@ -190,10 +202,19 @@ class TestRolesPermissions(IntegrationTestCase):
             with self.as_user(user_for(M.MC)):
                 self.call("/api/method/run_doc_method", dt=EXPRESS, dn=name, method="initiate_request")
             self.assertTrue(sent.called)
-        with patch(f"{SETTINGS_MODULE}.in_test", return_value=False), \
-                patch(f"{SETTINGS_MODULE}.get_account_balance") as balance, self.as_user(user_for(M.AU)):
-            self.call("/api/method/run_doc_method", dt="Mpesa Settings", dn=t.SETTINGS, method="get_account_balance_info")
+        with patch(f"{SETTINGS_MODULE}.in_test", return_value=False),                 patch(f"{SETTINGS_MODULE}.get_account_balance") as balance:
+            with self.as_user(user_for(M.AU)):  # cannot open the settings form (select only)
+                self.refused("/api/method/run_doc_method", dt="Mpesa Settings", dn=t.SETTINGS,
+                             method="get_account_balance_info")
+            with self.as_user(user_for(M.MM)):
+                self.call("/api/method/run_doc_method", dt="Mpesa Settings", dn=t.SETTINGS,
+                          method="get_account_balance_info")
             balance.assert_called_once_with(t.SETTINGS)
+        with patch(f"{API}.process_request", return_value={}),                 patch(f"{API}.generate_security_credential", return_value="x"):
+            with self.as_user(user_for(M.AU)):  # Refresh Balances on M-Pesa Payments Due: FINANCE_ROLES
+                self.call(f"/api/method/{API}.get_account_balance", name=t.SETTINGS)
+            with self.as_user(user_for(M.MV)):
+                self.refused(f"/api/method/{API}.get_account_balance", name=t.SETTINGS)
 
     def test_config_actions_refuse_other_roles_in_tests_too(self):
         """frappe.only_for let everyone through in Frappe 15 tests; permissions.require does not."""
@@ -269,7 +290,7 @@ class TestRolesPermissions(IntegrationTestCase):
             self.assertFalse(frappe.has_permission(doctype, "read", user=user_for(M.MM)))
 
             found = {i["doctype"]: i for i in access.overrides()}[doctype]
-            self.assertIn({"role": M.AU, "permlevel": 0, "rights": ["export"]}, found["extra"])
+            self.assertIn({"role": M.AU, "permlevel": 0, "rights": ["export", "read", "report"]}, found["extra"])
             self.assertIn({"role": M.MM, "permlevel": 1, "rights": ["read", "write"]}, found["missing"])
 
             with self.as_user(user_for(M.AM)), self.assertRaises(frappe.PermissionError):
@@ -341,3 +362,39 @@ class TestRolesPermissions(IntegrationTestCase):
                 maker_checker.check(disbursement(payer, payer))  # one-person team
         finally:
             frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 1)
+
+    def test_payer_opens_payments_due(self):
+        """What the M-Pesa Payments Due page asks of the server when it loads, as a payer."""
+        import inspect
+
+        from frappe.desk import query_report
+        from frappe.desk.search import search_link
+
+        js_filters = [{"fieldname": "company", "fieldtype": "Link", "options": "Company"},
+                      {"fieldname": "show", "fieldtype": "Select"}, {"fieldname": "route", "fieldtype": "Select"},
+                      {"fieldname": "pay_from", "fieldtype": "Link", "options": "Mpesa Settings"},
+                      {"fieldname": "schedule", "fieldtype": "Link", "options": "M-Pesa Payment Schedule"}]
+        filters = {"company": t.COMPANY, "show": "All", "pay_from": t.SETTINGS}
+        extra = {"js_filters": js_filters} if "js_filters" in inspect.signature(query_report.run).parameters else {}
+        validate = "validate_link_and_fetch" if hasattr(frappe.client, "validate_link_and_fetch") else "validate_link"
+        officer = _user(f"paying-officer@{DOMAIN}", [M.AU, M.MP, M.MV])
+        steps = {
+            "get_script": lambda: query_report.get_script("M-Pesa Payments Due"),
+            "run": lambda: query_report.run("M-Pesa Payments Due", filters=filters, **extra),
+            "search Company": lambda: search_link("Company", ""),
+            "search Mpesa Settings": lambda: search_link("Mpesa Settings", ""),
+            "validate Company": lambda: self.call(f"/api/method/frappe.client.{validate}", doctype="Company",
+                                                  docname=t.COMPANY),
+            "validate Mpesa Settings": lambda: self.call(f"/api/method/frappe.client.{validate}",
+                                                         doctype="Mpesa Settings", docname=t.SETTINGS),
+        }
+        failed = []
+        for user in (user_for(M.MP), officer):
+            with self.as_user(user):
+                for label, step in steps.items():
+                    frappe.local.message_log = []
+                    try:
+                        step()
+                    except Exception as e:
+                        failed.append(f"{user} {label}: {type(e).__name__}: {e}")
+        self.assertEqual(failed, [])

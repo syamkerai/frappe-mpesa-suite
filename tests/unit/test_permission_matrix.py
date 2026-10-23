@@ -94,6 +94,15 @@ def test_credential_fields_are_on_level_1_and_only_config_roles_hold_it():
                 )
 
 
+def test_settings_below_mpesa_manager_are_select_only():
+    # nobody below M-Pesa Manager opens the settings records; they pick them in Link fields
+    config = set(ROLE_SETS["CONFIG_ROLES"])
+    for doctype in M.SECRET_FIELDS:
+        for (role, _), rights in M.rows(doctype).items():
+            if role not in config:
+                assert rights == {"select"}, (doctype, role, rights)
+
+
 def test_password_fields_are_never_readable_below_config_roles():
     config = set(ROLE_SETS["CONFIG_ROLES"])
     for doctype, data in TOP_LEVEL.items():
@@ -114,9 +123,9 @@ def test_config_only_doctypes():
 def test_viewer_only_reads():
     for doctype in M.DOCTYPES:
         rights = M.rows(doctype).get((M.MV, 0), set())
-        assert rights <= {"read", "report", "export", "print"}, (doctype, rights)
+        assert rights <= {"read", "select", "report", "export", "print"}, (doctype, rights)
         if doctype in M.SECRET_FIELDS or doctype in M.CONFIG_ONLY:
-            assert rights <= {"read"}, f"M-Pesa Viewer may export {doctype}"
+            assert rights <= {"select"}, f"M-Pesa Viewer may open {doctype}"
 
 
 def test_suite_roles_are_the_installed_ones():
