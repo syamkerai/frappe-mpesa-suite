@@ -212,11 +212,11 @@ def wallet(frappe, monkeypatch):
                                                     "creation": datetime.datetime(2026, 1, 1)}
 
     def b2b_row(name, at, balance, amount=50.0, status="Paid", **kw):
+        created = (at or datetime.datetime(2026, 10, 27, 14, 30)) - datetime.timedelta(seconds=5)
         frappe.db.table(B2B)[name] = {
             "name": name, "docstatus": 1, "status": status, "amount": amount, "mpesa_settings": "985401",
             "transaction_id": f"UJR{name[-4:]}X", "trans_completed_time": at, "debit_account_balance": balance,
-            "creation": (at or datetime.datetime(2026, 10, 27, 14, 30)) - datetime.timedelta(seconds=5),
-            "debit_party_charges": "", **kw}
+            "creation": created, "modified": created, "send_started_on": None, "debit_party_charges": "", **kw}
         return name
 
     return fake_frappe._dict(statement=statement, row=b2b_row)
@@ -251,6 +251,20 @@ def test_a_b2b_in_between_hides_the_charge(wallet, between):
     wallet.row("MB2B-26-10-000003", between["at"], between["balance"], status=between["status"])
     wallet.row("MB2B-26-10-000002", TILL_AT, "Working Account|KES|1894.00|1894.00")
     assert charge(wallet, "MB2B-26-10-000002") is None
+
+
+@pytest.mark.parametrize("sent", [{"modified": PAYBILL_AT + datetime.timedelta(seconds=1)},  # its ack
+                                  {"send_started_on": PAYBILL_AT + datetime.timedelta(seconds=1)}])  # the schedule's marker
+def test_a_b2b_drafted_long_before_but_sent_in_between_hides_the_charge(wallet, sent):
+    # with maker-checker a request is drafted days before it is sent: in flight is when it was sent
+    wallet.row("MB2B-26-10-000001", PAYBILL_AT, "Working Account|KES|1947.00|1947.00|0.00|0.00")
+    drafted = datetime.datetime(2026, 10, 22, 9, 0)
+    wallet.row("MB2B-26-10-000003", None, None, status="Initiated", **{"creation": drafted, "modified": drafted, **sent})
+    wallet.row("MB2B-26-10-000002", TILL_AT, "Working Account|KES|1894.00|1894.00")
+    assert charge(wallet, "MB2B-26-10-000002") is None
+    # one sent and stuck days ago does not hide it
+    wallet.row("MB2B-26-10-000003", None, None, status="Initiated", creation=drafted, modified=drafted)
+    assert charge(wallet, "MB2B-26-10-000002") == 3.0
 
 
 def test_a_later_account_balance_is_the_balance_before(wallet, frappe):

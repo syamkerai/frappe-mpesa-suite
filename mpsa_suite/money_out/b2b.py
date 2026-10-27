@@ -190,11 +190,15 @@ def _record_result(result: dict, ref: str | None) -> None:
     if not doc:
         log_callback({"Result": result}, "Mpesa B2B Result (unmatched)", B2B_DOCTYPE, ref, "Failed")
         return
-    if doc.status in FINAL and doc.result_code not in (None, ""):
+    outcome = daraja.b2b_outcome(result)
+    # A Transaction Status answer settled it as failed (result_code "TS:<status>", b2b_status.settle),
+    # but Safaricom's own Result says it was paid: the Result is the record of the payment.
+    contradicted = (cstr(doc.result_code) if doc.status == "Failed" and cstr(doc.result_code).startswith("TS:")
+                    and outcome == "Paid" else "")
+    if doc.status in FINAL and doc.result_code not in (None, "") and not contradicted:
         return  # Safaricom re-sent a result we already recorded; never book twice
 
     values = daraja.result_values(result)
-    outcome = daraja.b2b_outcome(result)
     entry = {}
     if outcome == "Paid":
         # entry_attempted_on marks a request Paid since this release: the sweep books it if the job
@@ -236,6 +240,8 @@ def _record_result(result: dict, ref: str | None) -> None:
     from . import claim_payees
 
     claim_payees.on_payout_result(B2B_DOCTYPE, doc.name)  # an Expense Claim's payee line follows it
+    if contradicted:
+        _contradicted_status(doc, contradicted, result.get("TransactionID"))
 
     if outcome == "Paid":
         try:
@@ -262,6 +268,21 @@ def _record_result(result: dict, ref: str | None) -> None:
         from . import b2b_status
 
         b2b_status.ask_later(doc.name)
+
+
+def _contradicted_status(doc, status_code: str, receipt) -> None:
+    """A Paid Result for a request a status answer had made Failed: recorded and booked as Paid
+    (above), and staff are told, because what it paid may have been paid again meanwhile. No amount
+    or name in the alert (it may be a salary). Never raises."""
+    from .party_accounts import alert
+
+    message = (f"{doc.name}: M-Pesa's Result says it was paid (receipt {receipt or 'not given'}), but a Transaction "
+               f"Status answer had made it Failed ({status_code[3:] or 'Failed'}). It is Paid now and its entry "
+               "is being booked: check that what it paid was not paid again.")
+    with contextlib.suppress(Exception):
+        doc.add_comment("Comment", message)
+    frappe.log_error(title="M-Pesa B2B Result contradicts its status query", message=message)
+    alert(message, doc)  # Notify Role on M-Pesa Suite Settings; never raises
 
 
 def handle_queue_timeout(payload: dict, ref: str | None) -> None:

@@ -63,7 +63,10 @@ _NOT_SALARY = {
     B2B: f"COALESCE(`tab{B2B}`.employee, '') = ''",  # and the claims and advances (_not_salary)
     STATUS: (
         f"NOT EXISTS (SELECT 1 FROM `tab{B2C_REQUEST}` sal_req WHERE sal_req.name = `tab{STATUS}`.b2c_request "
-        f"AND {SALARY_LINE_SQL.format(t='sal_req.')})"
+        f"AND {SALARY_LINE_SQL.format(t='sal_req.')}) "
+        # a query about a B2B payout to an employee (money_out.b2b_status)
+        f"AND NOT EXISTS (SELECT 1 FROM `tab{B2B}` sal_b2b WHERE sal_b2b.name = `tab{STATUS}`.b2b_request "
+        f"AND COALESCE(sal_b2b.employee, '') != '')"
     ),
 }
 
@@ -117,7 +120,11 @@ def has_salaries(doc) -> bool:
         request = doc.get("b2c_request")
         values = frappe.db.get_value(B2C_REQUEST, request, ["party_type", "reference_doctype"], as_dict=True) \
             if request else None
-        return bool(values) and is_salary_line(values)
+        if values and is_salary_line(values):
+            return True
+        # a query about a B2B payout to an employee (money_out.b2b_status)
+        b2b_request = doc.get("b2b_request")
+        return bool(b2b_request) and bool(cstr(frappe.db.get_value(B2B, b2b_request, "employee")).strip())
     if doc.get("doctype") == B2C:
         header = doc.get("party_type") == "Employee" and doc.get("transaction_to_pay_against") not in EMPLOYEE_DOCUMENTS
         return header or any(is_salary_line(r) for r in doc.get("references") or [])

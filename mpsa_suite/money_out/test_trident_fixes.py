@@ -18,7 +18,7 @@ from frappe.utils import add_days, flt, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, b2b_status, b2c_status
+from mpsa_suite.money_out import b2b, b2b_status, b2c_status, statement
 from mpsa_suite.money_out.test_b2b_documents import (
     BUYING,
     SETTINGS,
@@ -31,7 +31,7 @@ from mpsa_suite.money_out.test_b2b_documents import (
 from mpsa_suite.services import b2c_request_service
 
 B2B, PE, JE, BT, PI = b2b.B2B_DOCTYPE, "Payment Entry", "Journal Entry", "Bank Transaction", "Purchase Invoice"
-DISB, IR = "B2C Payment Disbursement", "Integration Request"
+DISB, IR, QUERY = "B2C Payment Disbursement", "Integration Request", "Mpesa B2C Status Query"
 TILL = "835811"
 TILL_BALANCE = "{{Amount={{CurrencyCode=KES, MinimumAmount={cents}, BasicAmount={amount:.2f}}}}}"
 
@@ -180,6 +180,29 @@ class TestTridentFixes(IntegrationTestCase):
         self.assertTrue(query)
         return query, ack, post.call_args.args[2]
 
+    def _ask_unsettled(self, name):
+        """Check Status on a request whose Result never came: asked by its OriginatorConversationID."""
+        ack = {"ResponseCode": "0", "ResponseDescription": "Accept the service request successfully.",
+               "ConversationID": f"AG_Q{frappe.generate_hash(length=12)}",
+               "OriginatorConversationID": f"OC_Q{frappe.generate_hash(length=12)}"}
+        with patch("mpsa_suite.money_out.b2c_status.post", return_value=(ack, None)) as post:
+            query = b2b_status.start_query(name)
+        return query, ack, post.call_args.args[2]
+
+    def _unanswered(self, name):
+        """As many status queries as are ever asked, each answered "not found": nothing more will come."""
+        for _ in range(b2b_status.MAX_QUERIES):
+            frappe.get_doc({"doctype": QUERY, "b2b_request": name, "mpesa_settings": SETTINGS, "query_by": "TransactionID",
+                            "query_value": frappe.db.get_value(B2B, name, "transaction_id"), "status": "Result Received",
+                            "outcome": "Unresolved", "outcome_reason": "Query failed: 2001 not found"}).insert(
+                ignore_permissions=True)
+
+    def _user(self, role) -> str:
+        email = f"_t_{role.lower().replace(' ', '_').replace('-', '_')}_{self.tag}@example.com"
+        frappe.get_doc({"doctype": "User", "email": email, "first_name": role, "send_welcome_email": 0,
+                        "roles": [{"role": role}]}).insert(ignore_permissions=True)
+        return email
+
     def _line(self, key):
         lines = frappe.get_all(BT, filters={"reference_number": key, "docstatus": ["<", 2]},
                                fields=["name", "withdrawal"], order_by="creation asc")
@@ -256,6 +279,122 @@ class TestTridentFixes(IntegrationTestCase):
         self.assertEqual(frappe.db.get_value("Supplier M-Pesa Account", self.till, "name_mismatch"), 1)
         self.assertEqual(alert.call_count, 1)
 
+    def test_a_status_answer_settles_a_payout_whose_result_never_came_and_books_it_once(self):
+        name = self._sent(50, supplier_mpesa_account=self.till)
+        query, ack, body = self._ask_unsettled(name)
+        self.assertEqual(body["OriginalConversationID"], frappe.db.get_value(B2B, name, "originator_conversation_id"))
+        self.assertNotIn("TransactionID", body)
+        receipt = self._receipt()
+        with patch("frappe.enqueue") as enqueue, patch("mpsa_suite.money_out.supplier_accounts._alert"):
+            b2c_status.handle_result(self._answer(name, receipt, ack), query)
+        queued = [c.args[0] for c in enqueue.call_args_list if c.args]
+        self.assertEqual(queued.count("mpsa_suite.money_out.b2b.book_payment_entry"), 1)
+        state = frappe.db.get_value(B2B, name, ["status", "result_code", "transaction_id", "debit_party_charges"],
+                                    as_dict=True)
+        self.assertEqual((state.status, state.result_code, state.transaction_id, state.debit_party_charges),
+                         ("Paid", "0", receipt, "Business Buy Goods Charge|KES|3.00"))
+        self.assertEqual(frappe.db.get_value(QUERY, query, ["outcome", "applied"]), ("Paid", 1))
+
+        b2b.book_payment_entry(name)  # the job the answer queued
+        entries = frappe.get_all(PE, filters={"reference_no": receipt, "docstatus": ["<", 2]},
+                                 fields=["docstatus", "paid_amount"])
+        self.assertEqual([(e.docstatus, flt(e.paid_amount)) for e in entries], [(1, 50)])
+        self.assertEqual(flt(self._line(f"CHG-{receipt}").withdrawal), 3)
+        self.assertEqual(len(frappe.get_all(JE, filters={"cheque_no": f"CHG-{receipt}", "docstatus": ["<", 2]})), 1)
+
+        # Safaricom's own Result comes after all: it is recorded already, so nothing is booked twice
+        row = frappe.db.get_value(B2B, name, ["conversation_id", "originator_conversation_id"], as_dict=True)
+        text = TILL_BALANCE.format(cents=189400, amount=1894.00)
+        late = {"ResultType": 0, "ResultCode": 0, "ResultDesc": "The service request is processed successfully.",
+                "ConversationID": row.conversation_id, "OriginatorConversationID": row.originator_conversation_id,
+                "TransactionID": receipt, "ResultParameters": {"ResultParameter": [
+                    {"Key": "DebitAccountCurrentBalance", "Value": text}, {"Key": "Amount", "Value": 50.0}]}}
+        with patch("frappe.enqueue") as enqueue:
+            b2b.handle_result(late, name)
+        self.assertFalse([c for c in enqueue.call_args_list if c.args and c.args[0].endswith("book_payment_entry")])
+        b2b.book_payment_entry(name)  # the booking sweep reaching it again changes nothing
+        self.assertEqual(len(frappe.get_all(PE, filters={"reference_no": receipt, "docstatus": ["<", 2]})), 1)
+        self.assertEqual(frappe.db.get_value(B2B, name, ["status", "result_code"]), ("Paid", "0"))
+
+    def test_a_paid_result_after_a_status_answer_made_it_failed_is_recorded_booked_and_told(self):
+        name = self._sent(50, supplier_mpesa_account=self.till)
+        query, ack, _body = self._ask_unsettled(name)
+        b2c_status.handle_result(self._answer(name, self._receipt(), ack, TransactionStatus="Expired"), query)
+        self.assertEqual(frappe.db.get_value(B2B, name, ["status", "result_code"]), ("Failed", "TS:Expired"))
+        with patch("mpsa_suite.money_out.party_accounts.alert") as alert, \
+                patch("mpsa_suite.money_out.supplier_accounts._alert"):
+            receipt = self._till_result(name)  # Safaricom's own Result: Paid; then its booking job
+        self.assertEqual(frappe.db.get_value(B2B, name, ["status", "result_code", "transaction_id"]), ("Paid", "0", receipt))
+        self.assertEqual(len(frappe.get_all(PE, filters={"reference_no": receipt, "docstatus": ["<", 2]})), 1)
+        messages = [c.args[0] if c.args else c.kwargs.get("message", "") for c in alert.call_args_list]
+        told = [m for m in messages if "made it Failed (Expired)" in m]
+        self.assertEqual(len(told), 1, alert.call_args_list)
+        self.assertIn(receipt, told[0])
+
+    def test_a_status_result_that_beats_its_querys_ack_is_kept_until_the_ack_is_recorded(self):
+        name = self._sent(50, supplier_mpesa_account=self.till)
+        receipt = self._till_result(name)
+        query, ack, _body = self._ask(name)
+        # as it was 0.4 s after the ack: the query committed Queued, its ack not written yet
+        frappe.db.set_value(QUERY, query, {"status": "Queued", "conversation_id": None,
+                                           "originator_conversation_id": None})
+        b2c_status.handle_result(self._answer(name, receipt, ack), query)
+        (kept,) = frappe.get_all(IR, filters={"request_description": b2c_status.WAITING, "reference_docname": query},
+                                 fields=["name", "status"])
+        self.assertEqual(kept.status, "Queued")
+        self.assertFalse(frappe.db.get_value(B2B, name, "debit_party_charges"))
+        b2c_status.retry_waiting_results()
+        self.assertEqual(frappe.db.get_value(IR, kept.name, "status"), "Queued")  # the ack is still on its way
+
+        frappe.db.set_value(QUERY, query, {"status": "Sent", "conversation_id": ack["ConversationID"],
+                                           "originator_conversation_id": ack["OriginatorConversationID"]})
+        with patch("mpsa_suite.money_out.supplier_accounts._alert"):
+            b2c_status.retry_waiting_results()
+        self.assertEqual(frappe.db.get_value(IR, kept.name, "status"), "Completed")
+        self.assertEqual(frappe.db.get_value(B2B, name, "debit_party_charges"), "Business Buy Goods Charge|KES|3.00")
+        self.assertEqual(frappe.db.get_value(QUERY, query, ["status", "outcome", "applied"]), ("Result Received", "Paid", 1))
+
+    def test_the_status_query_of_a_payout_to_an_employee_is_salary_data(self):
+        """Decision D4: who may not see salaries does not see a query about a B2B paid to an employee."""
+        def raw(values):
+            doc = frappe.get_doc(values)
+            doc.flags.ignore_validate = doc.flags.ignore_links = doc.flags.ignore_mandatory = True
+            doc.insert(ignore_permissions=True)
+            return doc.name
+
+        salary = raw({"doctype": B2B, "amount": 45000, "employee": "HR-EMP-X", "mpesa_settings": SETTINGS,
+                      "company": t.COMPANY, "command_id": "BusinessBuyGoods", "receiver_shortcode": TILL})
+        supplier = self._sent(50, supplier_mpesa_account=self.till)
+        queries = {}
+        for request in (salary, supplier):
+            queries[request] = raw({"doctype": QUERY, "b2b_request": request, "mpesa_settings": SETTINGS,
+                                    "query_by": "TransactionID", "query_value": self._receipt(),
+                                    "status": "Result Received", "outcome": "Paid", "amount": 45000,
+                                    "receipt_no": self._receipt(), "credit_party_name": f"{TILL} - SOMEONE"})
+        checked = []
+        for role in ("Accounts User", "Accounts Manager", "M-Pesa Viewer", "System Manager"):
+            user = self._user(role)
+            if not frappe.has_permission(QUERY, "read", user=user):
+                continue  # the role reads no status query anyway
+            checked.append(role)
+            self.assertFalse(frappe.has_permission(QUERY, "read", doc=queries[salary], user=user), role)
+            self.assertTrue(frappe.has_permission(QUERY, "read", doc=queries[supplier], user=user), role)
+            frappe.set_user(user)
+            try:
+                listed = frappe.get_list(QUERY, filters={"name": ["in", list(queries.values())]}, pluck="name")
+            finally:
+                frappe.set_user("Administrator")
+            self.assertEqual(listed, [queries[supplier]], role)
+        self.assertIn("Accounts User", checked)
+        payer = self._user("M-Pesa Payer")
+        self.assertTrue(frappe.has_permission(QUERY, "read", doc=queries[salary], user=payer))
+        frappe.set_user(payer)
+        try:
+            listed = frappe.get_list(QUERY, filters={"name": ["in", list(queries.values())]}, pluck="name")
+        finally:
+            frappe.set_user("Administrator")
+        self.assertEqual(sorted(listed), sorted(queries.values()))
+
     def test_a_tills_charge_is_the_fall_in_the_working_balance_on_one_cost_center(self):
         frappe.db.set_value("Mpesa Settings", SETTINGS, "cost_center", self.payout_center)
         paybill = self._sent(50, supplier_mpesa_account=self.account)
@@ -265,6 +404,10 @@ class TestTridentFixes(IntegrationTestCase):
                                ("DebitPartyCharges", "Business Pay Bill Charge|KES|3.00"),
                                ("ReceiverPartyPublicName", f"888880 - {SUPPLIER.upper()}")])
         receipt = self._till_result(till, balance=1894.00)
+        # not while a status query may still state the charge (a portal payment would skew the balance)
+        self.assertFalse(frappe.db.exists(BT, {"reference_number": f"CHG-{receipt}"}))
+        self._unanswered(till)
+        statement.after_payout(B2B, till)  # what the 5-minute sweep does for a blank charge
         self.assertEqual(flt(self._line(f"CHG-{receipt}").withdrawal), 3)  # 1,947 - 1,894 - 50
         (je,) = frappe.get_all(JE, filters={"cheque_no": f"CHG-{receipt}", "docstatus": ["<", 2]}, pluck="name")
         centers = {row.cost_center for row in frappe.get_doc(JE, je).accounts}
