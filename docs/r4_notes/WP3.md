@@ -19,15 +19,18 @@ design section 2 ("B2C row") and section 3.
   - `owed.b2b_open` knows the claim and advance links (the old `DOC_FIELDS[...]` KeyError is
     gone).
   - New `owed.employee_doc_left_to_pay(dt, dn, ...)`: HRMS's outstanding less every payout of the
-    document still on its way, whoever it pays. That covers B2C rows and requests naming it, B2B
-    requests with `expense_claim` / `employee_advance`, draft Payment and Journal Entries, and
-    planned schedule lines. With `for_update` it reads them under the document's lock
-    (`b2c-pay:<dt>:<dn>`).
+    document still on its way, whoever it pays. That covers B2C disbursement rows and Paid B2C
+    requests naming it, B2B requests with `expense_claim` / `employee_advance`, draft Payment and
+    Journal Entries, and planned schedule lines. It returns `_dict(owed, parts, left)`.
+  - By default (`for_update=True`, review fix) it reads them under the document's lock
+    (`b2c-pay:<dt>:<dn>`, held until commit), with locking reads, as the contract with WP4 says.
+    Only the form's headline (`document_status`) passes `for_update=False`; B2B's draft save
+    passes it too (checked again under the lock at the send).
   - New in `owed`: `EMPLOYEE_DOC_FIELDS`, `B2B_DOC_FIELDS`, `employee_document_of`,
     `linked_employee_document`.
 - **The payable gate** (`money_out/employee_documents.payable_problem(doc)`). Every pay path asks
-  it: the buttons, the list, B2C rows and requests, B2B requests, and the B2C submit guard. It
-  refuses a document that is:
+  it: the buttons, the list, B2C rows, B2B requests, the B2C submit guard and the retry of a failed
+  B2C payout. It refuses a document that is:
   - not submitted, or cancelled;
   - a claim that is not Approved, was paid at entry (Is Paid), or has no Payable Account;
   - an advance with no Advance Account, or with an exchange rate other than 1;
@@ -64,6 +67,11 @@ design section 2 ("B2C row") and section 3.
   - Entry Type in Make Entry learns Expense Claim and Employee Advance (new `expense_claim` /
     `employee_advance` parameters). Moving a payment to another document is for managers only.
     A claim's payout cannot be booked as a salary.
+  - The Make Entry dialog on the request form (`mpesa_b2b_payment_request.js`, review fix) offers
+    them too: Entry Type Salary Slip / Expense Claim / Employee Advance / Journal Entry for a
+    payment to an employee, the request's own document preselected, and an Expense Claim /
+    Employee Advance link limited to the employee's submitted ones. Before, the dialog offered only
+    a Journal Entry for a claim's payout, which HRMS never counts against the claim.
   - Classify: a Payment or Journal Entry allocated to the document is on target. That includes
     HRMS's Make Payment Entry and Make Bank Entry.
   - `entry_facts` returns the two links.
@@ -84,18 +92,39 @@ design section 2 ("B2C row") and section 3.
   - At submit, under the lock, it runs `payable_problem` again.
   - It refuses self-pay: the sender may not be a row's employee, nor the employee of the claim or
     advance a row pays.
+  - A row paying a claim or advance pays its own employee: Party Type Employee and the document's
+    employee (review fix). A Supplier row, or any other party type, or another employee, is
+    refused. The row is booked to the claimant as their reimbursement whoever M-Pesa paid, so a
+    row to anyone else would pay an unchecked number and mark the claim paid. Merchants and other
+    people are paid as payees of the claim (WP4).
+  - Retry (on the request, or Retry Failed Payments on the disbursement) checks again, under the
+    document's lock, what the send checked (`employee_documents.check_b2c_retry`, review fix):
+    the claim or advance may still be paid, the employee's phone is still an approved account
+    that can be paid now while the lock is on (rows with `claim_payee` skipped), and the sender is
+    neither the payee employee nor the document's employee. This applies to every B2C retry to an
+    employee, salaries included.
   - Get References lists only payable claims and advances, and takes the employee's approved phone.
 - **Approved-phone lock** (plan C.9):
-  - The row has two new fields, `payee_account_doctype` and `payee_account` (read only, appended at
-    the end of the JSON). The row's validate sets them from Mobile / AC No.: the employee's
-    approved phone account with that number.
+  - The row has two new fields, `payee_account_doctype` and `payee_account` (read only, no copy,
+    appended at the end of the JSON). The row's validate sets them from Mobile / AC No. on every
+    save: the employee's approved phone account with that number.
+  - `payee_account` holds the account's name in a Data field, not a Dynamic Link (review fix).
+    Frappe refuses a link to a cancelled submittable document before any validate runs, so a
+    phone account cancelled after a draft was made (or copied by an amend, which copies no-copy
+    fields too) would have blocked the save, the amend and Send via M-Pesa with "Cannot link
+    cancelled document". Now the save replaces the stale name, and with the lock on the row is
+    refused with the plain "not a phone approved" message.
   - While M-Pesa Suite Settings > Pay Employees by B2C Only to Approved Phones is on, an Employee
     row must pay an approved phone account of that employee that can be paid now (not on hold,
     not blocked).
   - Rows a payment schedule makes are left to their line's check. Rows with `claim_payee` set are
     skipped (WP4).
-  - A B2C Disbursement Request made by hand is held to the same rule, with the payable gate and
-    self-pay.
+  - A B2C Disbursement Request made by hand is held to the same rule and to self-pay. It may not
+    pay an Expense Claim or Employee Advance at all (review fix): nothing caps it by what the
+    document has left or counts it against the document while it is on its way, so a second
+    payout of the claim could pass, or it could pay more than the claim owes or another
+    employee. Claims and advances are paid by a B2C Payment Disbursement (the buttons, the list,
+    Get References).
   - `maker_checker` watches the row's `payee_account`.
   - The receiver-name check now also runs for a row that names its approved account
     (`b2c_response_service`), not only for schedule rows.
@@ -122,11 +151,18 @@ design section 2 ("B2C row") and section 3.
     company, no approved phone, above the B2C limit.
   - HRMS's own list settings are extended, never replaced.
 - **Not salaries** (`salary_access.py`, decision D4 narrowed, plan C.8):
-  - These count as salary-free, and the DocType rights apply (Accounts roles see them):
+  - These count as salary-free, and the DocType rights apply, for a user who reads that claim or
+    advance DocType by a role other than the employee's own (review fix: before, anyone with the
+    payout DocType's rights saw them):
     - B2B requests with `expense_claim` / `employee_advance`;
     - B2C rows and requests (and their status queries) whose reference is a claim or advance;
     - B2C disbursements paying against Expense Claim / Employee Advance;
     - schedule lines for them.
+  - To a user who cannot read Expense Claim (or Employee Advance) they stay hidden like salaries:
+    `salary_access.reads_documents` / `unread_documents`, used by `has_permission`,
+    `query_conditions` and `report_condition`. HRMS gives read on claims to HR Manager, HR User and
+    Expense Approver, and on advances to Expense Approver; the DocType level is checked, not each
+    claim (HRMS has no per-claim permission hook; a site's User Permissions are not reflected).
   - Salary Slips, payroll schedules and employee payouts with no document stay hidden.
   - The generated D4 paragraph says so.
 - **Cancel guard** (`employee_documents.before_cancel`, WP0's hook): a claim or advance is not
@@ -155,12 +191,21 @@ None. This work package uses WP0's `b2c_approved_phones_only` and `claim_payable
 - With the lock on (new sites), a B2C payout to an employee goes only to an approved phone, never
   to a typed number or the Employee's Cell Number.
 - A payer cannot send a payout of their own claim or advance, by B2C or B2B.
-- An Accounts User without an HR role now sees B2B and B2C payouts of claims and advances (not
-  salaries).
+- A user who reads Expense Claims (or Employee Advances) by a role other than Employee, without
+  seeing salaries (an Expense Approver, or an Accounts role the site gave read), now sees the B2B
+  and B2C payouts of claims (or advances). An Accounts User or M-Pesa Viewer who reads no claims
+  does not.
+- A B2C row paying a claim or advance pays the document's own employee only.
+- A B2C Disbursement Request made by hand cannot pay a claim or advance.
+- A retry of a failed B2C payout to an employee is refused when the claim may no longer be paid,
+  the phone is no longer an approved account (lock on), or the sender is that employee.
+- Make Entry on a claim's or advance's B2B payout offers the claim or advance itself.
 - A claim or advance with a payout paid or on its way cannot be cancelled.
 
 ## Migration notes
-- No patch. Migrate adds the two new row fields from the JSON.
+- No patch. Migrate adds the two new row fields from the JSON. A site that already migrated
+  WP3's first build (where `payee_account` was a Dynamic Link) keeps the same varchar column:
+  migrate only changes its type in the DocType.
 - `b2c_approved_phones_only` stays as the site has it on upgrade (off). Switch it on once your
   employees' phones are approved.
 - A B2C draft saved before the upgrade names no approved account. If its phone matches one, the
@@ -175,11 +220,12 @@ None. This work package uses WP0's `b2c_approved_phones_only` and `claim_payable
     an advance.
 
   Sites grant read on Expense Claim / Employee Advance to their Accounts roles (Role Permission
-  Manager), or give their preparers both roles. See the notes for the main session.
+  Manager), or give their preparers both roles. See the notes for the main session. The same
+  grant is what lets an Accounts role without an HR role see the claim and advance payouts.
 
 ## Tests
-- Unit: 1801 passed (1724 before; 77 new).
-  - `tests/unit/test_employee_documents.py` (61 tests):
+- Unit: 1816 passed (1724 before the build; 1801 after it; 15 more with the review fixes).
+  - `tests/unit/test_employee_documents.py` (75 tests):
     - owed math, Get References, and left to pay under the lock;
     - the payable gate, workflow states included;
     - B2B validation: one document, cap, account, `claim_payee` skip, Payer vs manager, self-pay,
@@ -190,11 +236,19 @@ None. This work package uses WP0's `b2c_approved_phones_only` and `claim_payable
     - row and request phone lock, and its payee skip;
     - self-pay, Get References phone, the name check, the maker-checker field;
     - `document_status`, the drafts from both buttons, bulk prepare;
-    - cancel guard, `salary_access` narrowing, the fresh-install switch, wiring.
-  - `tests/unit/test_employee_pay_js.py` (12 tests, node): buttons only to who the server accepts,
-    the headline, both dialogs, and the list action extending HRMS's settings.
+    - cancel guard, `salary_access` narrowing, the fresh-install switch, wiring;
+    - review fixes: a claim row to a Supplier, another party type or another employee refused; a
+      hand-made request for a claim or advance refused; a retry by the claimant, after the phone
+      account was cancelled, or of a claim no longer approved refused, and a payee row's retry
+      left to `claim_payees`; the row's account a plain name, replaced on save; the lock taken by
+      default and not by the headline; claim payouts shown only to who reads claims (HRMS's
+      readers, a site's grant, the Employee role not counting).
+  - `tests/unit/test_employee_pay_js.py` (13 tests, node): buttons only to who the server accepts,
+    the headline, both dialogs, the list action extending HRMS's settings, and the B2B request's
+    Make Entry dialog offering the claim or advance.
   - Updated for the intended changes: `test_fix3.py` and `test_fix_b2creq.py` (B2B is now asked
-    about for a claim), `test_r4_foundation.py` (`employee_documents.py` now has endpoints).
+    about for a claim; a claim's retry runs `check_b2c_retry`), `test_r4_foundation.py`
+    (`employee_documents.py` now has endpoints).
 - Bench (written, not run): `money_out/test_employee_documents.py`, with named users (HR
   Manager; Accounts User + HR User; Expense Approver + Accounts User; Accounts User alone; M-Pesa
   Payer):
@@ -206,6 +260,10 @@ None. This work package uses WP0's `b2c_approved_phones_only` and `claim_payable
   - a no-document request still manager-only;
   - bulk prepare;
   - the cancel guard (also on a cancelled-but-Paid request);
-  - claim payouts visible to Accounts, salaries not.
+  - claim payouts visible to Accounts User + Expense Approver, not to an Accounts User alone, and
+    salaries to neither;
+  - a claim row turned into a Supplier row refused, and a draft whose phone account was cancelled
+    since still saves (no "Cannot link cancelled document"), then the lock refuses it plainly;
+  - a hand-made B2C request for a claim refused.
 
   All sends go through `send_confirm.send_for_test` (WP1).

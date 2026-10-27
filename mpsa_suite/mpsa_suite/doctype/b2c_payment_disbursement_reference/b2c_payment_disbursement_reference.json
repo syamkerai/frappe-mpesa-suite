@@ -198,22 +198,23 @@
    "hidden": 1,
    "label": "Approved Account Type",
    "options": "DocType",
-   "read_only": 1
+   "read_only": 1,
+   "no_copy": 1
   },
   {
    "fieldname": "payee_account",
-   "fieldtype": "Dynamic Link",
+   "fieldtype": "Data",
    "label": "Approved Account",
-   "options": "payee_account_doctype",
    "read_only": 1,
+   "no_copy": 1,
    "search_index": 1,
-   "description": "The employee's approved M-Pesa account whose phone this row pays: set from Mobile / AC No. when it saves. The name M-Pesa paid is checked against it."
+   "description": "The employee's approved M-Pesa account (its name) whose phone this row pays: set from Mobile / AC No. each time it saves. The name M-Pesa paid is checked against it. Not a link: an account cancelled since never stops a save, amend or duplicate."
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-10-27 21:00:00.000000",
+ "modified": "2026-10-27 23:30:00.000000",
  "modified_by": "a@d.com",
  "module": "Mpsa Suite",
  "name": "B2C Payment Disbursement Reference",

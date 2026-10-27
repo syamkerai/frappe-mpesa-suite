@@ -132,6 +132,11 @@ class B2CDisbursementRequest(Document):
                 frappe.throw(f"{self.name} was paid from a payment schedule: plan its line again (Plan Again) and "
                              "pay it with Pay Selected.")
             self.validate_still_owed()
+            from ....money_out import employee_documents
+
+            # what the send checked, again: the claim may no longer be payable, the approved phone
+            # may be cancelled or on hold, and nobody resends a payout to themselves
+            employee_documents.check_b2c_retry(self)
             # Daraja rejects a reused OriginatorConversationID (500.002.1001), and the result
             # callback ignores re-sends for a request that already has a final result.
             self.db_set(

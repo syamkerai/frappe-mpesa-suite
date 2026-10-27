@@ -2,7 +2,8 @@
 expense_claim.js, employee_advance.js and their list scripts), run in node against a small
 stand-in for the desk. The buttons show only to who the server accepts (frappe.boot.mpsa,
 can_create) for a payable document that still owes; they prepare drafts only; the list extends
-HRMS's settings and prepares one batch from the ticked documents."""
+HRMS's settings and prepares one batch from the ticked documents. The B2B request's Make Entry
+offers a claim's or advance's payout its own document."""
 
 import json
 import os
@@ -204,3 +205,55 @@ def test_pay_by_mpesa_on_the_list_extends_hrms_and_prepares_one_batch():
 def test_the_list_action_is_for_preparers_only():
     out = run(LIST.format(script="employee_advance_list.js", doctype="Employee Advance"), {"mpsa": {"can_pay": True}})
     assert out["items"] == []
+
+
+# ---------------------------------------------------------------- Make Entry on a B2B request
+B2B_JS = ROOT / "mpsa_suite" / "mpsa_suite" / "doctype" / "mpesa_b2b_payment_request" / "mpesa_b2b_payment_request.js"
+MAKE_ENTRY = r"""
+global.format_number = (v) => String(v);
+frappe.datetime = { str_to_user: (d) => d };
+frappe.boot.versions = setup.hrms ? { hrms: "16.0.0" } : {};
+(0, eval)(fs.readFileSync(process.env.MPSA_B2B_JS, "utf8") + "\nglobalThis.mpsa_b2b = mpsa_b2b;");
+const frm = { doc: { name: "MB2B-1" }, reload_doc: () => calls.push(["reload"]) };
+await mpsa_b2b.make_entry(frm);
+const field = (name) => last_dialog.opts.fields.find((f) => f.fieldname === name);
+const kind = field("kind");
+const pick = { "Expense Claim": "expense_claim", "Employee Advance": "employee_advance" }[kind.default];
+const picked = pick ? { [pick]: field(pick).default } : {};
+last_dialog.opts.primary_action(Object.assign({ kind: kind.default, submit: 1 }, picked));
+await tick();
+const out = {
+	kinds: kind.options.split("\n"), kind: kind.default,
+	claim: [field("expense_claim").default || null, field("expense_claim").depends_on, field("expense_claim").get_query()],
+	advance: [field("employee_advance").default || null, field("employee_advance").get_query()],
+	supplier: field("supplier").depends_on, calls,
+};
+"""
+FACTS = {"amount": 5000, "date": "2026-10-27", "receipt": "QEXP1", "paid_to": "Equity Bank", "gl": "M-Pesa - AIL",
+         "charge_entry": None, "supplier": None, "purchase_invoice": None, "purchase_order": None, "employee": "EMP-1",
+         "salary_slip": None, "expense_claim": None, "employee_advance": None, "company": "Astral",
+         "cost_center": None}
+
+
+def make_entry(facts: dict, hrms: bool = True) -> dict:
+    return run(MAKE_ENTRY, {"hrms": hrms, "replies": {"entry_facts": dict(FACTS, **facts),
+                                                      "make_entry": {"doctype": "Payment Entry", "name": "PE-1"}}})
+
+
+def test_make_entry_books_a_claim_or_advance_payout_on_its_own_document(monkeypatch):
+    # a claim's payout whose automatic booking failed: Make Entry offers the claim, not only a
+    # Journal Entry that HRMS would never count against it
+    monkeypatch.setenv("MPSA_B2B_JS", str(B2B_JS))
+    out = make_entry({"expense_claim": "HR-EXP-1"})
+    assert out["kinds"] == ["Salary Slip", "Expense Claim", "Employee Advance", "Journal Entry"]
+    assert out["kind"] == "Expense Claim"
+    assert out["claim"] == ["HR-EXP-1", "eval:doc.kind=='Expense Claim'",
+                            {"filters": {"docstatus": 1, "employee": "EMP-1", "approval_status": "Approved"}}]
+    assert "Expense Claim" not in out["supplier"] and "Purchase Invoice" in out["supplier"]
+    assert ["xcall", "make_entry", {"name": "MB2B-1", "kind": "Expense Claim", "submit": 1,
+                                    "expense_claim": "HR-EXP-1"}] in out["calls"]
+    out = make_entry({"employee_advance": "HR-EAD-1"})
+    assert out["kind"] == "Employee Advance"
+    assert out["advance"] == ["HR-EAD-1", {"filters": {"docstatus": 1, "employee": "EMP-1"}}]
+    assert make_entry({})["kind"] == "Journal Entry"  # an employee payment naming nothing
+    assert make_entry({"expense_claim": "HR-EXP-1"}, hrms=False)["kinds"] == ["Journal Entry"]

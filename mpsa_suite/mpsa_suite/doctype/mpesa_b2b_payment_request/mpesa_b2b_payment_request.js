@@ -268,14 +268,20 @@ const mpsa_b2b = {
 			.map(([label, value]) => `<div><span class="text-muted">${label}:</span> ${e(value || "-")}</div>`)
 			.join("");
 		const hrms = frappe.boot && frappe.boot.versions && frappe.boot.versions.hrms;
+		// a payment to an employee is booked on its Salary Slip, Expense Claim or Employee Advance
+		// (a Payment Entry HRMS counts), else as a Journal Entry
 		const kinds = f.employee
 			? hrms
-				? ["Salary Slip", "Journal Entry"]
+				? ["Salary Slip", "Expense Claim", "Employee Advance", "Journal Entry"]
 				: ["Journal Entry"]
 			: ["Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry"];
 		const kind = f.employee
 			? f.salary_slip
 				? "Salary Slip"
+				: f.expense_claim
+				? "Expense Claim"
+				: f.employee_advance
+				? "Employee Advance"
 				: "Journal Entry"
 			: f.purchase_invoice
 			? "Purchase Invoice"
@@ -310,11 +316,33 @@ const mpsa_b2b = {
 				},
 				{
 					fieldtype: "Link",
+					fieldname: "expense_claim",
+					label: __("Expense Claim"),
+					options: "Expense Claim",
+					default: f.expense_claim,
+					depends_on: "eval:doc.kind=='Expense Claim'",
+					mandatory_depends_on: "eval:doc.kind=='Expense Claim'",
+					description: __("A Payment Entry on the claim's own Payable Account: HRMS shows it paid."),
+					get_query: () => ({ filters: { docstatus: 1, employee: f.employee, approval_status: "Approved" } }),
+				},
+				{
+					fieldtype: "Link",
+					fieldname: "employee_advance",
+					label: __("Employee Advance"),
+					options: "Employee Advance",
+					default: f.employee_advance,
+					depends_on: "eval:doc.kind=='Employee Advance'",
+					mandatory_depends_on: "eval:doc.kind=='Employee Advance'",
+					description: __("A Payment Entry on the advance's own Advance Account: HRMS counts it paid."),
+					get_query: () => ({ filters: { docstatus: 1, employee: f.employee } }),
+				},
+				{
+					fieldtype: "Link",
 					fieldname: "supplier",
 					label: __("Supplier"),
 					options: "Supplier",
 					default: f.supplier,
-					depends_on: "eval:doc.kind!='Journal Entry' && doc.kind!='Salary Slip'",
+					depends_on: "eval:['Purchase Invoice','Purchase Order','Supplier Advance'].includes(doc.kind)",
 				},
 				{
 					fieldtype: "Link",

@@ -704,10 +704,17 @@ def test_retry_refused_once_the_order_has_invoices(retry):
     _refused(retry, request, "PO-1 already has invoices: pay the Purchase Invoice instead.")
 
 
-def test_retry_of_another_document_does_not_ask_about_order_advances(retry):
+def test_retry_of_another_document_does_not_ask_about_order_advances(retry, monkeypatch):
+    import importlib
+
+    # round 4: the claim, the approved phone and the payer are checked again (unit-tested in
+    # test_employee_documents); here only that the retry asks
+    documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    asked = []
+    monkeypatch.setattr(documents, "check_b2c_retry", lambda doc: asked.append(doc.name))
     request = retry.failed(doctype="Expense Claim", reference="EC-1")
     request.retry_failed_payment()
-    assert len(retry.sends) == 1
+    assert len(retry.sends) == 1 and asked == ["B2C-1"]
     assert not [c for c in retry.frappe.calls if c[0] == "order_advances"]
     # round 4: a B2B request may pay an Expense Claim too (money_out.employee_documents)
     assert [c[:3] for c in retry.frappe.calls if c[0] == "b2b_open"] == [("b2b_open", "Expense Claim", "EC-1")]

@@ -393,7 +393,10 @@ def render_markdown(role_sets: dict) -> str:
                  "(`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in "
                  "hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on "
                  "every site. A payout of an Expense Claim or Employee Advance is not a salary (round 4): it is "
-                 "shown by the DocType rights above, to the Accounts roles who pay claims.")
+                 "shown by the DocType rights above to a user with a role that reads that Expense Claim or "
+                 "Employee Advance DocType (the employee's own role aside: HRMS gives HR Manager, HR User and "
+                 "Expense Approver; a site grants its Accounts roles read to let them see these payouts), and "
+                 "hidden like a salary from everyone else.")
     lines += ["", "### Report roles", ""]
     lines.append("| Report | Roles |")
     lines.append("|---|---|")
