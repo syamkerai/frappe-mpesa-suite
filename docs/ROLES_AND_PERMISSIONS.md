@@ -142,8 +142,9 @@ Open after round 4 (known, not fixed yet):
   salaries too, and System Manager reads Integration Requests.
 - Claim payouts are shown by read on the Expense Claim DocType, not claim by claim: a site's User
   Permissions on claims are not reflected, and an Expense Approver sees every claim's payouts.
-- The "third-party account" warning on a bank account shows at approval, after Confirm, not in the
-  Approve summary.
+  Since the final pass Expense Approver is also a preparer and sees supplier payouts (never
+  salaries): a site that wants line managers kept off supplier payouts takes the role's rights
+  off the two payout DocTypes after Check Permissions.
 - Payment Entry's STK button is not hidden from users who are not collectors (the server checks
   submit on the Payment Entry).
 

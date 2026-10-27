@@ -127,8 +127,11 @@ Fill in names before you start. One person may hold several of these jobs, but t
 - [ ] **C2. Who reads claims.**
   - Who: IT.
   - Do: Trident's Expense Claim rules give HR Manager, HR User and Expense Approver; the preparer's
-    HR User covers it. Employee Advance: Trident has none, so nothing to do. If advances will be
-    paid later, give the preparer read on Employee Advance.
+    HR User covers it, and HR User may now prepare claim payouts by phone and by bank / paybill /
+    till. Employee Advance: Trident has none, so nothing to do. If advances will be paid later,
+    the Expense Approver can prepare them (Expense Approver is a preparer since the final pass), or
+    give the preparer read on Employee Advance. Expense Approvers also see supplier payouts on
+    both payout lists (no salaries); decide whether that is acceptable for Trident's approvers.
   - Check: the preparer sees the M-Pesa buttons on an approved, unpaid claim.
 - [ ] **C3. Decide the Payment Entry workflow.**
   - Who: the Accountant.
@@ -218,9 +221,13 @@ Fill in names before you start. One person may hold several of these jobs, but t
   - Do: Astral Industries Ltd has two approved accounts, MSA-00001 (Paybill 208911) and MSA-00002
     (Till 835811).
     1. The Accountant presses **Make Default** on MSA-00001.
-    2. Recommended: MSA-00002 was entered **and** approved by Administrator (handover F3).
-       Cancel and amend it, so a named person enters it and the M-Pesa Manager approves it.
-  - Check: the Supplier form shows no red "none is the default" headline.
+    2. Required: MSA-00002 was entered **and** approved by Administrator (handover F3), so the
+       migrate blocked it ("Blocked: Approve Again", with a comment and one alert to the Notify
+       Role). Cancel and amend it, so a named person enters it and the M-Pesa Manager approves
+       it. Any other account the migrate blocked (approved by its own maker, or with
+       Administrator) is redone the same way.
+  - Check: the Supplier form shows no red "none is the default" headline, and the Supplier M-Pesa
+    Account list shows no red "Blocked" indicator.
 - [ ] **E3. The test employee's salary.**
   - Who: HR.
   - Do: make a one-employee Payroll Entry for the test employee (a small test salary) and submit

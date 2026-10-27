@@ -330,9 +330,13 @@ Existing settings that do more now:
    not be the payer. Preparers keep Accounts User or Manager, or HR User or Manager. Give the
    people who prepare salary schedules an HR role as well as their Accounts role. Write the list
    down.
-3. **Claims and advances need read.** Whoever prepares B2B payouts of claims or advances needs read
-   on Expense Claim and Employee Advance (Role Permission Manager), or an HR role. HRMS gives that
-   read only to HR and Expense Approver roles (advances: Expense Approver only).
+3. **Claims and advances need read.** Whoever prepares payouts of claims or advances needs read
+   on Expense Claim and Employee Advance. HRMS gives that read only to HR and Expense Approver
+   roles (advances: Expense Approver only). Since the final pass HR User and HR Manager may
+   prepare claim payouts, and Expense Approver is a preparer (it is the only default role that
+   reads advances). Expense Approvers then also see supplier payouts on the payout lists, never
+   salaries: decide whether that suits the site. An Accounts-only preparer still needs read on
+   claims (Role Permission Manager).
 4. **Scripts and drafts.** Find the scripts, Server Scripts and integrations that submit payouts:
    they will be refused and must use Send via M-Pesa. A B2C draft saved before the upgrade must
    be saved once more before it is sent.
@@ -355,12 +359,22 @@ Existing settings that do more now:
 2. **Assign the roles** from step 2 if not done yet. Take the M-Pesa roles off shared or service
    logins: the Integration User needs only what
    [docs/ROLES_AND_PERMISSIONS.md](docs/ROLES_AND_PERMISSIONS.md) section 7 names.
+   **Redo blocked accounts:** the migrate blocks every approved Supplier or Employee M-Pesa
+   Account that was approved by its own maker, or with the Administrator login (comment on each,
+   one alert per DocType to the Notify Role). The lists show them red. Cancel, amend and have a
+   named M-Pesa Manager approve each one before it is paid again (Trident: MSA-00002).
 3. **Raise the Transaction Limit** on each Mpesa Settings to the real value (B2C is now capped by it
    at save and at send). Set the hold hours back to 24 if they were lowered for a test.
 4. **Approve employees' phone accounts**: HR enters each Employee M-Pesa Account with its proof, an
    M-Pesa Manager approves it, and it is payable after the hold (24 hours by default).
 5. **Decide "Pay Employees by B2C Only to Approved Phones"**: switch it on once the employees paid
    by B2C have approved phones. Until then B2C to an employee may use the Employee's Cell Number.
+   It is switched on by the install only on a new site with no payout history; an upgraded or
+   renamed site keeps it off until you decide.
+5a. **Payroll: one way per Payroll Entry.** HRMS's Make Bank Entry (and any Bank or Cash Entry on
+   a Payroll Entry) is refused while M-Pesa salaries of that payroll are paid, on their way or
+   planned. Pay a payroll through M-Pesa or through the bank, or split it into separate Payroll
+   Entries. Tell HR: the button still shows, and the refusal comes when it is pressed.
 6. **Check the bank paybill list** for the banks your staff and suppliers use:
    - the paybill numbers;
    - the eight account-number patterns (Family, Paramount, Access, I&M, M-Oriental, Premier,
@@ -380,25 +394,87 @@ Existing settings that do more now:
     [docs/TRIDENT_ROUND4_ROLLOUT.md](docs/TRIDENT_ROUND4_ROLLOUT.md) (generic apart from Trident's
     names).
 
-**Known limits at 56f8e74** (some may be fixed by the time this is read; check the branch log)
-- Expense Claim and Employee Advance Connections still hide their M-Pesa counts from who may not
-  see salaries (`connections.EMPLOYEE_DOCUMENTS` lists them), although their payouts are not salary
-  data.
-- The "third-party account" warning on a bank account shows at approval, after Confirm, not in the
-  Approve summary or on save.
+### Round 4 final review (42 findings, fixed in r4-final-a/b/c)
+
+Six reviewers traced each flow end to end on the merged branch (claims, merchant and casual
+payees, salaries, payee accounts, roles, the Trident findings) against the Frappe, ERPNext and HRMS
+sources of v15 and v16. Four findings were high, 19 medium and 19 low. What users notice:
+
+- **Claims and advances:**
+  - A claim's approved merchant and casual payee lines that are not paid yet are held back from the
+    employee's share: Pay employee, the list's Pay by M-Pesa, B2B to the employee and the B2C send
+    and retry. The headline shows them "for payees".
+  - The B2C send and retry take off draft Payment and Journal Entries on the claim or advance, as
+    Prepare and B2B already did. A claim can no longer be paid by M-Pesa while a bank payment of it
+    waits in draft.
+  - Failed payouts and draft B2B requests no longer block cancelling a claim or advance. Paid
+    payouts and payouts on their way still do.
+  - A payee line's payout must pay the whole line. A Paybill payee that is a bank's paybill, or
+    whose account number is an employee's bank account number, is refused.
+  - The Administrator login cannot approve a claim that has payee lines.
+  - A B2C payout the claim can no longer take in full is booked with the claim taking what it
+    still owes; the rest stays unallocated with a comment and an alert (before, the booking failed
+    for 30 days).
+  - Claim and advance Connections now count their payouts for who reads them by a role other than
+    Employee, without salary visibility. Status queries of a claim's B2B payout follow the same rule.
+- **Roles:** HR User and HR Manager prepare (never send) claim payouts on both routes. Expense
+  Approver is a preparer and the only default role that can prepare an advance's payout; it sees
+  supplier, claim and advance payouts on the payout lists, never salaries.
+- **Salaries:**
+  - Get References for Salary Slips, saving a disbursement with slip rows, and B2B to an employee
+    for a slip or for no document need salary visibility and read on the slip or Payroll Entry.
+  - A hand-made B2C request cannot pay a Salary Slip; one to an employee with no document is sent by
+    an M-Pesa Manager only.
+  - A user who may not see salaries cannot add, change or remove a salary line on a schedule.
+  - HRMS's Make Bank Entry is refused for a payroll that M-Pesa pays (UPGRADE step 5a).
+  - Versions of salary records and of every Employee M-Pesa Account are hidden from who may not
+    see salaries, System Manager included.
+  - A schedule's salary Journal Entry puts one cost center on both rows (the Payroll Entry's, else
+    the shortcode's, else the company default).
+- **Payee accounts:**
+  - An approved account can be cancelled after it was paid; Amend starts unblocked.
+  - A request that names no account pays the party's default only. A default on hold or blocked
+    refuses the request with that reason instead of paying another account.
+  - The migrate blocks accounts approved by their maker or with Administrator (UPGRADE, after
+    migrating, step 2).
+  - Supplier B2C rows pay only the supplier's approved phone account when it has one; Get
+    References fills in the default, and the receiver name is checked against it.
+  - Approve lists "Check before you confirm" warnings: a third party's bank account, an employee
+    paid to a business paybill or till.
+  - The account lists show Blocked (red), Default (green) and Approved (blue).
+- **Send via M-Pesa:**
+  - A claim payee's payout shows the payee as Receiver, the claim and line, and the bank's name.
+  - The dialog refuses up front, with the reason, where the server would refuse after the countdown
+    (self-pay, no-document employee B2B by a non-manager, payees switched off, payee caps).
+- **Make Entry** needs a named M-Pesa Manager to book a request paid after cancel, or to move a
+  paid payout to another document. A payee line's or schedule line's payout is never moved.
+- **Reversals:** an Unknown reversal is cancelled only by a named M-Pesa Manager. A new reversal of
+  a receipt whose cancelled reversal was later answered Reversed is refused.
+- **Payment Requests:** a prompt that is paid but not yet booked is never resent or superseded; the
+  form says it is being booked.
+- **Balances:** C2B receipts the ERP reversed no longer show as a Gap. A payout counts as in flight
+  only within 24 hours of the balance.
+- **Settings:** changing the claim workflow states that may be paid leaves a comment and alerts the
+  Notify Role. With those states set, an advance under its own workflow is gated only by the listed
+  states its workflow has.
+
+**Known limits** (after the final review)
 - An Integration Request's raw data of a B2C or B2B result holds the amount and receiver name
-  (salaries too), and System Manager reads Integration Requests.
+  (salaries too), and System Manager reads Integration Requests. Error Logs likewise.
 - A Payment Request made on a Sales Order before it was invoiced is not counted by a later prompt on
-  the invoice (as in ERPNext).
+  the invoice (as in ERPNext). Resend is hidden while any prompt is paid and not reconciled, even
+  if its money was reversed later; request a new prompt from the order or invoice.
 - **Claims and advances:**
   - Who reads Expense Claims sees claim payouts by DocType, not claim by claim: a site's User
     Permissions on claims are not reflected.
   - Accounts-only users see no claim buttons until the site gives them read on claims.
   - Payment schedule lines for claims and advances are not built.
+- **Suppliers:** Purchase Invoice and Purchase Order have no "Pay to supplier phone (B2C)" button
+  yet; the server side (approved phone accounts on B2C rows) is done.
 - **Salaries:** HR-only users cannot prepare salary schedules (the schedule's rights are Accounts
-  and M-Pesa Manager).
-- **Balances and names:** a balance Gap also appears for reversals and settlement sweeps, which the
-  check does not count yet. Only KCB's Safaricom name is confirmed in the bank list.
+  and M-Pesa Manager). HRMS still shows Make Bank Entry on a payroll M-Pesa pays.
+- **Balances and names:** settlement sweeps can still show as a Gap. Only KCB's Safaricom name is
+  confirmed in the bank list.
 - **Desk:**
   - The desk scripts were checked with node, not in a browser on v15 and v16: check the buttons on
     the site.
