@@ -4,7 +4,7 @@ Draft, 2026-10-23. Merged by a judge from three independent designs, each checke
 
 Status:
 - Phases 1, 2 and 3 are built on mpsa-suite (SUITE_CHANGES.md, "Payouts Phase 1", "Payouts Phase 2" and "Payouts Phase 3"). All three passed their bench tests on the v15 and v16 benches (Phase 3 on sites with HRMS: 357 tests on each).
-- Round 4 is built on branch payouts-r4 (SUITE_CHANGES.md, "Round 4"): send safety, payee accounts with many destinations, the bank paybill list, Expense Claim and Employee Advance pay, claim payees, and salaries from slips. 2623 unit tests pass at 56f8e74. The bench (468 tests at 56f8e74) has 3 errors on v15 and 2 on v16, all in test fixtures.
+- Round 4 is built on branch payouts-r4 (SUITE_CHANGES.md, "Round 4"): send safety, payee accounts with many destinations, the bank paybill list, Expense Claim and Employee Advance pay, claim payees, and salaries from slips. 2756 unit tests pass at a06a073e. The bench (499 tests at a06a073e) passes on v15 and v16.
 - Phase 4: B2B Transaction Status is built (round 4, F2.4); the rest is not.
 
 ## Decisions taken (2026-10-23)
@@ -913,7 +913,7 @@ P3 bench
 - Payroll Entry cancel is blocked.
 - Withheld and Left employees are excluded.
 
-ROUND 4 (unit, tests/unit/; 2623 pass at 56f8e74)
+ROUND 4 (unit, tests/unit/; 2756 pass at a06a073e)
 - `test_r4_foundation.py`: settings, role sets, desk flags, hooks and stubs, custom fields.
 - `test_send_confirm.py`, `test_r4_send_gates_js.py`, `test_access_control.py`:
   - the summary, and the token's lifecycle (5 seconds, 10 minutes, once, user, document, modified, amount, destination);
@@ -927,10 +927,7 @@ ROUND 4 (unit, tests/unit/; 2623 pass at 56f8e74)
 
 ROUND 4 (bench, `mpsa_suite/.../test_*.py`, named users through `t.payer()`, `t.manager()` and `t.send_as`)
 - Files: money_out/test_payee_accounts.py, test_employee_documents.py, test_claim_payees.py, test_salary_slip_payouts.py, test_connections.py, test_trident_fixes.py; money_in/test_collect.py, test_integration_user.py; wallet/test_balance_movement.py; tests/test_r4_foundation.py, test_roles_permissions.py.
-- At 56f8e74: 468 tests, 3 errors on v15 and 2 on v16, all in fixtures:
-  - test_b2b_documents cancels as Administrator, now refused;
-  - test_claim_payees' bank paybill fixture breaks the code rule, so the class does not run;
-  - on v15, test_employee_documents' advance account must be Receivable.
+- At a06a073e: 499 tests, all pass on v15 and v16 (test_claim_payees runs on a real site for the first time).
 
 SANDBOX LAB AND LIVE
 - New scenarios: b2b_pay_order and b2b_pay_first_then_entry, beside the existing start/check_b2b_pay.

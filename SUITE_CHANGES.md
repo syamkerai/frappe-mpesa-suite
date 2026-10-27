@@ -482,12 +482,10 @@ sources of v15 and v16. Four findings were high, 19 medium and 19 low. What user
   - Payment Entry's STK button is not hidden from non-collectors (the server checks Payment Entry
     submit).
 
-Tests: 2623 unit tests pass at 56f8e74 (`python -m pytest tests/unit -q`). Bench, full `run-tests
---app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 468 tests at 56f8e74,
-with 3 errors on v15 and 2 on v16, all in test fixtures, not in the product:
-- `test_b2b_documents` cancels as Administrator, now refused;
-- the `test_claim_payees` bank paybill fixture breaks the code rule, so that class did not run;
-- the v15 advance fixture's account must be Receivable.
+Tests: 2756 unit tests pass at a06a073e (`python -m pytest tests/unit -q`). Bench, full `run-tests
+--app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 499 tests at a06a073e,
+all pass on both versions. This is the first run of `test_claim_payees` (merchant and casual
+payees) on a real site: its setUpClass failed at every earlier head.
 
 ## Phase 1 — Foundation (this change)
 
