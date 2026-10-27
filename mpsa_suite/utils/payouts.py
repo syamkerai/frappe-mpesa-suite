@@ -5,7 +5,8 @@ OWED_FIELDS = {
     "Purchase Invoice": ("outstanding_amount",),
     "Purchase Order": ("rounded_total", "grand_total", "advance_paid"),
     "Employee Advance": ("advance_amount", "paid_amount"),
-    "Expense Claim": ("grand_total", "total_sanctioned_amount", "total_amount_reimbursed"),
+    "Expense Claim": ("grand_total", "total_sanctioned_amount", "total_taxes_and_charges", "total_advance_amount",
+                      "total_amount_reimbursed"),
     "Salary Slip": ("rounded_total", "net_pay"),
 }
 
@@ -32,9 +33,17 @@ def owed(doctype: str, values: dict | None, paid: float = 0.0) -> float | None:
     elif doctype == "Purchase Order":
         amount = (_n(values, "rounded_total") or _n(values, "grand_total")) - _n(values, "advance_paid")
     elif doctype == "Employee Advance":
+        # HRMS: advance_amount less paid_amount, whatever the status (v16's Partially Paid owes the rest)
         amount = _n(values, "advance_amount") - _n(values, "paid_amount")
     elif doctype == "Expense Claim":
-        total = _n(values, "grand_total") or _n(values, "total_sanctioned_amount")
+        # HRMS's own outstanding (get_outstanding_amount_for_claim, v15 and v16): what was sanctioned
+        # plus taxes, less the advances set against the claim and what was reimbursed. That is its
+        # grand_total less reimbursed, so a claim its advances cover owes nothing.
+        if "total_sanctioned_amount" in values:
+            total = (_n(values, "total_sanctioned_amount") + _n(values, "total_taxes_and_charges")
+                     - _n(values, "total_advance_amount"))
+        else:
+            total = _n(values, "grand_total")
         amount = total - _n(values, "total_amount_reimbursed")
     else:  # Salary Slip
         amount = (_n(values, "rounded_total") or _n(values, "net_pay")) - float(paid or 0)

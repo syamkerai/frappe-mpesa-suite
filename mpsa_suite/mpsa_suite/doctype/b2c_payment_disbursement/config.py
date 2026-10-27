@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import List, Dict, Callable, Optional
 
+from ....utils.payouts import owed
+
 @dataclass
 class DoctypeConfig:
     fields: List[str]
@@ -20,13 +22,15 @@ DOCTYPE_CONFIGS = {
         payable_amount_calc=lambda e: (e.advance_amount or 0) - (e.paid_amount or 0),
         invoice_amount_field="advance_amount"
     ),
+    # What HRMS says the claim owes (utils.payouts.owed): sanctioned plus taxes, less advances and
+    # what was reimbursed; v16's Partially Paid claims owe the rest
     "Expense Claim": DoctypeConfig(
-        fields=["name", "posting_date", "employee", "grand_total",
-                "total_claimed_amount", "total_amount_reimbursed"],
+        fields=["name", "posting_date", "employee", "grand_total", "total_sanctioned_amount",
+                "total_taxes_and_charges", "total_advance_amount", "total_amount_reimbursed"],
         date_field="posting_date",
-        additional_filters={"approval_status": "Approved", "status": "Unpaid"},
-        payable_amount_calc=lambda e: (e.total_claimed_amount or 0) - (e.total_amount_reimbursed or 0),
-        invoice_amount_field="total_claimed_amount"
+        additional_filters={"approval_status": "Approved", "status": ["in", ["Unpaid", "Partially Paid"]]},
+        payable_amount_calc=lambda e: owed("Expense Claim", e) or 0,
+        invoice_amount_field="grand_total"
     ),
     "Purchase Invoice": DoctypeConfig(
         fields=[],

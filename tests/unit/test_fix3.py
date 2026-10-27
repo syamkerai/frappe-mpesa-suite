@@ -366,11 +366,15 @@ def test_submit_refused_while_a_b2b_request_pays_the_invoice(payout):
     assert ("b2b_open", "Purchase Invoice", "PI-1", True, [key]) in payout.calls, "a locking read under the lock"
 
 
-def test_b2b_is_not_asked_about_for_other_documents(payout):
+def test_b2b_is_asked_about_for_a_claim_too_but_not_order_advances(payout, monkeypatch):
+    # round 4: a B2B request may pay an Expense Claim or Employee Advance (money_out.employee_documents)
+    employee_documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    monkeypatch.setattr(employee_documents, "payable_problem", lambda doc, doctype=None: None)
     doc = payout.disbursement("D-NEW", {"allocated_amount": 500, "reference_doctype": "Expense Claim",
                                         "reference_name": "EC-1"})
     doc.validate_no_double_payout()
-    assert not [c for c in payout.calls if c[0] in ("b2b_open", "order_advances")]
+    assert ("b2b_open", "Expense Claim", "EC-1", True, ["b2c-pay:Expense Claim:EC-1"]) in payout.calls
+    assert not [c for c in payout.calls if c[0] == "order_advances"]
 
 
 def test_submit_takes_off_an_advance_still_on_the_invoices_order(payout):

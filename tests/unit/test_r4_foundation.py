@@ -308,8 +308,9 @@ def test_claim_and_advance_cancel_and_the_boot_hook_are_wired():
 
 
 def test_the_new_modules_add_no_endpoint():
-    # money_out/send_confirm.py has two since WP1 (tests/unit/test_send_confirm.py)
-    for name in ("boot.py", "money_out/connections.py", "money_out/employee_documents.py"):
+    # money_out/send_confirm.py has two since WP1 (tests/unit/test_send_confirm.py) and
+    # money_out/employee_documents.py four since WP3 (tests/unit/test_employee_documents.py)
+    for name in ("boot.py", "money_out/connections.py"):
         tree = ast.parse((APP / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):

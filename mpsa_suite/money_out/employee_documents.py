@@ -1,6 +1,768 @@
-"""M-Pesa payouts of Expense Claims and Employee Advances (WP3)."""
+"""M-Pesa payouts of Expense Claims and Employee Advances (HRMS), to the employee by B2C or B2B.
+
+A submitted claim or advance is paid by M-Pesa only while ``payable_problem`` finds nothing in the
+way: a claim approved, not paid at entry and with its Payable Account; an advance with its Advance
+Account; in KES; in a workflow state M-Pesa Suite Settings lists as payable, when the site runs a
+Workflow on the DocType and the list is set; and still owing by HRMS's own reading (a claim's
+sanctioned amount plus taxes, less its advances and what was reimbursed; an advance's
+advance_amount less paid_amount). Every pay path asks it: the form buttons and the list's Pay by
+M-Pesa, a B2C row or request that pays the document, a B2B request naming it. What is left to pay
+counts every payout of the document on its way, whoever it pays (owed.employee_doc_left_to_pay),
+under the document's lock.
+
+The buttons only prepare a draft, for what is left in whole shillings: a B2C Payment Disbursement
+of one row to the employee's approved phone (or, while M-Pesa Suite Settings lets B2C pay phones
+nobody approved, the Employee's Cell Number), or a B2B request to one of the employee's approved
+bank, paybill or till accounts. An M-Pesa Payer sends it with Send via M-Pesa; nobody pays
+themselves. Pay by M-Pesa on the list prepares one B2C disbursement for the ticked documents of
+employees paid by phone and a B2B request per document of an employee whose default account is a
+bank account, paybill or till.
+
+While M-Pesa Suite Settings says so (``b2c_approved_phones_only``, on for new sites), every B2C row
+or request paying an employee goes to a phone approved on one of the employee's Employee M-Pesa
+Accounts, and the row names that account: the name M-Pesa paid is checked against it.
+
+A paid payout is booked as a Payment Entry HRMS accepts: party the document's employee, its own
+Payable Account (claim) or Advance Account (advance), the document referenced
+(money_out.b2b_entries for B2B, accounting.payment_entry_service for B2C), whoever M-Pesa paid.
+These payouts are not salaries: Accounts roles see them (money_out.salary_access). A claim or
+advance is not cancelled while one of its payouts is paid or on its way (``before_cancel``).
+"""
+
+import frappe
+from frappe.utils import cint, cstr, flt, nowdate
+
+from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
+from ..money_in import common as money_in_common
+from ..permissions import PREPARE_ROLES, require
+from . import employee_accounts, owed, party_accounts
+
+EXPENSE_CLAIM, ADVANCE = "Expense Claim", "Employee Advance"
+DOCTYPES = (EXPENSE_CLAIM, ADVANCE)
+B2B = owed.B2B
+DISB, DISB_ROW, B2C_REQUEST = "B2C Payment Disbursement", "B2C Payment Disbursement Reference", "B2C Disbursement Request"
+LINE = owed.SCHEDULE_LINE
+EMPLOYEE_ACCOUNT = party_accounts.EMPLOYEE_ACCOUNT
+PHONE = party_accounts.PHONE
+# The account types B2B pays (a phone is paid by B2C)
+B2B_TYPES = party_accounts.B2B_TYPES
+AUTO = "Book automatically"
+# What the checks read of each document (fields the site's version lacks are left out)
+READ = {
+    EXPENSE_CLAIM: ("name", "docstatus", "employee", "employee_name", "company", "currency", "approval_status",
+                    "status", "is_paid", "payable_account", "project", "cost_center", "grand_total",
+                    "total_sanctioned_amount", "total_taxes_and_charges", "total_advance_amount",
+                    "total_amount_reimbursed"),
+    ADVANCE: ("name", "docstatus", "employee", "employee_name", "company", "currency", "exchange_rate", "status",
+              "advance_account", "advance_amount", "paid_amount"),
+}
+# Payouts still on their way, or Paid (the payroll cancel guard's)
+B2B_LIVE = ("Not Initiated", "Initiated", "Unknown")
+B2C_LIVE = ("Not Initiated", "Initiated", "Status Unknown")
+LINE_SENT = ("Sending", "Sent", "Unknown", "Paid")
+# Most documents one Pay by M-Pesa prepares
+BULK_LIMIT = 200
+
+
+def _settings():
+    try:
+        return money_in_common.suite()
+    except frappe.DoesNotExistError:
+        return frappe._dict()
+
+
+def approved_phones_only() -> bool:
+    """M-Pesa Suite Settings: an employee is paid by B2C only to a phone approved on one of their
+    Employee M-Pesa Accounts."""
+    return bool(cint(_settings().get("b2c_approved_phones_only")))
+
+
+def payable_states() -> list:
+    """The workflow states M-Pesa Suite Settings lists as payable (one per line); [] for any."""
+    return [s.strip() for s in cstr(_settings().get("claim_payable_workflow_states")).splitlines() if s.strip()]
+
+
+def workflow_state_field(doctype: str) -> str | None:
+    """The state field of the DocType's active Workflow, or None when it runs none."""
+    workflow = frappe.db.get_value("Workflow", {"document_type": doctype, "is_active": 1},
+                                   ["name", "workflow_state_field"], as_dict=True)
+    if not workflow:
+        return None
+    return workflow.workflow_state_field or "workflow_state"
+
+
+def _check_doctype(doctype: str) -> None:
+    if doctype not in DOCTYPES:
+        frappe.throw("Pick an Expense Claim or an Employee Advance.")
+
+
+def money(value) -> str:
+    return owed.money(value)
+
+
+def whole_shillings(left) -> int:
+    """What M-Pesa can pay of ``left``: whole shillings, never more than is left."""
+    return int(flt(left, 2) + 0.001)
+
+
+# ---------------------------------------------------------------- the document
+def read_document(dt: str, dn: str, for_update: bool = False):
+    """The claim's or advance's fields the checks need, its workflow state among them, or None."""
+    meta = frappe.get_meta(dt)
+    fields = [f for f in READ[dt] if f in ("name", "docstatus") or meta.has_field(f)]
+    state = workflow_state_field(dt)
+    if state and state not in fields and meta.has_field(state):
+        fields.append(state)
+    values = frappe.db.get_value(dt, dn, fields, as_dict=True, for_update=for_update) if dn else None
+    if values:
+        values.doctype = dt
+        values.state_field = state
+    return values
+
+
+def _values(doc, doctype=None):
+    """``doc`` as read_document reads it: what it read already, or a document read now."""
+    if doc is None:
+        return None
+    if isinstance(doc, dict) and "state_field" in doc:
+        return doc
+    dt = doctype or _doctype_of(doc)
+    return read_document(dt, getattr(doc, "name", None) or doc.get("name")) if dt in DOCTYPES else None
+
+
+def _doctype_of(doc) -> str | None:
+    return (getattr(doc, "doctype", None) or doc.get("doctype")) if doc is not None else None
+
+
+def party_account(dt: str, values) -> str | None:
+    """The account HRMS pays the document on (employee_payment_entry.get_party_account, v15 and
+    v16): a claim's Payable Account, an advance's Advance Account. ERPNext refuses any other on a
+    Payment Entry that references the claim."""
+    return values.get("payable_account") if dt == EXPENSE_CLAIM else values.get("advance_account")
+
+
+def outstanding(dt: str, values) -> float:
+    """What HRMS says the document still owes (utils.payouts.owed)."""
+    from ..utils.payouts import owed as owed_by
+
+    return flt(owed_by(dt, values), 2) if values and cint(values.get("docstatus")) == 1 else 0.0
+
+
+def _currency(values) -> str:
+    """The document's currency: v16's own field, else its company's (a v15 claim has none)."""
+    return (values.get("currency")
+            or (values.get("company") and frappe.db.get_value("Company", values.company, "default_currency"))
+            or "KES")
+
+
+def payable_problems(dt: str, values) -> list:
+    """Why the claim or advance may not be paid by M-Pesa now, as plain messages."""
+    if dt not in DOCTYPES:
+        return [f"{dt} is not an Expense Claim or Employee Advance."]
+    if not values:
+        return [f"{dt} not found"]
+    name = values.name
+    problems = []
+    if cint(values.docstatus) == 2:
+        problems.append(f"{name} is cancelled.")
+    elif cint(values.docstatus) != 1:
+        problems.append(f"{name} is not submitted.")
+    if dt == EXPENSE_CLAIM:
+        if values.get("approval_status") != "Approved":
+            problems.append(f"{name} is not approved (Approval Status: {values.get('approval_status') or 'Draft'}).")
+        if cint(values.get("is_paid")):
+            problems.append(f"{name} was paid when it was entered (Is Paid).")
+    if not party_account(dt, values):
+        problems.append(f"{name} has no {'Payable Account' if dt == EXPENSE_CLAIM else 'Advance Account'}.")
+    states = payable_states()
+    if values.get("state_field") and states:
+        state = cstr(values.get(values.state_field)).strip()
+        if state not in states:
+            problems.append(f"{name} is in workflow state {state or '(none)'}, which M-Pesa Suite Settings does not "
+                            "list among the workflow states that may be paid.")
+    currency = _currency(values)
+    if currency != "KES":
+        problems.append(f"{name} is in {currency}. M-Pesa pays KES only.")
+    elif dt == ADVANCE and values.get("exchange_rate") not in (None, "") and flt(values.exchange_rate) not in (0, 1):
+        problems.append(f"{name} has an exchange rate of {values.exchange_rate}. M-Pesa pays KES only.")
+    account = party_account(dt, values)
+    account_currency = frappe.db.get_value("Account", account, "account_currency") if account else None
+    if account_currency and account_currency != "KES":
+        problems.append(f"{account} is in {account_currency}. M-Pesa pays KES only.")
+    if cint(values.docstatus) == 1 and outstanding(dt, values) <= owed.MIN:
+        problems.append(f"{name} has nothing left to pay.")
+    return problems
+
+
+def payable_problem(doc, doctype: str | None = None) -> str | None:
+    """Why a submitted Expense Claim or Employee Advance may not be paid now, or None. ``doc``: the
+    document, or what read_document read of it."""
+    values = _values(doc, doctype)
+    dt = doctype or (values or {}).get("doctype") or _doctype_of(doc)
+    problems = payable_problems(dt, values)
+    return problems[0] if problems else None
+
+
+def booking_party(dt: str | None, dn: str | None):
+    """Who a paid payout of an Expense Claim or Employee Advance is booked to: _dict(employee,
+    account), whoever M-Pesa paid; None for any other document."""
+    if dt not in DOCTYPES or not dn:
+        return None
+    values = read_document(dt, dn)
+    if not values:
+        return None
+    return frappe._dict(employee=values.employee, account=party_account(dt, values))
+
+
+# ---------------------------------------------------------------- B2C rows and requests
+def b2c_phone(employee) -> tuple:
+    """(phone, account) a B2C payout to ``employee`` goes to: the phone of their default (or only)
+    approved phone account that can be paid now; while M-Pesa Suite Settings lets B2C pay phones
+    nobody approved, the Employee's Cell Number when they have none; ("", None) otherwise."""
+    account = party_accounts.pick_account(EMPLOYEE_ACCOUNT, employee, (PHONE,)) if employee else None
+    if account:
+        return cstr(party_accounts.get_account(EMPLOYEE_ACCOUNT, account).phone).strip(), account
+    if approved_phones_only() or not employee:
+        return "", None
+    return cstr(frappe.db.get_value("Employee", employee, "cell_number")).strip(), None
+
+
+def _approved_phone(employee, phone):
+    """The employee's approved phone account for ``phone`` (one that can be paid now first), or None."""
+    phone = cstr(phone).strip()
+    matches = [a for a in party_accounts.accounts_of(EMPLOYEE_ACCOUNT, employee, (PHONE,))
+               if phone and cstr(a.phone).strip() == phone]
+    usable = [a for a in matches if not party_accounts.usable_problem(a, employee, EMPLOYEE_ACCOUNT)]
+    return (usable or matches or [None])[0]
+
+
+def phone_lock_problem(employee, phone) -> str | None:
+    """Why a B2C payout to ``employee`` may not go to ``phone`` while M-Pesa Suite Settings pays
+    employees only to approved phones (None when it may, or while the setting is off)."""
+    if not approved_phones_only():
+        return None
+    acc = _approved_phone(employee, phone)
+    if not acc:
+        return (f"{cstr(phone).strip() or 'No number'} is not a phone approved for {employee}. M-Pesa Suite Settings pays "
+                "employees by B2C only to an approved phone: add it under Employee > M-Pesa Accounts and have a manager "
+                "approve it.")
+    return party_accounts.usable_problem(acc, employee, EMPLOYEE_ACCOUNT)
+
+
+def _sent_already(row) -> bool:
+    """A row an amend copied from a disbursement that sent it: it is not sent again."""
+    request = getattr(row, "b2c_disbursement_request", None)
+    status = frappe.db.get_value(B2C_REQUEST, request, "status") if request else None
+    return bool(status) and status != "Failed"
+
+
+def check_b2c_row(row) -> None:
+    """A B2C Payment Disbursement row (its validate, also at submit). A row paying a claim or
+    advance pays one that may be paid, of the row's employee. A row paying an employee goes, while
+    M-Pesa Suite Settings says so, to a phone approved on one of the employee's accounts, and names
+    the approved account it pays (for the name check after payment). A payment schedule's row is
+    its line's (schedule.check_b2c_row); a payee of a claim is not called here (claim_payees)."""
+    if _sent_already(row):
+        return
+    dt, dn = getattr(row, "reference_doctype", None), cstr(getattr(row, "reference_name", None)).strip()
+    party_type, party = getattr(row, "party_type", None), getattr(row, "party", None)
+    if dt in DOCTYPES and dn:
+        values = read_document(dt, dn)
+        problem = payable_problem(values, dt)
+        if problem:
+            frappe.throw(f"Row #{row.idx}: {problem}")
+        if party_type == "Employee" and party and values.employee != party:
+            frappe.throw(f"Row #{row.idx}: {dn} belongs to {values.employee}, not {party}.")
+    if party_type != "Employee" or not party or getattr(row, "mpesa_schedule_line", None):
+        return
+    acc = _approved_phone(party, getattr(row, "partyb", None))
+    row.payee_account_doctype = EMPLOYEE_ACCOUNT if acc else None
+    row.payee_account = acc.name if acc else None
+    problem = phone_lock_problem(party, getattr(row, "partyb", None))
+    if problem:
+        frappe.throw(f"Row #{row.idx}: {problem}")
+
+
+def check_b2c_request(doc) -> None:
+    """A B2C Disbursement Request made by hand (not by its disbursement's job or a payment
+    schedule, whose rows were checked): the claim or advance it pays may be paid, an employee is
+    paid to an approved phone (as a disbursement row is), and nobody sends a payout to themselves."""
+    flags = getattr(doc, "flags", None) or frappe._dict()
+    if flags.get("mpesa_from_disbursement") or flags.get("mpesa_from_schedule"):
+        return
+    dt, dn = doc.get("reference_doctype"), cstr(doc.get("reference_name")).strip()
+    employees = set()
+    if dt in DOCTYPES and dn:
+        values = read_document(dt, dn)
+        problem = payable_problem(values, dt)
+        if problem:
+            frappe.throw(problem)
+        employees.add(values.employee)
+    if doc.get("party_type") == "Employee" and doc.get("party"):
+        employees.add(doc.party)
+        problem = phone_lock_problem(doc.party, doc.get("phone_number"))
+        if problem:
+            frappe.throw(problem)
+    if cint(doc.get("docstatus")) == 1:  # being sent
+        for employee in sorted(e for e in employees if e):
+            problem = employee_accounts.own_payment_problem(employee)
+            if problem:
+                frappe.throw(problem, frappe.PermissionError)
+
+
+def check_not_own_b2c(doc) -> None:
+    """Nobody pays themselves (a B2C Payment Disbursement's submit): not a row's employee, nor the
+    employee of a claim or advance a row pays. A payment schedule's rows were checked at Pay
+    Selected."""
+    if (getattr(doc, "flags", None) or {}).get("mpesa_from_schedule"):
+        return
+    for row in doc.get("references") or []:
+        dt, dn = getattr(row, "reference_doctype", None), getattr(row, "reference_name", None)
+        employees = {getattr(row, "party", None)} if getattr(row, "party_type", None) == "Employee" else set()
+        if dt in DOCTYPES and dn:
+            employees.add(frappe.db.get_value(dt, dn, "employee"))
+        for employee in sorted(e for e in employees if e):
+            problem = employee_accounts.own_payment_problem(employee)
+            if problem:
+                frappe.throw(f"Row #{row.idx}: {problem}", frappe.PermissionError)
+
+
+def payable_entries(doctype: str, entries: list) -> list:
+    """Get References on a disbursement: the claims or advances that may be paid now."""
+    if doctype not in DOCTYPES:
+        return entries
+    return [e for e in entries if not payable_problem(read_document(doctype, e.get("name")), doctype)]
+
+
+# ---------------------------------------------------------------- the form: headline and buttons
+def can_prepare(user: str | None = None) -> bool:
+    return not set(PREPARE_ROLES).isdisjoint(frappe.get_roles(user))
+
+
+def paid_by_mpesa(dt: str, dn: str) -> float:
+    """What M-Pesa paid for the document: its Paid B2C and B2B payouts, booked or not."""
+    total = flt(frappe.db.sql(
+        f"""SELECT COALESCE(SUM(amount), 0) FROM `tab{B2C_REQUEST}`
+        WHERE reference_doctype = %s AND reference_name = %s AND docstatus IN (1, 2) AND status = 'Paid'""",
+        (dt, dn))[0][0])
+    field = owed.EMPLOYEE_DOC_FIELDS[dt]
+    if frappe.db.has_column(B2B, field):
+        total += flt(frappe.db.sql(
+            f"""SELECT COALESCE(SUM(amount), 0) FROM `tab{B2B}`
+            WHERE `{field}` = %s AND docstatus IN (1, 2) AND status = 'Paid'""", (dn,))[0][0])
+    return flt(total, 2)
+
+
+def draft_b2c(dt: str, dn: str) -> list:
+    """Draft B2C Payment Disbursements with a row for the document (they count as paying it only
+    once they are sent)."""
+    return [r[0] for r in frappe.db.sql(
+        f"""SELECT DISTINCT ref.parent FROM `tab{DISB_ROW}` ref JOIN `tab{DISB}` d ON d.name = ref.parent
+        WHERE ref.reference_doctype = %s AND ref.reference_name = %s AND d.docstatus = 0 ORDER BY ref.parent""",
+        (dt, dn))]
+
+
+def draft_payouts(dt: str, dn: str) -> list:
+    """Draft B2C Payment Disbursements and B2B requests that would pay the document, as
+    {doctype, name}."""
+    found = [{"doctype": DISB, "name": name} for name in draft_b2c(dt, dn)]
+    field = owed.EMPLOYEE_DOC_FIELDS[dt]
+    if frappe.db.has_column(B2B, field):
+        found += [{"doctype": B2B, "name": name}
+                  for name in frappe.get_all(B2B, filters={field: dn, "docstatus": 0}, pluck="name",
+                                             order_by="creation asc")]
+    return found
+
+
+def _masked_phone(phone) -> str:
+    phone = cstr(phone).strip()
+    return f"{phone[:4]}****{phone[-4:]}" if len(phone) > 8 else phone
+
+
+def _masked(number) -> str:
+    number = cstr(number).strip()
+    return f"****{number[-4:]}" if len(number) > 4 else number
+
+
+def _account_label(acc) -> str:
+    """'Till (Buy Goods) 835811', 'Paybill 888880, account ****AC-1 (default)': what the dialog shows."""
+    label = f"{acc.account_type} {cstr(acc.shortcode).strip()}"
+    if acc.get("bank"):
+        label += f" ({acc.bank})"
+    if cstr(acc.get("account_number")).strip():
+        label += f", account {_masked(acc.account_number)}"
+    return label + (" (default)" if cint(acc.get("is_default")) else "")
+
+
+def shortcodes(company: str, flag: str) -> list:
+    """Mpesa Settings of the company that pay by B2C (``use_b2c``) or B2B (``use_b2b``)."""
+    filters = {flag: 1}
+    if company and frappe.get_meta("Mpesa Settings").has_field("company"):
+        filters["company"] = company
+    return [s.name for s in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "initiator_name"],
+                                            order_by="creation asc") if s.initiator_name]
+
+
+def _pay_options(dt: str, values) -> dict:
+    employee = values.employee
+    phone, phone_account = b2c_phone(employee)
+    accounts = [a for a in party_accounts.accounts_of(EMPLOYEE_ACCOUNT, employee, B2B_TYPES)
+                if not party_accounts.usable_problem(a, employee, EMPLOYEE_ACCOUNT)]
+    return {
+        "phone": _masked_phone(phone),
+        "phone_approved": bool(phone_account),
+        "approved_phones_only": approved_phones_only(),
+        "b2b_accounts": [{"name": a.name, "label": _account_label(a), "is_default": cint(a.is_default)}
+                         for a in accounts],
+        "b2b_default": party_accounts.pick_account(EMPLOYEE_ACCOUNT, employee, B2B_TYPES),
+        "b2c_settings": shortcodes(values.company, "use_b2c"),
+        "b2b_settings": shortcodes(values.company, "use_b2b"),
+        "drafts": draft_payouts(dt, values.name),
+    }
+
+
+@frappe.whitelist()
+def document_status(doctype: str, name: str) -> dict:
+    """What the Expense Claim or Employee Advance form shows, in one call: the M-Pesa headline
+    (paid, in flight, left), why it cannot be paid now, and for preparers what the pay buttons
+    offer (the employee's approved destinations, masked, and the shortcodes)."""
+    _check_doctype(doctype)
+    frappe.has_permission(doctype, "read", doc=name, throw=True)
+    values = read_document(doctype, name)
+    if not values:
+        frappe.throw(f"{doctype} {name} not found")
+    result = owed.employee_doc_left_to_pay(doctype, name)
+    sent = [p for p in result.parts if p.kind in ("b2b", "b2c")]
+    status = {
+        "owed": result.owed,
+        "left": result.left,
+        "amount": whole_shillings(result.left),
+        "paid": paid_by_mpesa(doctype, name),
+        "in_flight": flt(sum(flt(p.amount) for p in sent if p.get("status") != "Paid"), 2),
+        "unbooked": flt(sum(flt(p.amount) for p in sent if p.get("status") == "Paid"), 2),
+        "drafts_planned": flt(sum(flt(p.amount) for p in result.parts if p.kind in ("draft", "planned")), 2),
+        "parts": [p.label for p in result.parts],
+        "problem": payable_problem(values, doctype),
+        "can_prepare": can_prepare(),
+    }
+    if status["can_prepare"]:
+        status.update(_pay_options(doctype, values))
+    return status
+
+
+# ---------------------------------------------------------------- preparing payouts (drafts only)
+def _payable(doctype: str, name: str) -> tuple:
+    """(values, whole shillings left): the document may be paid now and has something left."""
+    values = read_document(doctype, name)
+    problem = payable_problem(values, doctype)
+    if problem:
+        frappe.throw(problem)
+    result = owed.employee_doc_left_to_pay(doctype, name)
+    amount = whole_shillings(result.left)
+    if amount < 1:
+        frappe.throw(f"Nothing is left to pay by M-Pesa. {owed.explain(name, result)}")
+    return values, amount
+
+
+def _shortcode(company: str, flag: str, chosen: str | None = None) -> str:
+    """The Mpesa Settings to pay from: the one picked, or the company's only one."""
+    kind = "B2C" if flag == "use_b2c" else "B2B"
+    options = shortcodes(company, flag)
+    if chosen:
+        if chosen not in options:
+            frappe.throw(f"Mpesa Settings {chosen} does not pay {company} by {kind}.")
+        return chosen
+    if len(options) == 1:
+        return options[0]
+    if not options:
+        frappe.throw(f"No Mpesa Settings of {company} pays by {kind} (Use {kind} and an initiator).")
+    frappe.throw(f"Pick the shortcode to pay from: {', '.join(options)}.")
+
+
+def _new_b2c_disbursement(company: str, settings: str, doctype: str, paid_to: str):
+    """A draft B2C Payment Disbursement paying ``doctype`` documents from the shortcode's Utility
+    account (as the payment schedule makes them)."""
+    from ..wallet import accounts as wallet_accounts
+
+    bank_account = wallet_accounts.bank_account(settings, wallet_accounts.UTILITY)
+    paid_from = frappe.db.get_value("Bank Account", bank_account, "account") if bank_account else None
+    if not paid_from:
+        frappe.throw(f"Map a Bank Account on Mpesa Settings {settings} (Accounting Mapping).")
+    doc = frappe.new_doc(DISB)
+    doc.update({
+        "naming_series": "MPESA-B2C-.YYYY.-",
+        "company": company,
+        "posting_date": nowdate(),
+        "payment_type": "Mpesa Disbursement",
+        "party_type": "Employee",
+        "transaction_to_pay_against": doctype,
+        "mode_of_payment": money_in_common.mode_of_payment_for(settings),
+        "paid_from": paid_from,
+        "paid_from_account_currency": "KES",
+        # each row is booked on its own document's account (payment_entry_service)
+        "paid_to": paid_to,
+        "paid_to_account_currency": "KES",
+        "paid_amount": 0,
+        "source_exchange_rate": 1,
+        "target_exchange_rate": 1,
+    })
+    return doc
+
+
+def _b2c_row(doctype: str, values, amount: int, phone: str, account: str | None) -> dict:
+    return {"reference_doctype": doctype, "reference_name": values.name, "party_type": "Employee",
+            "party": values.employee, "allocated_amount": amount, "partyb": phone, "currency": "KES",
+            "exchange_rate": 1, "payee_account_doctype": EMPLOYEE_ACCOUNT if account else None,
+            "payee_account": account}
+
+
+def _b2c_amount_problem(employee, amount) -> str | None:
+    if amount > B2C_MAX_AMOUNT:
+        return (f"KES {money(amount)} is more than M-Pesa B2C pays at once (KES {B2C_MAX_AMOUNT:,}): pay it to a bank, "
+                "paybill or till account.")
+    if amount < B2C_MIN_AMOUNT:
+        return f"KES {money(amount)} is less than M-Pesa B2C pays (KES {B2C_MIN_AMOUNT})."
+    return None
+
+
+def _no_phone(employee) -> str:
+    if approved_phones_only():
+        return (f"{employee} has no approved phone that can be paid now. Add one under Employee > M-Pesa Accounts and "
+                "have a manager approve it.")
+    return f"{employee} has no approved phone and no Cell Number."
+
+
+@frappe.whitelist(methods=["POST"])
+def prepare_b2c(doctype: str, name: str, mpesa_settings: str | None = None) -> dict:
+    """Pay employee (phone): a draft B2C Payment Disbursement of one row, what the document has
+    left in whole shillings, to the employee's approved phone (or their Cell Number while M-Pesa
+    Suite Settings allows it). Nothing is sent: an M-Pesa Payer sends it with Send via M-Pesa."""
+    require(PREPARE_ROLES)
+    _check_doctype(doctype)
+    frappe.has_permission(doctype, "read", doc=name, throw=True)
+    frappe.has_permission(DISB, "create", throw=True)
+    values, amount = _payable(doctype, name)
+    drafts = draft_b2c(doctype, name)
+    if drafts:
+        frappe.throw(f"Draft B2C Payment Disbursement {', '.join(drafts)} already pays {name}: open it, or delete it first.")
+    settings = _shortcode(values.company, "use_b2c", mpesa_settings)
+    phone, account = b2c_phone(values.employee)
+    if not phone:
+        frappe.throw(_no_phone(values.employee))
+    problem = _b2c_amount_problem(values.employee, amount)
+    if problem:
+        frappe.throw(problem)
+    doc = _new_b2c_disbursement(values.company, settings, doctype, party_account(doctype, values))
+    doc.paid_amount = amount
+    doc.append("references", _b2c_row(doctype, values, amount, phone, account))
+    doc.insert()
+    return {"doctype": DISB, "name": doc.name, "amount": amount}
+
+
+def _new_b2b(doctype: str, values, amount: int, settings: str, account: str | None = None):
+    """A draft B2B request paying the document to one of its employee's approved bank, paybill or
+    till accounts: the request's own checks run on insert (validate_request)."""
+    account = account or party_accounts.pick_account(EMPLOYEE_ACCOUNT, values.employee, B2B_TYPES)
+    if not account:
+        frappe.throw(f"{values.employee} has no approved bank, paybill or till account that can be paid now, or several "
+                     "and none is the default: pick one.")
+    acc = party_accounts.get_account(EMPLOYEE_ACCOUNT, account)
+    if not acc or acc.employee != values.employee or acc.account_type not in B2B_TYPES:
+        frappe.throw(f"{account} is not a bank, paybill or till account of {values.employee}.")
+    doc = frappe.new_doc(B2B)
+    doc.update({
+        "mpesa_settings": settings,
+        "company": values.company,
+        "employee": values.employee,
+        "employee_mpesa_account": account,
+        owed.EMPLOYEE_DOC_FIELDS[doctype]: values.name,
+        "amount": amount,
+        "remarks": f"{doctype} {values.name}"[:100],
+        "entry_mode": AUTO,
+    })
+    doc.insert()
+    return doc
+
+
+@frappe.whitelist(methods=["POST"])
+def prepare_b2b(doctype: str, name: str, employee_mpesa_account: str | None = None,
+                mpesa_settings: str | None = None) -> dict:
+    """Pay employee (bank / paybill / till): a draft B2B request for what the document has left in
+    whole shillings, to the employee's approved account picked (the default when none is). Nothing
+    is sent: an M-Pesa Payer sends it with Send via M-Pesa."""
+    require(PREPARE_ROLES)
+    _check_doctype(doctype)
+    frappe.has_permission(doctype, "read", doc=name, throw=True)
+    frappe.has_permission(B2B, "create", throw=True)
+    values, amount = _payable(doctype, name)
+    settings = _shortcode(values.company, "use_b2b", mpesa_settings)
+    doc = _new_b2b(doctype, values, amount, settings, employee_mpesa_account)
+    return {"doctype": B2B, "name": doc.name, "amount": amount}
+
+
+def _route(values) -> str:
+    """How the list's Pay by M-Pesa pays the employee: "B2B" when their default approved account is
+    a bank account, paybill or till, else "B2C" (an approved phone, or the Cell Number while
+    M-Pesa Suite Settings allows it)."""
+    default = party_accounts.default_account(EMPLOYEE_ACCOUNT, values.employee)
+    acc = party_accounts.get_account(EMPLOYEE_ACCOUNT, default) if default else None
+    return "B2B" if acc and acc.account_type in B2B_TYPES else "B2C"
+
+
+@frappe.whitelist(methods=["POST"])
+def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_settings: str | None = None) -> dict:
+    """Pay by M-Pesa on the list: ONE draft B2C Payment Disbursement with a row per ticked document
+    whose employee is paid by phone, and a draft B2B request per document whose employee's default
+    account is a bank account, paybill or till, each for what the document has left. Documents
+    that cannot be paid are listed with the reason. Nothing is sent: each payout is sent on its own
+    with Send via M-Pesa."""
+    require(PREPARE_ROLES)
+    _check_doctype(doctype)
+    if isinstance(names, str):
+        names = frappe.parse_json(names)
+    names = list(dict.fromkeys(cstr(n).strip() for n in names or [] if cstr(n).strip()))
+    if not names:
+        frappe.throw(f"Tick the {doctype}s to pay.")
+    if len(names) > BULK_LIMIT:
+        frappe.throw(f"Tick at most {BULK_LIMIT} at a time.")
+    skipped, phone_rows, b2b_docs, company = [], [], [], None
+    for name in names:
+        if not frappe.has_permission(doctype, "read", doc=name):
+            skipped.append({"name": name, "reason": "You cannot read it."})
+            continue
+        try:
+            values, amount = _payable(doctype, name)
+        except (frappe.ValidationError, frappe.PermissionError) as e:
+            skipped.append({"name": name, "reason": _refusal(e)})
+            continue
+        company = company or values.company
+        if values.company != company:
+            skipped.append({"name": name, "reason": f"It is {values.company}'s: tick one company's at a time."})
+        elif _route(values) == "B2B":
+            b2b_docs.append((values, amount))
+        else:
+            phone, account = b2c_phone(values.employee)
+            problem = _b2c_amount_problem(values.employee, amount) if phone else _no_phone(values.employee)
+            if problem:
+                skipped.append({"name": name, "reason": problem})
+            else:
+                phone_rows.append((values, amount, phone, account))
+
+    made_b2c = None
+    if phone_rows:
+        problem = _caught(frappe.has_permission, DISB, "create", throw=True) or _caught(
+            _shortcode, company, "use_b2c", b2c_settings)
+        if not problem:
+            doc = _new_b2c_disbursement(company, _shortcode(company, "use_b2c", b2c_settings), doctype,
+                                        party_account(doctype, phone_rows[0][0]))
+            doc.paid_amount = sum(r[1] for r in phone_rows)
+            for values, amount, phone, account in phone_rows:
+                doc.append("references", _b2c_row(doctype, values, amount, phone, account))
+            problem = _inserted(doc, "mpsa_bulk_b2c")
+            made_b2c = None if problem else doc.name
+        if problem:
+            skipped += [{"name": r[0].name, "reason": problem} for r in phone_rows]
+    made_b2b = []
+    if b2b_docs:
+        problem = _caught(frappe.has_permission, B2B, "create", throw=True) or _caught(
+            _shortcode, company, "use_b2b", b2b_settings)
+        for values, amount in b2b_docs:
+            if problem:
+                skipped.append({"name": values.name, "reason": problem})
+                continue
+            frappe.db.savepoint("mpsa_bulk_b2b")
+            try:
+                made_b2b.append(_new_b2b(doctype, values, amount, _shortcode(company, "use_b2b", b2b_settings)).name)
+            except (frappe.ValidationError, frappe.PermissionError) as e:
+                frappe.db.rollback(save_point="mpsa_bulk_b2b")
+                skipped.append({"name": values.name, "reason": _refusal(e)})
+    return {"b2c": made_b2c, "b2c_rows": len(phone_rows) if made_b2c else 0, "b2b": made_b2b, "skipped": skipped}
+
+
+def _refusal(e) -> str:
+    """What a check threw, as a plain message, without showing it to the user as an error."""
+    from .schedule import _forget_message, _plain
+
+    _forget_message()
+    return _plain(e) or type(e).__name__
+
+
+def _caught(fn, *args, **kwargs) -> str | None:
+    try:
+        fn(*args, **kwargs)
+    except (frappe.ValidationError, frappe.PermissionError) as e:
+        return _refusal(e)
+    return None
+
+
+def _inserted(doc, savepoint: str) -> str | None:
+    """Insert ``doc``; why it was refused (everything it wrote undone), or None."""
+    frappe.db.savepoint(savepoint)
+    try:
+        doc.insert()
+    except (frappe.ValidationError, frappe.PermissionError) as e:
+        frappe.db.rollback(save_point=savepoint)
+        return _refusal(e)
+    return None
+
+
+# ---------------------------------------------------------------- the document's cancel
+def paid_or_on_their_way(dt: str, dn: str) -> list:
+    """M-Pesa payouts of the document that are Paid (also once cancelled: the money left) or still
+    on their way: B2B requests naming it, B2C requests paying it, rows of a submitted disbursement
+    not sent yet, and payment schedule lines sent for it."""
+    found = []
+    field = owed.EMPLOYEE_DOC_FIELDS[dt]
+    if frappe.db.has_column(B2B, field):
+        found += [r[0] for r in frappe.db.sql(
+            f"""
+            SELECT name FROM `tab{B2B}`
+            WHERE `{field}` = %(dn)s
+              AND ((docstatus < 2 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
+            ORDER BY creation
+            """,
+            {"dn": dn, "live": ("", *B2B_LIVE)},
+        )]
+    found += [r[0] for r in frappe.db.sql(
+        f"""
+        SELECT name FROM `tab{B2C_REQUEST}`
+        WHERE reference_doctype = %(dt)s AND reference_name = %(dn)s
+          AND ((docstatus = 1 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
+        ORDER BY creation
+        """,
+        {"dt": dt, "dn": dn, "live": ("", *B2C_LIVE)},
+    )]
+    # rows of a submitted disbursement whose payout is not made yet
+    found += [r[0] for r in frappe.db.sql(
+        f"""
+        SELECT DISTINCT ref.parent FROM `tab{DISB_ROW}` ref
+        JOIN `tab{DISB}` d ON d.name = ref.parent
+        WHERE ref.reference_doctype = %(dt)s AND ref.reference_name = %(dn)s AND d.docstatus = 1
+          AND COALESCE(ref.b2c_disbursement_request, '') = ''
+          AND COALESCE(ref.payment_status, '') NOT IN ('Failed', 'Paid')
+        """,
+        {"dt": dt, "dn": dn},
+    )]
+    if frappe.db.table_exists(LINE):
+        found += [f"{r[0]} row {r[1]}" for r in frappe.db.sql(
+            f"""
+            SELECT parent, idx FROM `tab{LINE}`
+            WHERE reference_doctype = %(dt)s AND reference_name = %(dn)s AND status IN %(sent)s
+            ORDER BY parent, idx
+            """,
+            {"dt": dt, "dn": dn, "sent": LINE_SENT},
+        )]
+    return list(dict.fromkeys(found))
 
 
 def before_cancel(doc, method=None):
-    """Expense Claim and Employee Advance before_cancel (hooks.py doc_events): refuses the cancel
-    while an M-Pesa payout of the document is paid or on its way. Nothing to check yet."""
+    """Expense Claim and Employee Advance before_cancel (hooks.py doc_events): refused while an
+    M-Pesa payout of the document is paid or on its way. Payouts are found by the document's name,
+    so its amended copy would show the whole amount as unpaid and could be paid again."""
+    name = cstr(doc.get("name")).strip()
+    if doc.get("doctype") not in DOCTYPES or not name:
+        return
+    paying = paid_or_on_their_way(doc.doctype, name)
+    if paying:
+        frappe.throw(f"{name} cannot be cancelled while M-Pesa payouts of it are paid or on their way: "
+                     f"{', '.join(paying[:10])}. Its amended copy would show the whole amount as unpaid again.")

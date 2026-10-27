@@ -181,7 +181,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 ### Salary payouts (decision D4)
 
-Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` (`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on every site.
+Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` (`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on every site. A payout of an Expense Claim or Employee Advance is not a salary (round 4): it is shown by the DocType rights above, to the Accounts roles who pay claims.
 
 ### Report roles
 
@@ -238,6 +238,10 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
+| `money_out.employee_documents.document_status` | Read the claim / advance | perm |
+| `money_out.employee_documents.prepare_b2b` | PREPARE_ROLES + read the claim / advance + create the request | roles:PREPARE_ROLES, perm |
+| `money_out.employee_documents.prepare_b2c` | PREPARE_ROLES + read the claim / advance + create the disbursement | roles:PREPARE_ROLES, perm |
+| `money_out.employee_documents.prepare_bulk` | PREPARE_ROLES + read each claim / advance + create the payouts | roles:PREPARE_ROLES, perm |
 | `money_out.payroll.from_payroll_entry` | FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule | roles:FINANCE_ROLES, via:require_salary_reader, perm |
 | `money_out.payroll.from_salary_slip` | PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip | via:require_salary_preparer, perm |
 | `money_out.payroll.from_salary_slips` | PREPARE_ROLES who may see salaries + create a schedule + read each Salary Slip | via:require_salary_preparer, perm |

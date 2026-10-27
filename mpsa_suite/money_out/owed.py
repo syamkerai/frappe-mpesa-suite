@@ -18,10 +18,18 @@ may name no employee or still be a draft, so what it paid cannot be told per sli
 checked on the schedule form, at Pay Selected, at a B2B salary's submit and send, and by B2C's
 guards and the job and send of a scheduled B2C payout.
 
+An Expense Claim or Employee Advance (HRMS) reads like an invoice (employee_doc_left_to_pay):
+HRMS's own outstanding (a claim's grand_total less what was reimbursed, an advance's
+advance_amount less what was paid) less every payout of it on its way, whoever it pays: B2C rows
+and requests naming it, B2B requests with its expense_claim or employee_advance, draft entries
+and planned lines.
+
 B2B and B2C share the per-document lock "b2c-pay:<doctype>:<name>", so a B2B request and a B2C
 disbursement for one invoice cannot both pass. Lock order (R4): the document lock, the payout
 rows, then the document row last.
 """
+
+import contextlib
 
 import frappe
 from frappe.utils import cint, cstr, flt, getdate, nowdate
@@ -29,6 +37,10 @@ from frappe.utils import cint, cstr, flt, getdate, nowdate
 B2B = "Mpesa B2B Payment Request"
 SCHEDULE_LINE = "M-Pesa Payment Schedule Line"
 DOC_FIELDS = {"Purchase Invoice": "purchase_invoice", "Purchase Order": "purchase_order"}
+# An employee request may pay one of these instead of a Salary Slip (HRMS custom fields, migrate)
+EMPLOYEE_DOC_FIELDS = {"Expense Claim": "expense_claim", "Employee Advance": "employee_advance"}
+# Every document a B2B request names by a field of its own
+B2B_DOC_FIELDS = {**DOC_FIELDS, **EMPLOYEE_DOC_FIELDS}
 SLIP = "Salary Slip"
 # Requests that may still take money from M-Pesa: their whole amount counts.
 OPEN = ("Not Initiated", "Initiated", "Unknown")
@@ -79,6 +91,25 @@ def document_of(values) -> tuple:
     if cstr(values.get("purchase_order")).strip():
         return "Purchase Order", values.purchase_order
     return None, None
+
+
+def employee_document_of(values) -> tuple:
+    """(doctype, name) of the Expense Claim or Employee Advance a request pays, or (None, None),
+    without throwing (for rows already saved)."""
+    for dt, field in EMPLOYEE_DOC_FIELDS.items():
+        dn = cstr(values.get(field)).strip()
+        if dn:
+            return dt, dn
+    return None, None
+
+
+def linked_employee_document(doc) -> tuple:
+    """Like employee_document_of, refusing a request that names both."""
+    found = [(dt, cstr(doc.get(field)).strip()) for dt, field in EMPLOYEE_DOC_FIELDS.items()
+             if cstr(doc.get(field)).strip()]
+    if len(found) > 1:
+        frappe.throw("Link an Expense Claim or an Employee Advance, not both.")
+    return found[0] if found else (None, None)
 
 
 def doc_lock(dt: str, dn: str):
@@ -203,7 +234,9 @@ def b2b_open(dt: str, dn: str, exclude: str | None = None, for_update: bool = Fa
     left): what no submitted entry carrying its receipt allocates to the document. Same shape
     as B2C's open payouts: parent, allocated_amount, request_status (and receipt).
     """
-    field = DOC_FIELDS[dt]
+    field = B2B_DOC_FIELDS[dt]
+    if dt in EMPLOYEE_DOC_FIELDS and not frappe.db.has_column(B2B, field):
+        return []  # before the migrate makes the HRMS link
     rows = frappe.db.sql(
         f"""
         SELECT name, docstatus, status, amount, transaction_id
@@ -406,11 +439,11 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, ex
     parts = []
     b2b = b2b_open(dt, dn, exclude=exclude_request, for_update=for_update)
     for row in b2b:
-        parts.append(frappe._dict(kind="b2b", name=row.parent, amount=row.allocated_amount,
+        parts.append(frappe._dict(kind="b2b", name=row.parent, amount=row.allocated_amount, status=row.request_status,
                                   label=f"{row.parent} {row.request_status} {money(row.allocated_amount)}"))
     for row in b2c_open(dt, dn):
         status = row.get("request_status") or row.get("payment_status") or "in progress"
-        parts.append(frappe._dict(kind="b2c", name=row.parent, amount=flt(row.allocated_amount, 2),
+        parts.append(frappe._dict(kind="b2c", name=row.parent, amount=flt(row.allocated_amount, 2), status=status,
                                   label=f"B2C {row.parent} {status} {money(row.allocated_amount)}"))
     skip = {r.receipt for r in b2b if r.receipt} | b2c_receipts(dt, dn)
     for entry in draft_entries(dt, dn, skip, for_update):
@@ -422,6 +455,20 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, ex
     owed = outstanding(dt, dn, for_update)  # last: the document row (R4)
     left = max(0.0, flt(owed - sum(flt(p.amount) for p in parts), 2))
     return frappe._dict(owed=owed, parts=parts, left=left)
+
+
+def employee_doc_left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
+                             for_update: bool = False):
+    """left_to_pay of an Expense Claim or Employee Advance: HRMS's outstanding (utils.payouts.owed)
+    less every payout of it on its way, whoever it pays (a merchant or casual payee of a claim
+    too): B2C rows and requests naming it, B2B requests with its link, draft entries and planned
+    lines. ``for_update``: under the document's lock, the one B2C, B2B and the schedule take,
+    payouts first and the document row last (R4)."""
+    if dt not in EMPLOYEE_DOC_FIELDS:
+        frappe.throw(f"{dt} is not an Expense Claim or Employee Advance.")
+    with doc_lock(dt, dn) if for_update else contextlib.nullcontext():
+        return left_to_pay(dt, dn, exclude_request=exclude_request, exclude_line=exclude_line,
+                           exclude_schedule=exclude_schedule, for_update=for_update)
 
 
 def summary(result) -> dict:

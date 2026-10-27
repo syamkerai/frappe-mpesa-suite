@@ -56,6 +56,9 @@ class B2CPaymentDisbursement(Document):
         require(PAYOUT_ROLES)  # submitting sends the money
         if not self.flags.get("mpesa_from_schedule"):
             maker_checker.check(self)
+        from ....money_out.employee_documents import check_not_own_b2c
+
+        check_not_own_b2c(self)  # nobody pays themselves
         if self.payment_type == "Mpesa Disbursement":
             settings = self._get_mpesa_settings()
 
@@ -184,8 +187,10 @@ class B2CPaymentDisbursement(Document):
         by bank already).
         """
         from ....money_in.common import named_lock
+        from ....money_out.employee_documents import payable_problem
         from ....money_out.owed import (
             DOC_FIELDS,
+            EMPLOYEE_DOC_FIELDS,
             SLIP,
             b2b_open,
             b2b_slip_open,
@@ -218,8 +223,9 @@ class B2CPaymentDisbursement(Document):
                             allocated += flt(paid.allocated_amount)  # this disbursement's own, not sent again
                         else:
                             others.append(paid)
-                if doctype in DOC_FIELDS:
-                    # B2B requests for the invoice or order count too (same lock, locking read)
+                if doctype in DOC_FIELDS or doctype in EMPLOYEE_DOC_FIELDS:
+                    # B2B requests for the invoice, order, claim or advance count too (same lock,
+                    # locking read)
                     others += b2b_open(doctype, name, for_update=True)
                 elif doctype == SLIP:
                     # B2B salary requests to the employee's bank paybill still on their way (a Paid
@@ -247,6 +253,10 @@ class B2CPaymentDisbursement(Document):
                 billed = billed_order(name, for_update=True) if doctype == "Purchase Order" else None
                 if billed:
                     frappe.throw(billed, title=_("Order Already Invoiced"))
+                # an Expense Claim or Employee Advance may be paid now (approved, workflow state...)
+                problem = payable_problem({"doctype": doctype, "name": name}) if doctype in EMPLOYEE_DOC_FIELDS else None
+                if problem:
+                    frappe.throw(problem, title=_("Not Payable"))
                 advance = flt(sum(flt(a.amount) for a in advances), 2)
                 if owed is not None and flt(allocated, 2) > flt(flt(owed) - advance, 2):
                     if advances:
@@ -585,6 +595,10 @@ class B2CPaymentDisbursement(Document):
             entries = [
                 e for e in entries if (e.paid_amount or 0) < (e.advance_amount or 0)
             ]
+        from ....money_out.employee_documents import payable_entries
+
+        # claims and advances M-Pesa may pay now (approved, the workflow state, KES...)
+        entries = payable_entries(doctype, entries)
 
         if not entries:
             frappe.msgprint(
@@ -917,16 +931,19 @@ class B2CPaymentDisbursement(Document):
     ) -> dict:
         """
         Return {"account_number": <payee's M-Pesa number>}:
-        the employee's cell number, or the supplier contact's phone / mobile.
+        the employee's approved phone (or, while M-Pesa Suite Settings allows it, their cell
+        number), or the supplier contact's phone / mobile.
         """
 
         result = {"account_number": ""}
 
         # Mobile Payouts
         if party_type == "Employee":
-            result["account_number"] = (
-                frappe.db.get_value("Employee", entry.employee, "cell_number") or ""
-            )
+            from ....money_out.employee_documents import b2c_phone
+
+            # the phone of the employee's approved Employee M-Pesa Account (the row's validate
+            # names the account it pays)
+            result["account_number"] = b2c_phone(entry.employee)[0]
             return result
 
         if party_type == "Supplier":
