@@ -334,13 +334,14 @@ ENDPOINTS = {
     _D + "supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.confirm_receiver_name": (
         "ADMIN_ROLES", ("via:confirm_receiver_name",)),
     _D + "supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.make_default": (
-        "FINANCE_ROLES or Purchase Manager + read the account", ("via:make_default",)),
+        "M-Pesa Manager, Accounts Manager, Accounts User or Purchase Manager (not System Manager), a named login "
+        "+ read the account", ("via:make_default",)),
     _D + "employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee": (
         "Read Employee M-Pesa Account", ("via:accounts_for",)),
     _D + "employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.confirm_receiver_name": (
         "ADMIN_ROLES", ("via:confirm_receiver_name",)),
     _D + "employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.make_default": (
-        "ADMIN_ROLES or HR Manager + read the account", ("via:make_default",)),
+        "ADMIN_ROLES or HR Manager, a named login + read the account", ("via:make_default",)),
     # Admin and configuration
     "mpsa_suite.money_in.c2b_verify.release": ("CONFIG_ROLES", ("roles:RELEASE_ROLES",)),
     _D + "mpesa_settings.mpesa_settings.register_pull_transaction": ("ADMIN_ROLES", ("direct", "roles:ADMIN_ROLES")),

@@ -81,7 +81,11 @@ frappe.ui.form.on("Employee M-Pesa Account", {
 		if (state.can_make_default) {
 			frm.add_custom_button(__("Make Default"), () =>
 				frappe.confirm(__("Make this the employee's default M-Pesa account? Salaries go here from the next schedule."), () =>
-					frm.call("make_default").then(() => frm.reload_doc())
+					// by name, not with the form's copy (frm.call): Frappe checks a submitted document sent
+					// back as a save after submit, which needs submit permission HR Manager lacks
+					frappe
+						.xcall("run_doc_method", { dt: frm.doctype, dn: frm.doc.name, method: "make_default" })
+						.then(() => frm.reload_doc())
 				)
 			);
 		}

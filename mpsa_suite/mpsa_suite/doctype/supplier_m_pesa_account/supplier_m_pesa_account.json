@@ -200,7 +200,6 @@
    "fieldtype": "Check",
    "label": "Blocked: Approve Again",
    "read_only": 1,
-   "allow_on_submit": 1,
    "no_copy": 1,
    "description": "The bank's paybill changed after this account was approved. Cancel and amend it so a manager approves the new number."
   },
@@ -209,7 +208,6 @@
    "fieldtype": "Small Text",
    "label": "Why It Is Blocked",
    "read_only": 1,
-   "allow_on_submit": 1,
    "no_copy": 1,
    "depends_on": "eval:doc.needs_reapproval"
   },
@@ -224,7 +222,6 @@
    "fieldtype": "Data",
    "label": "Name M-Pesa Paid Last Time",
    "read_only": 1,
-   "allow_on_submit": 1,
    "no_copy": 1
   },
   {
@@ -232,7 +229,6 @@
    "fieldtype": "Datetime",
    "label": "Last Paid On",
    "read_only": 1,
-   "allow_on_submit": 1,
    "no_copy": 1
   },
   {
@@ -244,7 +240,6 @@
    "fieldtype": "Check",
    "label": "Name Did Not Match",
    "read_only": 1,
-   "allow_on_submit": 1,
    "no_copy": 1
   },
   {
@@ -269,7 +264,7 @@
  ],
  "is_submittable": 1,
  "links": [],
- "modified": "2026-10-27 21:00:00.000000",
+ "modified": "2026-10-27 23:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Supplier M-Pesa Account",

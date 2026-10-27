@@ -58,7 +58,8 @@ def refuse_default_edit(doc) -> None:
 
 
 def make_default(doc) -> None:
-    """Make an approved account the supplier's default (FINANCE_ROLES or Purchase Manager)."""
+    """Make an approved account the supplier's default (M-Pesa Manager, Accounts Manager or User,
+    Purchase Manager: not System Manager), as a named user."""
     pa.make_default(doc)
 
 

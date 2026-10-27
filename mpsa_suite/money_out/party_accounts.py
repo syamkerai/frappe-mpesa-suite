@@ -34,7 +34,7 @@ import frappe
 from frappe.utils import add_to_date, cint, cstr, get_datetime, now_datetime
 
 from ..daraja import money_out as daraja
-from ..permissions import ADMIN_ROLES, CONFIG_ROLES, FINANCE_ROLES, require, require_named_user
+from ..permissions import ADMIN_ROLES, CONFIG_ROLES, administrator_refused, require, require_named_user
 from ..utils.phone import is_safaricom, normalize_msisdn
 from . import send_confirm
 
@@ -63,6 +63,10 @@ DESTINATION_FIELDS = ("account_type", "phone", "shortcode", "account_number", "b
                       "account_holder_name", "expected_name")
 # Copied onto a bank account from its bank's row on every save, never typed
 FROM_THE_BANK = ("shortcode", "bank", "expected_name")
+# Written by M-Pesa Suite only (frappe.db.set_value), never by a save after approval; with their labels
+SET_BY_THE_SUITE = {"name_mismatch": "Name Did Not Match", "needs_reapproval": "Blocked: Approve Again",
+                    "reapproval_reason": "Why It Is Blocked", "last_receiver_name": "Name M-Pesa Paid Last Time",
+                    "last_paid_on": "Last Paid On"}
 BANK_FIELDS = ["name", "institution_name", "paybill", "bank", "enabled", "receiver_name", "account_number_rule",
                "account_number_pattern", "observed_receiver_name"]
 # The number M-Pesa puts before a name: "522522 - KCB Paybill AC", "2547****0111 - JANE", and with an
@@ -83,8 +87,9 @@ PROFILES = {
         add_hint="add one under Supplier > M-Pesa Accounts and have a manager approve it.",
         destination_fields=("supplier", *DESTINATION_FIELDS),
         user_link=None, unique_destination=False,
-        # who may change the supplier's default account (make_default)
-        default_roles=(*FINANCE_ROLES, "Purchase Manager"),
+        # who may change the supplier's default account (make_default): where payments that name no
+        # account go is payout routing, so not System Manager, which only configures (decision 1)
+        default_roles=("M-Pesa Manager", "Accounts Manager", "Accounts User", "Purchase Manager"),
     ),
     EMPLOYEE_ACCOUNT: Profile(
         doctype=EMPLOYEE_ACCOUNT, party_type="Employee", party_field="employee", label="employee",
@@ -137,6 +142,7 @@ def validate_account(doc) -> None:
         _check_phone(doc, p)
     elif doc.account_type == BANK:
         _check_bank_account(doc, p, party)
+        _refuse_unseen_bank_paybill(doc, p)
     else:
         _check_number(doc, p)
     if doc.account_type != BANK and not cstr(doc.get("expected_name")).strip():
@@ -190,10 +196,22 @@ def _check_number(doc, p) -> None:
     if doc.account_type == PAYBILL:
         row = frappe.db.get_value(BANK_PAYBILL, {"paybill": doc.shortcode, "enabled": 1},
                                   ["name", "institution_name"], as_dict=True)
-        if row:
+        if row and "#" in cstr(doc.account_number):
+            # a business's collection code at the bank, not an account there: "Lipa na I&M" is
+            # 542542 with 888888#house10 (code#reference), and stays a paybill
+            frappe.msgprint(
+                f"{doc.shortcode} is {row.institution_name}'s bank paybill, and {doc.account_number} is a business's "
+                "collection reference there (code#reference), so this stays a Paybill. M-Pesa shows the bank's name "
+                f"for this paybill: enter it in Name M-Pesa Shows. For an account at {row.institution_name}, pick "
+                "Account Type Bank Account (via Bank Paybill).",
+                title="A collection reference at a bank",
+                indicator="orange",
+            )
+        elif row:
             # the bank's account number rules and Safaricom's name for the bank apply to it
             frappe.throw(f"{doc.shortcode} is {row.institution_name}'s bank paybill: pick Account Type Bank Account "
-                         f"(via Bank Paybill) and {row.institution_name}.")
+                         f"(via Bank Paybill) and {row.institution_name}. (A business's collection reference at the "
+                         "bank, written code#reference such as 888888#INV7, stays a Paybill.)")
 
 
 def _check_bank_account(doc, p, party) -> None:
@@ -215,7 +233,10 @@ def _check_bank_account(doc, p, party) -> None:
     if not raw:
         frappe.throw(f"A bank account needs the {p.label}'s account number at {row.institution_name}")
     if not raw.isalnum():
-        frappe.throw("A bank account number has letters and digits only")
+        typed = cstr(doc.get("account_number")).strip()
+        frappe.throw("A bank account number has letters and digits only"
+                     + (f". {typed} is a business's collection reference (code#reference): pick Account Type Paybill, "
+                        f"with Paybill {doc.shortcode} and {typed} as the Account Number." if "#" in raw else ""))
     doc.account_number = raw
     _check_length(raw)
     pattern = cstr(row.account_number_pattern).strip()
@@ -238,6 +259,22 @@ def _check_bank_account(doc, p, party) -> None:
             title="Third-party account",
             indicator="orange",
         )
+
+
+def _refuse_unseen_bank_paybill(doc, p) -> None:
+    """At the approval (before_submit) a bank account's paybill is copied again from its bank's row,
+    after Approve showed, and its token was bound to, the draft as saved. A row whose paybill changed
+    since then would make the approved number one nobody approved (a draft is never flagged, and
+    copying it is nobody's change): refused until the draft is saved again and shown again."""
+    if cint(doc.docstatus) != 1 or not doc.get("name"):
+        return
+    saved = frappe.db.get_value(p.doctype, doc.name, ["name", "shortcode"], as_dict=True)
+    if not saved:
+        return  # not saved yet: nothing was shown
+    before = cstr(saved.shortcode).strip()
+    if before != doc.shortcode:
+        frappe.throw(f"The bank's paybill changed from {before or 'none'} to {doc.shortcode} since this account was "
+                     "saved: save it again and press Approve again, so the approval shows the new number.")
 
 
 def _fits(pattern, value) -> bool:
@@ -447,15 +484,35 @@ def after_cancel(doc) -> None:
 
 def refuse_default_edit(doc) -> None:
     """before_update_after_submit: the default of an approved account changes only through Make
-    Default, which checks who may (D4)."""
-    if doc.has_value_changed("is_default"):
+    Default, which checks who may (D4); the block (a name mismatch, a bank paybill change) and the
+    last payment only through the code that sets them (frappe.db.set_value), so a save after
+    approval never unblocks an account. Frappe enforces neither read only nor, once a site sets
+    Allow on Submit on a field, anything else on such a save."""
+    if _changed(doc, "is_default"):
         frappe.throw("Use Make Default on the account to change the default.")
+    changed = [label for field, label in SET_BY_THE_SUITE.items() if _changed(doc, field)]
+    if changed:
+        frappe.throw(f"{', '.join(changed)}: set by M-Pesa Suite only on an approved M-Pesa account. A manager "
+                     "presses Receiver Name Confirmed after a name mismatch, and an account whose bank paybill "
+                     "changed is cancelled, amended and approved again.")
+
+
+def _changed(doc, field) -> bool:
+    """Whether this save changes ``field`` (0, "" and None alike; dates as Frappe compares them)."""
+    before = doc.get_doc_before_save()
+    if before is None:
+        return True
+    if field in ("is_default", "name_mismatch", "needs_reapproval"):
+        return cint(before.get(field)) != cint(doc.get(field))
+    if not (before.get(field) or doc.get(field)):
+        return False
+    return doc.has_value_changed(field)
 
 
 def can_make_default(doc, user=None) -> bool:
     p = profile(doc)
     return (doc.docstatus == 1 and not cint(doc.is_default) and not blocked(doc)
-            and not set(p.default_roles).isdisjoint(frappe.get_roles(user)))
+            and not set(p.default_roles).isdisjoint(frappe.get_roles(user)) and not administrator_refused(user))
 
 
 def make_default(doc) -> None:
@@ -463,9 +520,15 @@ def make_default(doc) -> None:
     introduced (every candidate was approved by a second person). D3: an account blocked by a
     name mismatch or a bank paybill change cannot be the default; one still on hold can. D5: lines
     and draft requests already made keep the account they name. Leaves a Version and a Comment;
-    an employee's change also alerts the Notify Role (no names: it is salary data)."""
+    an employee's change also alerts the Notify Role (no names: it is salary data). Where payments
+    go is routing: a named login (never the shared Administrator one), and not System Manager.
+
+    The form calls it by name (run_doc_method with dt and dn): sent with the form's copy of the
+    document, Frappe would check it as a save after submit, which needs submit permission that HR
+    and Accounts do not hold."""
     p = profile(doc)
     require(p.default_roles)
+    require_named_user()
     doc.check_permission("read")
     stored = get_account(p.doctype, doc.name)
     if not stored or stored.docstatus != 1:

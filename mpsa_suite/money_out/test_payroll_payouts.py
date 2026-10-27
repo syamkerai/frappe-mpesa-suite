@@ -507,3 +507,43 @@ class TestPayroll(_Base):
         self.assertTrue(any(label.startswith("Utility") for label in labels), labels)
         self.assertTrue(any(label.startswith("Working") for label in labels), labels)
 
+
+    def test_a_salary_to_an_employees_paybill_goes_by_b2b_and_is_booked_on_the_payroll(self):
+        """An employee whose default is a Paybill (a Sacco account, say): the line is B2B Paybill, Pay
+        Selected sends BusinessPayBill with the account number, and salary_entries.for_b2b books it."""
+        from mpsa_suite.money_out import salary_entries
+
+        employee = self.employees["_T Pay Bank"]
+        frappe.db.set_value(EMPACC, self.accounts["_T Pay Bank"], "is_default", 0, update_modified=False)
+        paybill = frappe.get_doc({
+            "doctype": EMPACC, "employee": employee, "account_type": "Paybill", "shortcode": "888886",
+            "account_number": "SACCO-9", "expected_name": "Test Sacco", "destination_key": "PB:888886:SACCO9",
+            "is_default": 1, "docstatus": 1, "proof": "/private/files/_t_pay_proof.pdf", "approved_by": MANAGER,
+            "approved_on": now_datetime(), "active_from": add_days(now_datetime(), -1), "creation": now_datetime(),
+            "modified": now_datetime(), "owner": PREPARER, "entered_by": PREPARER})
+        paybill.name = "_T-MEA-PAY-PB"
+        paybill.db_insert()  # written as approved (the approval has its own test)
+        pe, slips = self._payroll()
+        answer, lines = self._make_schedule(pe)
+        line = lines[employee]
+        self.assertEqual((line.route, line.payee_account, line.destination, flt(line.amount)),
+                         ("B2B Paybill", paybill.name, "888886 / SACCO-9", 50000))
+        paid = self._pay([line.name])
+        self.assertEqual(paid["refused"], [])
+        post = self._send_b2b(paid)
+        payload = post.call_args.args[2]
+        self.assertEqual((payload["CommandID"], payload["PartyB"], payload["AccountReference"]),
+                         ("BusinessPayBill", "888886", "SACCO-9"))
+        request = self._line(line.name).request
+        self.assertEqual(frappe.db.get_value(B2B, request, ["employee_mpesa_account", "salary_slip", "payroll_entry"]),
+                         (paybill.name, slips[0], pe))
+        with patch.object(salary_entries, "for_b2b", wraps=salary_entries.for_b2b) as booked:
+            self._b2b_result(request, public="888886 - TEST SACCO")
+        self.assertTrue(booked.called)
+        self.assertEqual(booked.call_args.args[0].name, request)
+        state = self._line(line.name)
+        self.assertEqual((state.status, state.entry_status), ("Paid", "Entry Made"))
+        entry = frappe.db.get_value(B2B, request, "journal_entry")
+        self.assertEqual(frappe.db.get_value(JE, entry, "docstatus"), 1)
+        self.assertEqual(owed.slip_left_to_pay(slips[0]).left, 0)
+        self.assertEqual(frappe.db.get_value(EMPACC, paybill.name, "name_mismatch"), 0)  # 888886, Test Sacco

@@ -81,7 +81,11 @@ frappe.ui.form.on("Supplier M-Pesa Account", {
 		if (state.can_make_default) {
 			frm.add_custom_button(__("Make Default"), () =>
 				frappe.confirm(__("Make this the supplier's default M-Pesa account? Payments that name no account go here."), () =>
-					frm.call("make_default").then(() => frm.reload_doc())
+					// by name, not with the form's copy (frm.call): Frappe checks a submitted document sent
+					// back as a save after submit, which needs submit permission Accounts and Purchase lack
+					frappe
+						.xcall("run_doc_method", { dt: frm.doctype, dn: frm.doc.name, method: "make_default" })
+						.then(() => frm.reload_doc())
 				)
 			);
 		}
