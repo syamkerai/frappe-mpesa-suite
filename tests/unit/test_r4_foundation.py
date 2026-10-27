@@ -36,7 +36,9 @@ def _settings(frappe, **values):
 # ---------------------------------------------------------------- PREPARE_ROLES
 def test_preparers_are_accounts_hr_and_the_mpesa_manager(env):
     perms, _ = env
-    assert perms.PREPARE_ROLES == ("M-Pesa Manager", "Accounts Manager", "Accounts User", "HR Manager", "HR User")
+    # final review: HRMS's Expense Approver too, the only default role reading Employee Advances
+    assert perms.PREPARE_ROLES == ("M-Pesa Manager", "Accounts Manager", "Accounts User", "HR Manager", "HR User",
+                                   "Expense Approver")
     assert "M-Pesa Payer" not in perms.PREPARE_ROLES and "System Manager" not in perms.PREPARE_ROLES
 
 
@@ -111,6 +113,7 @@ def boot(env):
 @pytest.mark.parametrize("roles,expected", [
     ({"Accounts User"}, dict(can_prepare=True, can_collect=True)),
     ({"HR User"}, dict(can_prepare=True, can_see_salaries=True)),
+    ({"Expense Approver"}, dict(can_prepare=True)),  # prepares the claims and advances it reads, sees no salary
     ({"M-Pesa Payer"}, dict(can_pay=True, can_see_salaries=True)),
     ({"M-Pesa Manager"}, dict(can_prepare=True, can_pay=True, can_approve=True, can_collect=True, can_configure=True,
                               can_see_salaries=True)),

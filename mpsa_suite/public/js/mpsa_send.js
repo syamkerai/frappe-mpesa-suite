@@ -102,6 +102,12 @@ mpsa_send.summary_html = (r) => {
 	if (account && r.proof) {
 		html += `<p><a href="${encodeURI(r.proof)}" target="_blank" rel="noopener">${__("Open the proof")}</a></p>`;
 	}
+	// what to check before confirming, which does not stop it (a third party's bank account...)
+	if ((r.warnings || []).length) {
+		html += `<h5>${__("Check before you confirm")}</h5><ul>`;
+		html += r.warnings.map((w) => `<li style="color: var(--orange-600)">${e(w)}</li>`).join("");
+		html += "</ul>";
+	}
 	if ((r.problems || []).length) {
 		html += `<h5>${__("Cannot be confirmed")}</h5><ul>`;
 		html += r.problems.map((p) => `<li style="color: var(--red-600)">${e(p)}</li>`).join("");

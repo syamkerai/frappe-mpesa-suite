@@ -957,14 +957,26 @@ def _payout_for(receipt_no: str, values: dict):
     return None
 
 
-def _pays_salary(doctype: str, name: str) -> bool:
-    """Whether the payout pays a salary: a B2C payout to an employee or for a Salary Slip, or a B2B
-    payout to an employee (money_out.salary_access)."""
+def _hidden_from(doctype: str, name: str, asker: str) -> str | None:
+    """Why the asker may not see who the payout paid, how much and where, or None: the rule its own
+    form follows (money_out.salary_access.has_permission). A salary (a B2C payout to an employee
+    for no claim or advance, or for a Salary Slip; a B2B payout to an employee for no claim or
+    advance) is for who may see salaries; a payout of an Expense Claim or Employee Advance is not a
+    salary, but stays hidden from an asker who cannot read that DocType. Its creator sees it."""
     from ...money_out import salary_access
 
-    fields = ["employee"] if doctype == "Mpesa B2B Payment Request" else ["party_type", "reference_doctype"]
+    if doctype == "Mpesa B2B Payment Request":
+        links = [f for f in salary_access.B2B_DOCUMENT_FIELDS if frappe.db.has_column(doctype, f)]
+        fields = ["employee", "owner", *links]
+    else:
+        fields = ["party_type", "reference_doctype", "owner"]
     row = frappe.db.get_value(doctype, name, fields, as_dict=True)
-    return bool(row) and salary_access.has_salaries(frappe._dict(row, doctype=doctype))
+    if not row:
+        return None
+    payout = frappe._dict(row, doctype=doctype)
+    if salary_access.has_permission(payout, "read", user=asker):
+        return None
+    return "salary" if salary_access.has_salaries(payout) else "document"
 
 
 def _answer_payout(integration_request, asker, payout, result_data: dict, values: dict) -> None:
@@ -972,7 +984,7 @@ def _answer_payout(integration_request, asker, payout, result_data: dict, values
     no error logged. The person who asked sees the payout's status, receiver, charge and time; a
     B2B payout gets what its Result left out (money_out.b2b_status)."""
     from ...daraja.money_out import parse_daraja_datetime
-    from ...money_out import b2b_status, salary_access
+    from ...money_out import b2b_status
     from ...money_out.statement import parse_charges
 
     doctype, name = payout
@@ -987,9 +999,12 @@ def _answer_payout(integration_request, asker, payout, result_data: dict, values
         elif not filled and frappe.db.get_value(doctype, name, "status") != "Paid":
             note = f" Press Check Status on {name} to settle it."
     state = cstr(values.get("TransactionStatus")).strip() or "(no status)"
-    if _pays_salary(doctype, name) and not salary_access.can_see_salaries(asker):
-        # salary data (decision D4): the asker learns only that the receipt is the ERP's own payout
-        message = "This receipt is an ERP salary payout."
+    hidden = _hidden_from(doctype, name, asker)
+    if hidden:
+        # salary data (decision D4), or a claim's or advance's payout the asker cannot read: the asker
+        # learns only that the receipt is the ERP's own payout
+        message = ("This receipt is an ERP salary payout." if hidden == "salary" else
+                   "This receipt is an ERP payout of an Expense Claim or Employee Advance, which you cannot read.")
         _close(integration_request, "Completed", json.dumps({"kind": kind, "salary": 1, "filled": filled}))
         publish_transaction_status(asker, "success" if state.lower() == "completed" else "warning", message)
         return

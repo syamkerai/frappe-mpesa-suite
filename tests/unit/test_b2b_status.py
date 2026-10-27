@@ -551,6 +551,40 @@ def test_a_salary_payouts_receipt_tells_who_may_not_see_salaries_nothing_more(en
     assert message.startswith(f"Payout {NAME} Completed: KES 50.00")
 
 
+def test_a_claim_payouts_receipt_follows_the_rule_of_its_form(env, mpesa, monkeypatch):
+    # final review: a claim's payout is not a salary, but who cannot read Expense Claims does not see it
+    # (salary_access.unread_documents), as on the payout's own form; the B2B one is no salary either
+    salary_access = importlib.import_module("mpsa_suite.money_out.salary_access")
+    reads = set()
+    monkeypatch.setattr(salary_access, "_reads", lambda doctype, user: doctype in reads)
+    env.frappe.db.columns = {(B2B, "expense_claim"), (B2B, "employee_advance")}
+    env.frappe.db.table(B2C)["B2C-26-10-000009"] = {
+        "name": "B2C-26-10-000009", "status": "Paid", "transaction_id": "UJRCLAIM01", "party_type": "Employee",
+        "party": "HR-EMP-0001", "reference_doctype": "Expense Claim", "reference_name": "HR-EXP-0042",
+        "owner": "hr@example.com", "creation": datetime.datetime(2026, 10, 27)}
+    payout(env, supplier=None, employee="HR-EMP-0001", expense_claim="HR-EXP-0043", owner="hr@example.com")
+
+    def ask(receipt, **result):
+        env.calls.published.clear()
+        env.frappe.db.table(IR).clear()
+        asked(env, receipt=receipt)
+        answer(env, live(ReceiptNo=receipt, **result))
+        mpesa.process_mpesa_integration_request("IR-RES")
+        ((_user, _status, message),) = told(env)
+        return message
+
+    env.frappe.user_roles = {"Accounts User"}  # FINANCE_ROLES, reads no claims
+    hidden = "This receipt is an ERP payout of an Expense Claim or Employee Advance, which you cannot read."
+    assert ask("UJRCLAIM01", Amount=1500.0, CreditPartyName="254712345678 - JOHN DOE", DebitPartyCharges=None,
+               ConversationID=None, OriginatorConversationID=None) == hidden
+    assert ask("UJRSN5BOEH") == hidden
+    reads.add("Expense Claim")  # a site gave Accounts User read on claims: shown, as on the form
+    assert ask("UJRCLAIM01", Amount=1500.0, CreditPartyName="254712345678 - JOHN DOE", DebitPartyCharges=None,
+               ConversationID=None, OriginatorConversationID=None).startswith(
+        "Payout B2C-26-10-000009 Completed: KES 1,500.00 to 254712345678 - JOHN DOE")
+    assert ask("UJRSN5BOEH").startswith(f"Payout {NAME} Completed: KES 50.00")
+
+
 # ================================================================ a result before its query's ack
 def racing(env):
     """A query whose ack the sender has not recorded yet (committed Queued, no IDs)."""

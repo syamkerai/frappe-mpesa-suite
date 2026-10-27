@@ -35,12 +35,13 @@ AM = "Accounts Manager"
 AU = "Accounts User"
 HM = "HR Manager"
 HU = "HR User"
+EA = "Expense Approver"  # HRMS: reads Expense Claims and is the only default role (Employee aside) reading Advances
 SU = "Sales User"
 PM = "Purchase Manager"
 PU = "Purchase User"
 
 # Column order of the matrix in the doc.
-ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
+ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, EA, SU, PM, PU)
 SUITE_ROLES = (MM, MP, MC, MV)
 
 ALL = "rwcsxadRepmh"
@@ -61,9 +62,12 @@ DOCTYPES = {
         AU: "rwcRepmh", HU: "rwcRepmh",
         MV: "rRep",
     },
+    # Round 4 final review: who reads an Expense Claim (HR Manager, HR User, Expense Approver) or an
+    # Employee Advance (Expense Approver) by HRMS's defaults prepares its payouts on both routes
+    # (permissions.PREPARE_ROLES): never by DocPerms on the HRMS DocTypes.
     "B2C Payment Disbursement": {
         SM: READ, MM: ALL,
-        AM: PREPARE, HM: PREPARE,
+        AM: PREPARE, HM: PREPARE, HU: PREPARE, EA: PREPARE,
         MP: "rwsRp",
         MV: "rRep",
     },
@@ -91,7 +95,7 @@ DOCTYPES = {
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
         SM: READ, MM: ALL, MP: ALL,
-        AM: PREPARE,
+        AM: PREPARE, HM: PREPARE, HU: PREPARE, EA: PREPARE,
         AU: "rwcdRep",
         MV: "rRep",
     },
@@ -417,7 +421,7 @@ def render_markdown(role_sets: dict) -> str:
     """The generated part of docs/ROLES_AND_PERMISSIONS.md. ``role_sets``: permissions.py's
     role tuples by name (the test reads them from the source, so this stays Frappe-free)."""
     short = {SM: "SysMgr", MM: "M-Pesa Mgr", MP: "Payer", MC: "Collector", MV: "Viewer", AM: "Acc Mgr",
-             AU: "Acc User", HM: "HR Mgr", HU: "HR User", SU: "Sales User", PM: "Pur Mgr", PU: "Pur User"}
+             AU: "Acc User", HM: "HR Mgr", HU: "HR User", EA: "Exp Approver", SU: "Sales User", PM: "Pur Mgr", PU: "Pur User"}
     lines = ["### DocType rights by role", ""]
     lines.append("Letters: " + ", ".join(f"`{k}` {v}" for k, v in RIGHTS.items()) + ". `L1:` is permission level 1 "
                  "(the credential fields). A blank cell is no access.")

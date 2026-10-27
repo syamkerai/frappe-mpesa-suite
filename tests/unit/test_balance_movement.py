@@ -104,10 +104,44 @@ def test_reserved_money_with_nothing_in_flight_is_a_warning_and_an_alert(env):
 
 def test_reserved_money_while_an_erp_payout_is_in_flight_is_no_warning(env):
     env.frappe.db.table(B2C)["B2C-9"] = {"name": "B2C-9", "docstatus": 1, "status": "Initiated",
-                                         "mpesa_settings": SETTINGS, "creation": at(13, 56)}
+                                         "mpesa_settings": SETTINGS, "creation": at(13, 56), "modified": at(13, 56)}
     (_working, utility) = result(env, "Working Account|KES|2000.00|2000.00|0.00|0.00"
                                       "&Utility Account|KES|4002.91|3902.91|100.00|0.00", at(13, 57))
     assert not snapshot(env, utility).get("warning") and env.alerts == []
+
+
+def test_an_old_payout_still_unknown_does_not_hide_reserved_money(env):
+    # final review: a B2B Unknown for two weeks (waiting for someone to check the statement) moved nothing
+    # since; the 100 reserved at 13:57 (Trident's F12 portal payment) is still warned about
+    old = DAY - datetime.timedelta(days=14)
+    env.frappe.db.table(B2B)["MB2B-OLD"] = {"name": "MB2B-OLD", "docstatus": 1, "status": "Unknown",
+                                            "mpesa_settings": SETTINGS, "creation": old, "modified": old,
+                                            "send_started_on": old}
+    (_working, utility) = result(env, "Working Account|KES|2000.00|2000.00|0.00|0.00"
+                                      "&Utility Account|KES|4002.91|3902.91|100.00|0.00", at(13, 57))
+    assert "100.00 of Utility is reserved" in snapshot(env, utility)["warning"]
+    assert [name for _message, name in env.alerts] == [utility]
+    assert env.balances.in_flight(SETTINGS, at(13, 57)) is False
+    # sent again (its send marker) within the window: in flight
+    env.frappe.db.table(B2B)["MB2B-OLD"]["send_started_on"] = at(13, 50)
+    assert env.balances.in_flight(SETTINGS, at(13, 57)) is True
+
+
+def test_a_receipt_the_erp_reversed_is_no_gap(env):
+    # final review: a C2B receipt of 2,000 reversed through Mpesa Reversal Request left Utility; the ERP sent it
+    result(env, "Utility Account|KES|10000.00|10000.00|0.00|0.00", at(9, 0))
+    env.frappe.db.table(REGISTER)["MPC2B-1"] = {"name": "MPC2B-1", "businessshortcode": SETTINGS, "docstatus": 1,
+                                                "transid": "UJR1C2B000", "transamount": 2000.0,
+                                                "transtime": "20261027080000"}  # before 9:00: in the first balance
+    env.frappe.db.table("Mpesa Reversal Request")["MRV-1"] = {
+        "name": "MRV-1", "docstatus": 1, "status": "Reversed", "mpesa_settings": SETTINGS, "amount": 2000.0,
+        "charge": 0.0, "trans_completed_time": at(9, 30)}
+    env.frappe.db.table("Mpesa Reversal Request")["MRV-0"] = {  # reversed by someone else before: nothing moved
+        "name": "MRV-0", "docstatus": 2, "status": "Already Reversed", "mpesa_settings": SETTINGS, "amount": 500.0,
+        "charge": 0.0, "trans_completed_time": at(9, 40)}
+    (utility,) = result(env, "Utility Account|KES|8000.00|8000.00|0.00|0.00", at(10, 0))
+    assert env.balances.check(utility) == "Agrees"
+    assert snapshot(env, utility)["erp_movement"] == -2000.0 and env.alerts == []
 
 
 def test_a_transfer_between_working_and_utility_is_explained(env):

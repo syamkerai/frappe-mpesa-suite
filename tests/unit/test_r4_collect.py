@@ -269,6 +269,20 @@ def test_unpaid_mpesa_requests_a_new_prompt_supersedes_do_not_hold(env):
     assert env.superseded == ["SINV-1"]  # before ERPNext reckons the new request
 
 
+def test_an_unpaid_request_whose_prompt_was_paid_still_holds_its_amount(env):
+    # final review: PR-OLD's prompt was paid, its booking not made yet: it is not superseded, and what it asks
+    # for is not asked again
+    env.frappe.suite_values = {"supersede_unpaid_prompts": 1}
+    _open_request(env, "PR-OLD", outstanding=2500)
+    env.db.table("Mpesa Express Request")["MEXP-1"] = {
+        "name": "MEXP-1", "reference_doctype": PR, "reference_name": "PR-OLD", "docstatus": 1, "status": "Completed",
+        "transaction_id": "TPAID00001", "amount": 2500.0, "base_amount": 2500.0, "currency": "KES", "is_reconciled": 0}
+    options = env.collect.collect_options(SI, "SINV-1")
+    assert (options["owed"], options["held_by"]) == (500, ["PR-OLD"])
+    with pytest.raises(env.frappe.ValidationError, match="SINV-1 has KES 500.00 left to ask for"):
+        _request(env, amount=2300)
+
+
 # ---------------------------------------------------------------- the phone, the shortcode
 @pytest.mark.parametrize("phone", ["", "12345", "0612345678", "2.54712E+11"])
 def test_a_kenyan_mobile_number(env, phone):

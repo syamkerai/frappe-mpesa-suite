@@ -125,6 +125,25 @@ class TestStkPaymentRequest(IntegrationTestCase):
         self.assertEqual(flt(self._prompt(pr, 10000).amount), 10000)
         self.assertEqual(flt(self._prompt(pr, 45000).amount), 30000)
 
+    def test_a_prompt_paid_but_not_booked_yet_is_never_asked_again(self):
+        """Round 4 final review: the customer paid MEXP-1, its booking has not run (or failed): the Payment
+        Request still owes it in ERPNext, so neither a new prompt nor the resend of another one goes out."""
+        from mpsa_suite.www.mpesa import stkpush
+
+        so, pr = self._payment_request(5000)
+        paid, failed = self._prompt(pr, 5000), self._prompt(pr, 5000)
+        frappe.db.set_value(EXPRESS, failed.name, {"docstatus": 1, "status": "Failed"})
+        receipt = self._receipt()
+        self._paid(paid.name, receipt)
+        with self.assertRaisesRegex(frappe.ValidationError, f"paid by M-Pesa prompt {paid.name} .receipt {receipt}."):
+            self._prompt(pr, 5000)
+        with self.assertRaisesRegex(frappe.ValidationError, "being booked"):
+            stkpush._check_can_push(frappe.get_doc(EXPRESS, failed.name))
+        self.assertTrue(stk_verify.book(paid.name))  # booked: the request is paid, nothing is asked again
+        self.assertEqual(self._pr(pr), {"status": "Paid", "outstanding_amount": 0})
+        with self.assertRaisesRegex(frappe.ValidationError, "already paid"):
+            self._prompt(pr, 5000)
+
     def test_prompt_for_more_than_is_left_books_everything_received(self):
         from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 

@@ -318,7 +318,10 @@ def test_payment_request_prompt_buttons(tmp_path):
     assert buttons() == ["M-Pesa > Resend M-Pesa Prompt"]
     assert buttons(last=sent) == ["M-Pesa > Check M-Pesa Status", "M-Pesa > Resend M-Pesa Prompt"]
     assert buttons(last=dict(sent, verification_status="Pending")) == ["M-Pesa > Check M-Pesa Status"]
-    assert buttons(last=dict(sent, status="Completed", transaction_id="SJK1")) == ["M-Pesa > Resend M-Pesa Prompt"]
+    booked = dict(sent, status="Completed", transaction_id="SJK1", is_reconciled=1)
+    assert buttons(last=booked) == ["M-Pesa > Resend M-Pesa Prompt"]
+    # final review: paid, its booking not made yet: no new prompt (the customer would pay twice)
+    assert buttons(last=dict(booked, is_reconciled=0)) == []
     assert buttons(doc=dict(PR_DOC, status="Paid"), last=dict(sent, status="Completed")) == []
     assert buttons(mpsa={}) == []
     assert buttons(doc=dict(PR_DOC, payment_gateway="Stripe")) == []
@@ -340,12 +343,40 @@ def test_resend_sends_the_last_prompt_again_or_a_new_one(tmp_path):
     got = run(tmp_path, PR_FILES, RESEND % json.dumps(PR_DOC), mpsa=COLLECT, perms=EXPRESS_CREATE,
               rows={"Mpesa Express Request": [unpaid]})
     assert got == [["call", "mpsa_suite.www.mpesa.stkpush.retry_stkpush", {"name": "EXP-1", "phone_number": "254722000111"}]]
-    paid = dict(unpaid, status="Completed", transaction_id="SJK1")
+    paid = dict(unpaid, status="Completed", transaction_id="SJK1", is_reconciled=1)  # paid and booked
     got = run(tmp_path, PR_FILES, RESEND % json.dumps(PR_DOC), mpsa=COLLECT, perms=EXPRESS_CREATE,
               rows={"Mpesa Express Request": [paid]})
     assert got == [["call", "mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request.create_new_request",
                     {"phone_number": "254722000111", "payment_gateway": "Mpesa-TILL", "reference_type": "Payment Request",
                      "reference_id": "DOC-1", "amount": 800, "currency": "KES"}]]
+
+
+BEING_BOOKED = """
+const frm = mk_frm("Payment Request", %s);
+const intro = [];
+frm.set_intro = (text, color) => intro.push([text, color]);
+handlers["Payment Request"].refresh(frm);
+await tick();
+const asked = calls.filter((c) => c[0] === "get_list" && c[1] === "Mpesa Express Request").map((c) => c[2]);
+return [frm.buttons, intro, asked];
+"""
+
+
+def test_a_prompt_paid_but_not_booked_offers_no_new_prompt_and_says_why(tmp_path):
+    # final review: the Payment Request still owes the paid prompt until its Payment Entry is made; an older
+    # prompt counts too (the last one failed, an earlier one was paid)
+    failed = {"name": "EXP-2", "status": "Failed", "checkout_request_id": "ws_CO_2", "is_reconciled": 0}
+    paid = {"name": "EXP-1", "status": "Completed", "transaction_id": "SJK1", "is_reconciled": 0,
+            "checkout_request_id": "ws_CO_1"}
+    shown, intro, asked = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT,
+                              perms=EXPRESS_CREATE, rows={"Mpesa Express Request": [failed, paid]})
+    assert "M-Pesa > Resend M-Pesa Prompt" not in shown
+    assert intro == [["M-Pesa prompt EXP-1 was paid (SJK1) and is being booked: no new prompt is sent until it is.",
+                      "orange"]]
+    assert "is_reconciled" in asked[0]["fields"] and asked[0]["limit"] > 1
+    shown, intro, _ = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT, perms=EXPRESS_CREATE,
+                          rows={"Mpesa Express Request": [failed, dict(paid, is_reconciled=1)]})
+    assert "M-Pesa > Resend M-Pesa Prompt" in shown and intro == []
 
 
 # ---------------------------------------------------------------- Purchase Invoice / Order, Supplier

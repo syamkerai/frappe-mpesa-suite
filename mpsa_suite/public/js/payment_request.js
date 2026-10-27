@@ -80,7 +80,8 @@ function sync_payment_fields(frm) {
 // Resend M-Pesa Prompt / Check M-Pesa Status on a submitted M-Pesa Payment Request, through the
 // prompt's own server functions: www.mpesa.stkpush.retry_stkpush sends the last prompt again (it
 // refuses a paid one, or one just sent); create_new_request makes a new one when the last was
-// paid or none was made; m_pesa_api.check_transaction_status asks Safaricom. COLLECT_ROLES only.
+// paid and booked, or none was made (none while a paid prompt waits for its booking);
+// m_pesa_api.check_transaction_status asks Safaricom. COLLECT_ROLES only.
 function mpesa_prompt_actions(frm) {
   const doc = frm.doc;
   const gateway = (doc.payment_gateway || doc.payment_gateway_account || "").toLowerCase();
@@ -88,14 +89,31 @@ function mpesa_prompt_actions(frm) {
   frappe.db
     .get_list("Mpesa Express Request", {
       filters: { reference_doctype: "Payment Request", reference_name: doc.name, docstatus: 1 },
-      fields: ["name", "status", "phone_number", "checkout_request_id", "transaction_id", "verification_status"],
+      fields: [
+        "name", "status", "phone_number", "checkout_request_id", "transaction_id", "verification_status",
+        "is_reconciled",
+      ],
       order_by: "creation desc",
-      limit: 1,
+      limit: 20,
     })
     .then((rows) => {
       const last = (rows || [])[0];
       if (last && last.checkout_request_id && last.status !== "Completed") {
         frm.add_custom_button(__("Check M-Pesa Status"), () => mpesa_check_prompt(frm, last.name), __("M-Pesa"));
+      }
+      // A prompt the customer paid whose booking (its Payment Entry) is not made yet: the Payment
+      // Request still owes that money until then, so a new prompt would ask the customer to pay
+      // again. The server refuses one too (MpesaExpressRequest.validate_payment_request_amount).
+      const paid = (rows || []).find((r) => (r.status === "Completed" || r.transaction_id) && !cint(r.is_reconciled));
+      if (paid) {
+        frm.set_intro(
+          __("M-Pesa prompt {0} was paid{1} and is being booked: no new prompt is sent until it is.", [
+            paid.name,
+            paid.transaction_id ? ` (${paid.transaction_id})` : "",
+          ]),
+          "orange"
+        );
+        return;
       }
       // a prompt whose result is still being settled, or waits for a person, is left alone
       const undecided = last && ["Pending", "Mismatch", "Unverified"].includes(last.verification_status);

@@ -321,6 +321,25 @@ class TestEmployeeDocuments(IntegrationTestCase):
         self.assertEqual([(r.reference_name, flt(r.allocated_amount)) for r in rows], [(phone_claim, 1200)])
         self.assertEqual(frappe.db.get_value(B2B, out["b2b"][0], ["expense_claim", "docstatus"]), (bank_claim, 0))
 
+    def test_one_default_role_that_reads_the_document_prepares_both_routes(self):
+        # final review (area C): the suite's own rights let HR User (claims) and Expense Approver (claims and
+        # advances), each alone, prepare a phone and a bank payout; no site grant, no DocPerm on HRMS DocTypes
+        hr_user = _named("_t_claims_hr_user_only@example.com", "HR User")
+        approver = _named("_t_claims_approver_only@example.com", "Expense Approver")
+        for user in (hr_user, approver):
+            bank_claim = self._claim(self.bank_employee, 1100)
+            phone_claim = self._claim(self.phone_employee, 600)
+            with _as(user):
+                b2b_out = employee_documents.prepare_b2b(EC, bank_claim)
+                b2c_out = employee_documents.prepare_b2c(EC, phone_claim)
+            self.assertEqual(frappe.db.get_value(B2B, b2b_out["name"], ["docstatus", "owner", "expense_claim"]),
+                             (0, user, bank_claim))
+            self.assertEqual(frappe.db.get_value(DISB, b2c_out["name"], ["docstatus", "owner"]), (0, user))
+        advance = self._advance(self.bank_employee, 700)
+        with _as(approver):
+            out = employee_documents.prepare_b2b(EA, advance)
+        self.assertEqual(frappe.db.get_value(B2B, out["name"], ["employee_advance", "owner"]), (advance, approver))
+
     def test_a_claim_is_not_cancelled_while_a_payout_of_it_is_paid_or_on_its_way(self):
         claim = self._claim(self.bank_employee, 1800)
         with _as(ACCOUNTS):

@@ -30,6 +30,7 @@ from . import accounts
 
 SNAPSHOT = "Mpesa Balance Snapshot"
 BT = "Bank Transaction"
+REVERSAL = "Mpesa Reversal Request"
 # Results of payouts completed just before a balance may still be on their way.
 QUIET_MINUTES = 10
 # A balance still unchecked after this long (a payout stuck in flight) is checked anyway.
@@ -283,8 +284,8 @@ def erp_movement(settings, sub_account, after, until):
     """_dict(amount, waiting, note): what the ERP's records moved ``sub_account`` of the shortcode by
     between two balances (after < completed <= until). Paid B2B leave Working and Paid B2C leave
     Utility, each with its charge (stated, booked, else the B2C Charge Bands); C2B receipts and
-    STK payments arrive in the sub-account that collects. ``waiting``: a B2B charge is not known
-    yet and a status query may still give it."""
+    STK payments arrive in the sub-account that collects, and the receipts the ERP reversed leave
+    it again. ``waiting``: a B2B charge is not known yet and a status query may still give it."""
     from ..money_out.b2b_status import still_asking
     from ..money_out.statement import B2B, B2C, band_charge, charge_bands, parse_charges
 
@@ -314,7 +315,7 @@ def erp_movement(settings, sub_account, after, until):
                 waiting = waiting or still_asking(r.name)
             amount -= flt(r.amount) + charge
     if sub_account == accounts.receiving(settings):
-        amount += _received(settings, wallet, after, until)
+        amount += _received(settings, wallet, after, until) - _reversed(wallet, after, until)
     note = f"No charge is known yet for {', '.join(unknown)}: counted as 0." if unknown else ""
     return frappe._dict(amount=round(amount, 2), waiting=waiting, note=note)
 
@@ -347,6 +348,22 @@ def _received(settings, wallet, after, until) -> float:
     return total
 
 
+def _reversed(wallet, after, until) -> float:
+    """C2B receipts the ERP itself reversed between two balances (an Mpesa Reversal Request that
+    M-Pesa completed: Reversed, also when its Result came after it was cancelled), each with its
+    charge: the money left the sub-account that collected it. "Already Reversed" moved nothing."""
+    if not frappe.db.table_exists(REVERSAL):
+        return 0.0
+    rows = frappe.get_all(
+        REVERSAL,
+        filters=[[REVERSAL, "mpesa_settings", "in", wallet], [REVERSAL, "docstatus", "in", [1, 2]],
+                 [REVERSAL, "status", "=", "Reversed"], [REVERSAL, "trans_completed_time", ">", after],
+                 [REVERSAL, "trans_completed_time", "<=", until]],
+        fields=["amount", "charge"],
+    )
+    return sum(flt(r.amount) + flt(r.charge) for r in rows)
+
+
 def _set(s, status, expected=None, difference=None, anchor=None, note=None, **links) -> str:
     values = {"check_status": status, "anchor": anchor, "checked_on": now_datetime(), "note": note, **links,
               # Currency columns hold no NULL: a check that compared nothing leaves them as they were
@@ -356,13 +373,18 @@ def _set(s, status, expected=None, difference=None, anchor=None, note=None, **li
 
 
 def in_flight(settings, before) -> bool:
-    """A payout sent before ``before`` whose result is not in: it may have moved the balance."""
+    """A payout sent in the GIVE_UP_HOURS before ``before`` whose result is not in: it may have moved
+    the balance. One sent longer ago (an Unknown request waiting for someone to check the
+    statement) moved nothing since, so it holds back no check and no reserved-money warning (as
+    money_out.statement.b2b_balance_charge: its send marker, or its last change, within the window)."""
     shortcode = cstr(frappe.db.get_value("Mpesa Settings", settings, "business_shortcode")).strip()
     wallet = [r.name for r in frappe.get_all("Mpesa Settings", fields=["name", "business_shortcode"])
               if cstr(r.business_shortcode).strip() == shortcode] or [settings]
+    since = get_datetime(before) - datetime.timedelta(hours=GIVE_UP_HOURS)
     return any(
         frappe.get_all(doctype, filters=[[doctype, "mpesa_settings", "in", wallet], [doctype, "docstatus", "=", 1],
                                          [doctype, "status", "in", statuses], [doctype, "creation", "<=", before]],
+                       or_filters=[[doctype, "modified", ">=", since], [doctype, "send_started_on", ">=", since]],
                        pluck="name", limit=1)
         for doctype, statuses in IN_FLIGHT.items()
     )
