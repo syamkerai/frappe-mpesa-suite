@@ -35,6 +35,8 @@ SUITE = "M-Pesa Suite Settings"
 HR, ACCOUNTS, APPROVER = "_t_claims_hr@example.com", "_t_claims_accounts@example.com", "_t_claims_approver@example.com"
 CLERK, PAYER = "_t_claims_clerk@example.com", "_t_claims_payer@example.com"
 BOOKS = "_t_claims_books@example.com"  # an Accounts Manager with no HR role (Trident's System Managers hold it)
+LINE_MANAGER = "_t_claims_line_manager@example.com"  # an Expense Approver limited to their own Employee record
+HR_USER_ONLY = "_t_claims_hr_user_only@example.com"
 PHONE = "254722000777"
 CLAIM_TYPE = "_T Claims Travel"
 SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, payout_lines_from=None, allow_one_off_b2b=0,
@@ -110,6 +112,8 @@ class TestEmployeeDocuments(IntegrationTestCase):
         _named(CLERK, "Accounts User")
         _named(PAYER, "M-Pesa Payer")
         _named(BOOKS, "Accounts Manager")
+        _named(LINE_MANAGER, "Expense Approver")
+        _named(HR_USER_ONLY, "HR User")
         cls.payable = _account("_T Claims Payable", "Liability", "Balance Sheet", "Payable")
         cls.advances = _account("_T Claims Advances", "Asset", "Balance Sheet", "Receivable")
         # HRMS v15 fetches an advance's account from the company on every save
@@ -145,6 +149,8 @@ class TestEmployeeDocuments(IntegrationTestCase):
             p.stop()
         frappe.set_user("Administrator")
         frappe.db.rollback()
+        # roles and User Permissions a test added are rolled back, not uncached
+        t.forget_roles(HR, LINE_MANAGER)
         frappe.local.mpesa_suite_bank_accounts = None
         frappe.clear_document_cache(SUITE, SUITE)
         frappe.clear_cache(doctype=PE)
@@ -276,6 +282,25 @@ class TestEmployeeDocuments(IntegrationTestCase):
         frappe.db.set_value("Employee", self.phone_employee, "user_id", PAYER)
         self.assertRaisesRegex((frappe.PermissionError, frappe.ValidationError), "You are", self._send, DISB, out["name"])
         self.assertEqual(frappe.db.get_value(DISB, out["name"], "docstatus"), 0)
+
+    def test_an_approved_phone_on_hold_is_never_passed_over_for_the_cell_number(self):
+        # verification K3: with the approved-phone lock off (Trident's and Astral's setting after the upgrade), an
+        # employee whose default phone is in its hold period, its new number also typed as the Cell Number, is not
+        # paid to the Cell Number: the preparer is told why
+        frappe.db.set_single_value(SUITE, "b2c_approved_phones_only", 0)
+        frappe.clear_document_cache(SUITE, SUITE)
+        frappe.db.set_value("Employee", self.phone_employee, "cell_number", "0733000777")
+        frappe.db.set_value(EMPACC, self.phone_account, "active_from", add_days(now_datetime(), 1))
+        claim = self._claim(self.phone_employee, 1600)
+        with _as(HR):
+            self.assertEqual(employee_documents.b2c_phone(self.phone_employee), ("", None))
+            self.assertRaisesRegex(frappe.ValidationError, f"{self.phone_account} is on hold until",
+                                   employee_documents.prepare_b2c, EC, claim)
+        frappe.db.set_value(EMPACC, self.phone_account, "active_from", add_days(now_datetime(), -1))
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+        row = frappe.get_doc(DISB, out["name"]).references[0]
+        self.assertEqual((row.partyb, row.payee_account), (PHONE, self.phone_account))
 
     # ------------------------------------------------------------ B2B to the approved bank account
     def test_a_claim_is_paid_to_the_approved_bank_account_with_its_project(self):
@@ -445,6 +470,34 @@ class TestEmployeeDocuments(IntegrationTestCase):
         with _as(CLERK):
             self.assertFalse(frappe.has_permission(B2B, "read", doc=out["name"]))
             self.assertEqual(frappe.get_list(B2B, filters={"name": ["in", both]}, pluck="name"), [])
+
+    def _references(self, doctype) -> list:
+        """Get References on a new B2C Payment Disbursement paying ``doctype`` (as the form sends it)."""
+        doc = frappe.new_doc(DISB)
+        doc.update({"company": t.COMPANY, "party_type": "Employee", "transaction_to_pay_against": doctype,
+                    "company_currency": "KES", "paid_to_account_currency": "KES"})
+        return doc.get_outstanding_reference_documents({"transaction_to_pay_against": doctype, "company": t.COMPANY,
+                                                        "party_type": "Employee"})
+
+    def test_get_references_lists_only_the_claims_the_user_may_read(self):
+        # verification K12: an Expense Approver limited to their own Employee record by a User Permission (as a line
+        # manager is) lists only the claims HRMS lets them read, here the one shared with them, with no phone of
+        # anyone else's; an HR User, whom HRMS gives no read on Employee Advances, gets none
+        own = _employee("_T Claims Line Manager")
+        frappe.get_doc({"doctype": "User Permission", "user": LINE_MANAGER, "allow": "Employee", "for_value": own,
+                        "apply_to_all_doctypes": 1}).insert(ignore_permissions=True)
+        shared = self._claim(self.phone_employee, 1300)
+        hidden = self._claim(self.bank_employee, 1400)
+        frappe.share.add_docshare(EC, shared, LINE_MANAGER, read=1, flags={"ignore_share_permission": True})
+        with _as(LINE_MANAGER):
+            self.assertTrue(frappe.has_permission(EC, "read", doc=shared))
+            self.assertFalse(frappe.has_permission(EC, "read", doc=hidden))
+            names = {r["reference_name"] for r in self._references(EC)}
+        self.assertIn(shared, names)
+        self.assertNotIn(hidden, names)
+        self._advance(self.phone_employee, 900)
+        with _as(HR_USER_ONLY):
+            self.assertRaises(frappe.PermissionError, self._references, EA)
 
     # ------------------------------------------------------------ who a claim's B2C payout pays
     def test_a_claim_row_pays_its_employee_and_a_cancelled_phone_account_never_blocks_the_draft(self):

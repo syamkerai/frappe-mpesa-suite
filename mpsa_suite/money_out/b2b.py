@@ -304,6 +304,7 @@ def salary_slip(doc) -> str | None:
 def validate_request(doc, at_submit: bool = False) -> None:
     """Every check a request must pass: on save, again at submit (under the document's lock) and,
     through check_ready_to_send, again right before the money leaves."""
+    _check_document_read(doc)  # before the document is read
     _employee_of_document(doc)
     if is_employee(doc):
         _validate_employee_request(doc, at_submit)
@@ -397,6 +398,33 @@ def _check_salary_reader(doc, slip) -> None:
         frappe.throw(SALARIES_HIDDEN, frappe.PermissionError)
     if slip:
         frappe.has_permission("Salary Slip", "read", doc=slip, throw=True)
+
+
+def can_read(dt: str, dn: str | None = None, throw: bool = False) -> bool:
+    """Whether the user may read the invoice, order, claim or advance ``dn`` (None: any of the
+    DocType), by its own rights (ERPNext, HRMS: User Permissions and shares too). A Purchase Order
+    also by who reads Purchase Invoices: the Accounts roles pay advances on orders, which ERPNext
+    lets only the Purchase and Stock roles read."""
+    if dt == "Purchase Order" and frappe.has_permission("Purchase Invoice", "read"):
+        return True
+    return bool(frappe.has_permission(dt, "read", doc=dn, throw=throw))
+
+
+def _check_document_read(doc) -> None:
+    """A draft saved by hand names an invoice, order, claim or advance only for who may read it
+    (can_read): its save fills in the supplier or employee and answers with what is left to pay.
+    Only when the link is new or changed: a payer or manager saving a colleague's draft needs no
+    rights on the document beyond those of the send. Not for a payment schedule's request (Pay
+    Selected checked its preparer), nor at submit and send."""
+    if (getattr(doc, "flags", None) or {}).get("mpesa_from_schedule") or cint(doc.get("docstatus")) != 0:
+        return
+    for dt, field in owed.B2B_DOC_FIELDS.items():
+        dn = cstr(doc.get(field)).strip()
+        if not dn:
+            continue
+        before = doc.get_doc_before_save()
+        if before is None or cstr(before.get(field)).strip() != dn:
+            can_read(dt, dn, throw=True)
 
 
 def _check_payer(doc, sending: bool) -> None:
