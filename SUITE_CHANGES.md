@@ -7,6 +7,412 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## Round 4: Send via M-Pesa, named payers, payee accounts, claims, merchants and salaries (2026-10-27, branch payouts-r4)
+
+Plan: [../docs/PAYOUTS_R4_PLAN.md](../docs/PAYOUTS_R4_PLAN.md). Design: [docs/PAYOUTS_DESIGN.md](docs/PAYOUTS_DESIGN.md),
+"Round 4". Roles and the user's decisions D5 to D9: [docs/ROLES_AND_PERMISSIONS.md](docs/ROLES_AND_PERMISSIONS.md).
+Trident's upgrade and first live payments: [docs/TRIDENT_ROUND4_ROLLOUT.md](docs/TRIDENT_ROUND4_ROLLOUT.md).
+What each work package changed, file by file: `docs/r4_notes/WP0.md` to `WP7.md`.
+
+Runs on Frappe/ERPNext v15 and v16 with HRMS. **`bench migrate` is
+needed**: new DocTypes, new fields, custom fields on HRMS DocTypes and changed DocType
+permissions. No patch. **Read the UPGRADE part below before deploying**: after the migrate the
+shared Administrator login and System Manager no longer send money or approve payee accounts.
+
+**Only named people send money (decision 1)**
+- **Send** a payout (B2B, B2C, reversals), use Pay Selected or retry a failed payout: M-Pesa Payer
+  and M-Pesa Manager only (`PAYOUT_ROLES`).
+- **Approve** a supplier or employee payee account, and the other M-Pesa admin work (C2B/Pull
+  registration by hand, settling Unknown payouts, reconciling by hand, the Sandbox Lab): M-Pesa
+  Manager only (`ADMIN_ROLES`).
+- **Prepare** payouts: new `PREPARE_ROLES` = M-Pesa Manager, Accounts Manager, Accounts User,
+  HR Manager, HR User, each within the rights it has on the payout DocType it makes.
+- **System Manager configures only**: settings, Daraja secrets, the bank paybill list, Check
+  Permissions. It reads payouts, schedules and Supplier M-Pesa Accounts but creates and changes
+  none of them, has no access to Employee M-Pesa Accounts and no longer sees salary payouts.
+- **The shared Administrator login** is refused ("Use your own login") for sends, approvals, Pay
+  Selected, retries, Receiver Name Confirmed, Make Default, cancelling a payout that may have been
+  paid and planning its line again. New setting "Administrator May Not Send Payouts or Approve
+  Accounts", on by default and on after the migrate. Installs, migrations and scheduled jobs are
+  not affected.
+- **Maker-checker** now watches every field that decides who is paid, how much, from where and
+  for which document, also covers reversals (whoever pressed Make Reversal does not send it) and
+  no longer exempts Administrator.
+- **Alerts**: changing a payout-safety setting is noted on M-Pesa Suite Settings and sent to the
+  Notify Role (the role before the save and the one after it). The settings are maker-checker,
+  the Administrator refusal, one-off B2B, the hold hours, the Integration User, the Notify Role,
+  approved phones only, and the claim payee switch and caps.
+
+**Send via M-Pesa replaces Submit (decision 2)**
+- On a saved draft B2B request, B2C Payment Disbursement, B2C Disbursement Request or Mpesa
+  Reversal Request, a payer sees **Send via M-Pesa** where Submit was. On a Supplier or Employee
+  M-Pesa Account an M-Pesa Manager sees **Approve**. Other users see neither.
+- The summary shows each receiver and destination (a phone masked as 2547****5678, a paybill and
+  account, a till, or a bank, account and account holder), the amount, the charge estimate from
+  the B2C Charge Bands, Pay From, who prepared and last changed it, and anything that would make
+  the send fail. **Confirm** unlocks after 5 seconds.
+- The server token is bound to the user, the document as saved, its amounts and its destination.
+  It works from 5 seconds to 10 minutes, once.
+- Every other way to submit is refused: the list's Actions > Submit (no longer offered on these six
+  lists), REST, `frappe.client.submit`, `run_doc_method`, the form's own Submit. Pay Selected and
+  the jobs of a disbursement already sent are deliberate steps of their own.
+
+**Payee accounts: many destinations per party, one default (decision 4)**
+- Supplier M-Pesa Account and Employee M-Pesa Account both take four types: **Phone (B2C)**,
+  **Paybill** (with its account number), **Till (Buy Goods)** and **Bank Account (via Bank
+  Paybill)**. One record per destination, each with its proof, a second approver and the hold
+  period, as before. Employee's "Bank Paybill (B2B)" is renamed on migrate. Existing Paybill and
+  Till accounts keep their type and stay payable (Trident's MSA-00001 and MSA-00002).
+- A bank account: pick the bank from the list and type only the account number (letters and
+  digits). The paybill and the name M-Pesa shows come from the bank's row. An account holder who
+  is not the party gets a "third-party account" warning.
+- A bank's paybill typed as a plain Paybill (KCB, Equity, Co-op...) is refused: "pick Bank Account".
+  The exception is a business's collection reference (`code#reference`), which stays a Paybill with
+  a warning.
+- A phone that does not start like a Safaricom line is warned, not refused (ported numbers keep
+  their prefix). A paybill or till has 5 to 7 digits and is never the company's own shortcode.
+- The same destination twice:
+  - refused for the same party, and for two employees;
+  - between a supplier and an employee: refused for a phone or bank account (the ghost-vendor
+    pattern), warned for a paybill or till;
+  - for two suppliers: warned.
+  An employee is named in these messages only to people who may see salaries.
+- **One default per party.** With two or more approved accounts one must be the default: the
+  Supplier or Employee form shows a red headline, and payroll leaves such an employee out.
+  **Make Default** (a button, logged with a Version and a Comment) replaces ticking the box after
+  approval. Supplier: M-Pesa Manager, Accounts Manager, Accounts User, Purchase Manager. Employee:
+  M-Pesa Manager, HR Manager. A named login either way. A blocked account cannot be the default.
+- **At payment time** the payer may pick any other approved account of the right kind. B2B (to a
+  supplier or an employee) pays a Paybill, Till or Bank Account; B2C pays a Phone. Payroll pays
+  each employee to their default of any type (a phone by B2C, the others by B2B).
+- **After payment** the number in front of the name M-Pesa shows must be the account's.
+  - A bank account is checked against its bank's Safaricom name. Only KCB's ships ("KCB Paybill
+    AC"). For other banks, the name the first payment shows is kept on the bank's row and M-Pesa
+    Managers are asked to confirm it.
+  - Tills are checked from the Transaction Status answer (F2.4).
+  - A mismatch blocks the account until an M-Pesa Manager presses Receiver Name Confirmed.
+- A save after approval can change neither the default nor a block.
+
+**The bank paybill list**
+- New DocType **M-Pesa Bank Paybill** (M-Pesa workspace). Each row has the institution, its type,
+  the paybill, how the account number is written, an optional account-number pattern, the name
+  M-Pesa shows, enabled, the source and the date verified. Changes are tracked. System Manager and
+  M-Pesa Manager edit it. Accounts, HR, Purchase Manager, M-Pesa Payer and M-Pesa Viewer read it.
+  A shipped row cannot be deleted (disable it instead).
+- **Shipped: 43 of the top 50 Kenyan institutions**: commercial banks, Postbank, the mortgage
+  finance institution and the largest microfinance banks. Each number was found by two
+  independent searches; the 7 with no reliable paybill are left out.
+  - 39 rows ship enabled. Four medium-confidence rows ship disabled: HBZ, Sumac MFB, Choice MFB
+    and Kingdom Bank.
+  - Eight banks ship an account-number pattern taken from their own wording: Family 12 digits,
+    Paramount 12, Access 13, I&M 14, M-Oriental 13, Premier 10, Standard Chartered 13, CIB 10.
+- Every migrate adds missing rows. It changes a field only while that field still holds what the
+  previous release shipped. An admin's edit is kept, with a comment saying what the release ships.
+- **If a bank's paybill changes** (an admin's edit or a release), every approved account that
+  copied the old number is blocked until it is cancelled, amended and approved again. The Notify
+  Role is told how many accounts are blocked. Changing the number back unblocks them. An approval
+  is refused if the bank's paybill changed after the draft was saved. Money never follows an edit
+  without a second approval.
+
+**Expense Claims and Employee Advances paid by M-Pesa (B2C and B2B)**
+- A submitted, approved claim (or a submitted advance) that still owes shows the headline
+  "M-Pesa: paid · in flight · left". Under M-Pesa, two buttons make drafts:
+  - **Pay employee (phone)**: a draft B2C Payment Disbursement to the employee's approved phone;
+  - **Pay employee (bank / paybill / till)**: a draft B2B request to one of the employee's approved
+    B2B accounts, with the default preselected.
+- **Actions > Pay by M-Pesa** on the claim and advance lists (up to 200 ticked documents) makes one
+  B2C disbursement for the documents paid by phone and one B2B request for each document paid to
+  a bank, paybill or till. Documents it cannot pay are listed with the reason.
+- **What a claim owes** is HRMS's own outstanding: grand total less what was reimbursed, with its
+  advances taken off. A claim its advances cover now owes 0. An advance owes its amount less what
+  was paid. Every payout of the document still on its way counts against it (B2C, B2B, draft
+  entries, schedule lines), under one lock shared by every path.
+- **Payable only when** the document is submitted and Approved, is not Is Paid, has a payable
+  (advance) account and is in KES. A site that runs a Workflow on the DocType can also list the
+  states that may be paid ("Expense Claim Workflow States That May Be Paid").
+- **B2B for a claim or advance** is booked as a Payment Entry that HRMS accepts. The party is the
+  employee and the account is the claim's own payable account (or the advance account). The entry
+  references the claim, is paid from the Working GL and carries the claim's project and cost
+  center. The claim then shows Paid. A Payer may send it, because the document caps it.
+- **Nobody pays their own claim or advance.** A B2C row for a claim pays the claim's own employee
+  only. A B2C Disbursement Request made by hand cannot pay a claim or advance. A retry checks the
+  claim, the phone and the sender again.
+- **"Pay Employees by B2C Only to Approved Phones"** (new setting): while on, B2C to an employee
+  goes only to an approved phone account, never to a typed number or the Employee's Cell Number. It
+  is on for a new site and stays off on an upgrade until the site switches it on.
+- A claim or advance with a payout paid or on its way cannot be cancelled.
+- **Not salary data (decision 5).** Claim and advance payouts are shown, by the payout DocType's
+  rights, to whoever reads Expense Claims (or Employee Advances) through a role other than
+  Employee. Everyone else sees them no more than salaries.
+
+**Merchants and casual payees paid straight from a claim ("petty cash without cash")**
+- **Off until switched on.** An M-Pesa Manager switches on "Allow Paying Merchants and Casual
+  Payees from Expense Claims". HR ticks "Paid to Merchants or Casual Payees by M-Pesa" on each
+  Expense Claim Type that may be paid this way.
+- **The claim gets an M-Pesa Payees table.** Each line has:
+  - Pay To: Till, Paybill and account number, Bank Account at a listed bank, or Phone;
+  - the payee's name as the claimant gives it;
+  - the amount;
+  - the expense line it pays.
+
+  **Paste Payees** takes rows of name, phone and amount, or a CSV / XLSX file.
+- **Checks on every save and at approval:**
+  - the lines of an expense line add up to no more than its sanctioned amount, and all the lines
+    to no more than the claim owes (the rest is reimbursed to the employee as usual);
+  - a payee is never an employee's phone, till, paybill or bank account, and an employee's phone is
+    never used as a paybill or bank account number;
+  - amounts are whole shillings, within the caps.
+- **Caps (decision 3)**: "Most per Payment to a Payee That Is Not an Approved Account" and "Most
+  per Day to Such Payees, per Company", both 0 = no cap, the default. A supplier's approved account
+  is not capped.
+- **Who does what:**
+  1. The claimant (or HR / Accounts) lists the payees.
+  2. The expense approver approves them with the claim.
+  3. A preparer presses **Pay Merchants and Payees**: one draft B2B request per merchant line, one
+     B2C disbursement for all the phone lines.
+  4. An M-Pesa Payer who did not prepare them sends each with Send via M-Pesa.
+
+  The claim list's **Pay Casual Payees by M-Pesa** puts the phone lines of several claims in one
+  batch. **Retry Failed Payees** prepares the failed lines again. A line is never paid twice.
+- **Books**: each payout is a reimbursement of the claim (a Payment Entry to the claimant on the
+  claim's payable account), the money having gone to the merchant.
+- **Each line** shows its status, receipt and the name M-Pesa paid. A name that does not match is
+  commented on the claim and alerted.
+  - A till, paybill or bank account paid 3 times from claims (setting "Suggest an Approved
+    Supplier Account After...") is suggested as a Supplier M-Pesa Account.
+  - **Repair Reimbursed Total** (M-Pesa Manager) runs HRMS's own sum again.
+
+**Salaries from Salary Slips: one-off and selected slips**
+- **One salary**: a submitted Salary Slip shows "M-Pesa: paid · in flight · planned · left". **Pay
+  by M-Pesa** (a one-off or off-cycle salary) offers any approved account of the employee (the
+  default preselected), Pay From and Pay On, and makes a one-line M-Pesa Payment Schedule.
+- **Several salaries**: the Salary Slip list's Actions > **Pay Selected Slips by M-Pesa** makes
+  one schedule with a line per slip to its employee's default account (up to 500 slips, one
+  company). Each slip left out is listed with its reason.
+- **Paying them**: an M-Pesa Payer who did not prepare the lines pays them with Pay Selected on
+  M-Pesa Payments Due. Never before Pay On, with the 5-second confirm. They are booked as payroll
+  schedules are: the salary Journal Entry clears the payroll payable. A salary planned on one
+  schedule is never planned on a second one.
+- **Who prepares**: a `PREPARE_ROLES` user who may see salaries and create schedules. In practice
+  that is an Accounts User or Manager who also holds HR User or HR Manager. A user who may not
+  read Employee M-Pesa Accounts is offered the default account only, its number masked.
+- Payroll Entry shows a headline with what M-Pesa paid, has in flight and planned, and its
+  schedules. Its own Create M-Pesa Payment Schedule now also needs salary visibility.
+- An off-cycle salary still needs a Payroll Entry: run a one-employee Payroll Entry, then Pay by
+  M-Pesa on its slip.
+
+**Buttons and Connections**
+- **Connections**: every form the suite pays from or collects for lists its M-Pesa records under
+  "M-Pesa":
+  - HR: Expense Claim, Employee Advance, Salary Slip, Payroll Entry, Employee;
+  - buying: Supplier, Purchase Invoice and Order;
+  - selling: Sales Order and Invoice, POS Invoice, Customer, Payment Request;
+  - accounts: Payment Entry, Journal Entry, Bank Transaction, Bank Account;
+  - the suite's own forms: Mpesa Settings, the payouts, the C2B register, Express Request, Payment
+    Intent, the payee accounts and the schedules.
+
+  Who may not see salaries gets no count of salary records.
+- **Buttons show only to people the server accepts** (`frappe.boot.mpsa` flags):
+  - STK and C2B buttons: collectors;
+  - Retry: payers;
+  - Reverse Payment and Check Status: payers and M-Pesa Managers;
+  - the prepare buttons on Purchase Invoice and Order: `PREPARE_ROLES`, so System Manager and a
+    payer without a preparing role no longer see them.
+- Purchase Invoice and Order: **Add to M-Pesa Payment Schedule**, and the headline "M-Pesa: KES x on
+  its way, KES y planned on a payment schedule. Left to pay: KES z."
+- List indicators on B2C disbursements and requests, reversals and the C2B register. Customer:
+  "M-Pesa received in 90 days".
+- B2B request: **Check Status** on Paid, Initiated and Unknown requests. Make Entry offers the
+  Expense Claim or Employee Advance it paid.
+
+**Request Payment from Sales Orders and Sales Invoices**
+- A submitted Sales Order (not invoiced, even in part) or a non-POS Sales Invoice gets M-Pesa >
+  **Request Payment**. The dialog takes the customer's phone, the amount still owed (it may be
+  lowered) and the shortcode. It makes and submits ERPNext's own Payment Request (Phone channel),
+  which prompts the phone.
+- The server checks:
+  - COLLECT_ROLES, read on the document, and create on Payment Request (Accounts User and Manager
+    by default);
+  - KES, and no more than is owed less the open requests, and no more than the shortcode's
+    Transaction Limit;
+  - a Kenyan mobile number;
+  - at most 5 prompts a minute per user, no new prompt while the document's last one is under 90
+    seconds old, and one prompt at a time per document.
+- Payment Request: **Resend M-Pesa Prompt** and **Check M-Pesa Status**.
+
+**Trident live-test fixes** ([../docs/TRIDENT_LIVE_TEST_HANDOVER.md](../docs/TRIDENT_LIVE_TEST_HANDOVER.md))
+
+| # | What changed |
+|---|---|
+| F1 | The STK booking and the C2B auto-submit run as Administrator, as the B2B and B2C bookings do. An Integration User hidden from a project no longer stops a booking. |
+| F2.1 | A till Result's `{Amount=…BasicAmount=…}` balance is read as the Working balance. |
+| F2.2 | A charge Safaricom does not state is taken from the fall in the Working balance, once no status query can state it. Otherwise Mpesa Match Log gets a "Charge not stated" row. |
+| F2.3 | A Result with no completed time is dated when it arrived, flagged "estimated" until the status answer. |
+| F2.4 | A B2B Result that lacks the receiver or the charge gets a Transaction Status query, asked again by a 5-minute sweep and by Check Status. The answer fills the receiver, charge and time, runs the name check (tills too) and makes the charge line. It also settles an Initiated or Unknown request. |
+| F3, F6 | Named payers, Send via M-Pesa and System Manager configuration only (above). F6's role clean-up is a rollout step. |
+| F4 | A B2C row whose document owes nothing is refused at save. |
+| F5 | One cost-center rule for every payout entry: the paid document's, then Mpesa Settings', then the company default. B2C and B2B entries copy the document's project and dimensions. Both rows of a charge Journal Entry go on the shortcode's cost center; salary Journal Entries on the Payroll Entry's. |
+| F7 | Transaction Limit and Minimum B2C Payout cap every B2C row, at save and at send. |
+| F8 | No change: the charge Safaricom states is used, never a fixed figure. |
+| F9, F10 | Setup and runbook notes in [docs/OPERATIONS_NOTES.md](docs/OPERATIONS_NOTES.md). |
+| F11 | Check Transaction Status on Mpesa Settings answers payout receipts with the payout's status, receiver, charge and time, and the dialog closes. Money the ERP did not send is flagged. A salary receipt is described only to who may see salaries. |
+| F12 | Each balance snapshot compares each sub-account's movement with what the ERP recorded: Agrees, Gap (alerted) or Explained. A Reserved amount is shown and alerted. |
+
+**Desk fixes**
+- Request Payment in the C2B dialog no longer throws on the invoice desk.
+- Express Request: the undefined `msg` after a re-prompt is gone. Express Request and Mpesa
+  Settings no longer add a realtime listener on every refresh.
+- The status event Python publishes is now the one the desk listens for.
+- B2C disbursement: Paid To is set for DocTypes without their own default account, and "Less Than
+  Amount" is sent.
+- Sales Invoice's Fetch Mpesa Payments lists only the company's draft receipts of that customer.
+
+**Settings added** (M-Pesa Suite Settings, Money Out tab)
+
+| Setting | Default | What it does |
+|---|---|---|
+| Administrator May Not Send Payouts or Approve Accounts | On (also after the migrate) | Sends, approvals, Pay Selected, retries, Receiver Name Confirmed and Make Default need a person's own login. |
+| Pay Employees by B2C Only to Approved Phones | Off on an upgrade, on for a new site | B2C to an employee only to an approved phone account. |
+| Expense Claim Workflow States That May Be Paid | Blank (any submitted, approved claim) | One state per line, for sites that run a Workflow on Expense Claim (or Employee Advance). |
+| Allow Paying Merchants and Casual Payees from Expense Claims | Off | The M-Pesa Payees table on claims. |
+| Most per Payment to a Payee That Is Not an Approved Account | 0 = no cap | Per payee line. |
+| Most per Day to Such Payees, per Company | 0 = no cap | Per company and day. |
+| Suggest an Approved Supplier Account After This Many Payments to the Same Till/Paybill | 3 (0 = never) | Suggests turning a merchant paid often into a supplier account. |
+
+Also new: "Paid to Merchants or Casual Payees by M-Pesa" on Expense Claim Type (off), and the
+DocTypes M-Pesa Bank Paybill and M-Pesa Claim Payee (the claim's table).
+
+Existing settings that do more now:
+- Transaction Limit and Minimum B2C Payout: every B2C row (F7).
+- Notify Role: the round 4 alerts.
+- Mpesa Settings' Cost Center: payout entries (F5).
+
+**Behaviour changes users will notice**
+- **Who sends:**
+  - System Manager and the shared Administrator login no longer send, approve, Pay Selected or
+    retry. System Manager no longer sees salary payouts or Employee M-Pesa Accounts.
+  - Accounts and HR prepare; M-Pesa Payers send; M-Pesa Managers approve accounts.
+- **How payouts are sent:**
+  - Payouts are sent with Send via M-Pesa (summary, Confirm after 5 seconds), payee accounts
+    approved with Approve.
+  - The list's Actions > Submit is gone from these lists. Scripts and integrations that submitted
+    payouts are refused.
+- **Payee accounts:** a bank account is picked from the bank list; the default changes only with
+  Make Default; a party with several approved accounts and no default shows red and is left out of
+  payroll.
+- **Claims and advances:**
+  - Claims and advances get M-Pesa buttons. A claim covered by its advances owes nothing.
+  - Nobody pays their own claim, and a claim with a payout on its way cannot be cancelled.
+  - Accounts users who do not read Expense Claims no longer see claim payouts.
+- **B2C:**
+  - A row above the Transaction Limit, below the Minimum B2C Payout or for a document that owes
+    nothing is refused at save. On a site whose limit was lowered for a test (Trident: 100), raise
+    it.
+  - A B2C draft saved before the upgrade is refused once with "was changed while being sent" (its
+    approved account is filled at the first send). Save it again, then another person sends it.
+- **Entries (F5):** B2C Payment Entries now book to the paid document's cost center (or the
+  shortcode's) and carry its project, not the company default. Charge Journal Entries put both
+  rows on the shortcode's cost center. Tell the accountant.
+- **Tills:** the receiver, charge and completed time appear shortly after the Result. A wrong till
+  now blocks its account, as a wrong paybill does.
+- **Balances:** snapshots show Agrees, Gap or Explained. A Gap alerts the Notify Role.
+- **Buttons** are hidden from people the server would refuse.
+- **Payroll:** preparing a payroll schedule needs salary visibility (an HR role, or read on Salary
+  Slip).
+
+**UPGRADE**
+
+*Before migrating*
+1. **Back up** the site (database and files) and keep the download.
+2. **Give named people the roles, before the upgrade.** After the migrate neither the Administrator
+   login nor System Manager can send or approve. Each person who sends gets their own login and
+   M-Pesa Payer. At least one person gets M-Pesa Manager to approve payee accounts, and that should
+   not be the payer. Preparers keep Accounts User or Manager, or HR User or Manager. Give the
+   people who prepare salary schedules an HR role as well as their Accounts role. Write the list
+   down.
+3. **Claims and advances need read.** Whoever prepares B2B payouts of claims or advances needs read
+   on Expense Claim and Employee Advance (Role Permission Manager), or an HR role. HRMS gives that
+   read only to HR and Expense Approver roles (advances: Expense Approver only).
+4. **Scripts and drafts.** Find the scripts, Server Scripts and integrations that submit payouts:
+   they will be refused and must use Send via M-Pesa. A B2C draft saved before the upgrade must
+   be saved once more before it is sent.
+5. **Note the site's own permission rules** (Custom DocPerm) on the M-Pesa DocTypes. A role such
+   as "Super admin" that you want to keep must be added back after the reset.
+
+*Deploying*
+1. A site still on the old app name `frappe_mpsa_payments` does its rename hand-over first
+   ([docs/RENAME_SPIKE.md](docs/RENAME_SPIKE.md)).
+2. Deploy this branch and run the migrate. On Frappe Cloud the deploy runs it.
+3. **Clear the cache**: `bench --site <site> clear-cache`, or the site's Clear Cache action on Frappe
+   Cloud. Connections are cached per DocType. Then everyone reloads the desk, and logs out and in
+   if their roles changed.
+
+*After migrating*
+1. **M-Pesa Suite Settings > Permissions > Check Permissions**: read the differences, then **Reset**
+   the M-Pesa DocTypes it lists. Add back any site role you decided to keep. Until the reset, the
+   site's rules decide who sees the forms, but the server still refuses sends and approvals to
+   anyone without the round 4 roles.
+2. **Assign the roles** from step 2 if not done yet. Take the M-Pesa roles off shared or service
+   logins: the Integration User needs only what
+   [docs/ROLES_AND_PERMISSIONS.md](docs/ROLES_AND_PERMISSIONS.md) section 7 names.
+3. **Raise the Transaction Limit** on each Mpesa Settings to the real value (B2C is now capped by it
+   at save and at send). Set the hold hours back to 24 if they were lowered for a test.
+4. **Approve employees' phone accounts**: HR enters each Employee M-Pesa Account with its proof, an
+   M-Pesa Manager approves it, and it is payable after the hold (24 hours by default).
+5. **Decide "Pay Employees by B2C Only to Approved Phones"**: switch it on once the employees paid
+   by B2C have approved phones. Until then B2C to an employee may use the Employee's Cell Number.
+6. **Check the bank paybill list** for the banks your staff and suppliers use:
+   - the paybill numbers;
+   - the eight account-number patterns (Family, Paramount, Access, I&M, M-Oriental, Premier,
+     Standard Chartered, CIB) against real account numbers of those banks, since a wrong pattern
+     refuses valid accounts;
+   - the four disabled rows, which you enable only after checking them with the bank.
+7. **Defaults**: on each supplier or employee with two or more approved accounts, press Make
+   Default on one.
+8. **Claims**:
+   - set the workflow states that may be paid, if the site runs a Workflow on claims;
+   - decide merchant and casual payees (the switch, the Expense Claim Types, the caps);
+   - tell staff to save claims they want paid by M-Pesa as not Is Paid.
+9. **Cost centers (F5)**: tell the accountant which cost center payout entries now use (the paid
+   document's, then the shortcode's, then the company default). There is no setting yet to put
+   every M-Pesa entry on the shortcode's cost center.
+10. **First payments**: small amounts, one route at a time, with the checks in
+    [docs/TRIDENT_ROUND4_ROLLOUT.md](docs/TRIDENT_ROUND4_ROLLOUT.md) (generic apart from Trident's
+    names).
+
+**Known limits at 56f8e74** (some may be fixed by the time this is read; check the branch log)
+- Expense Claim and Employee Advance Connections still hide their M-Pesa counts from who may not
+  see salaries (`connections.EMPLOYEE_DOCUMENTS` lists them), although their payouts are not salary
+  data.
+- The "third-party account" warning on a bank account shows at approval, after Confirm, not in the
+  Approve summary or on save.
+- An Integration Request's raw data of a B2C or B2B result holds the amount and receiver name
+  (salaries too), and System Manager reads Integration Requests.
+- A Payment Request made on a Sales Order before it was invoiced is not counted by a later prompt on
+  the invoice (as in ERPNext).
+- **Claims and advances:**
+  - Who reads Expense Claims sees claim payouts by DocType, not claim by claim: a site's User
+    Permissions on claims are not reflected.
+  - Accounts-only users see no claim buttons until the site gives them read on claims.
+  - Payment schedule lines for claims and advances are not built.
+- **Salaries:** HR-only users cannot prepare salary schedules (the schedule's rights are Accounts
+  and M-Pesa Manager).
+- **Balances and names:** a balance Gap also appears for reversals and settlement sweeps, which the
+  check does not count yet. Only KCB's Safaricom name is confirmed in the bank list.
+- **Desk:**
+  - The desk scripts were checked with node, not in a browser on v15 and v16: check the buttons on
+    the site.
+  - Pay links (Payment Intents) are not offered from the desk.
+  - Payment Entry's STK button is not hidden from non-collectors (the server checks Payment Entry
+    submit).
+
+Tests: 2623 unit tests pass at 56f8e74 (`python -m pytest tests/unit -q`). Bench, full `run-tests
+--app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 468 tests at 56f8e74,
+with 3 errors on v15 and 2 on v16, all in test fixtures, not in the product:
+- `test_b2b_documents` cancels as Administrator, now refused;
+- the `test_claim_payees` bank paybill fixture breaks the code rule, so that class did not run;
+- the v15 advance fixture's account must be Receivable.
+
 ## Phase 1 — Foundation (this change)
 
 **Runs on Frappe/ERPNext v15 and v16**
