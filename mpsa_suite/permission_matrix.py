@@ -252,6 +252,10 @@ ENDPOINTS = {
     "mpsa_suite.www.mpesa.stkpush.initiate_stk_push": ("Write the request", ("via:_check_can_push",)),
     "mpsa_suite.www.mpesa.stkpush.retry_stkpush": ("Write the request", ("via:_check_can_push",)),
     "mpsa_suite.www.mpesa.stkpush.check_payment_status": ("Read the request", ("perm",)),
+    # Request M-Pesa payment on a submitted Sales Order / Sales Invoice (a Payment Request, prompted)
+    "mpsa_suite.money_in.collect.collect_options": ("COLLECT_ROLES + read the order / invoice", ("roles:COLLECT_ROLES", "perm")),
+    "mpsa_suite.money_in.collect.request_payment": (
+        "COLLECT_ROLES + read the order / invoice + create Payment Request", ("roles:COLLECT_ROLES", "perm")),
     # Finance: balances, status queries, statements, entries
     _A + "m_pesa_api.get_account_balance": ("FINANCE_ROLES", ("direct", "roles:FINANCE_ROLES")),
     _A + "m_pesa_api.pull_transactions": ("FINANCE_ROLES", ("direct", "roles:FINANCE_ROLES")),

@@ -648,8 +648,8 @@ JS_HARNESS = r"""
 const src = require("fs").readFileSync(process.argv[1], "utf8");
 let handlers;
 global.__ = (s) => s;
-global.frappe = {boot: {app_data: []}, ui: {form: {on: (dt, h) => { handlers = h; }}},
-                 realtime: {on: () => {}}, db: {get_value: () => Promise.resolve({})}, call: () => {}};
+global.frappe = {boot: {app_data: [], mpsa: {can_collect: true}}, ui: {form: {on: (dt, h) => { handlers = h; }}},
+                 realtime: {on: () => {}, off: () => {}}, db: {get_value: () => Promise.resolve({})}, call: () => {}};
 eval(src);
 const out = JSON.parse(process.argv[2]).map((doc) => {
   const added = [];

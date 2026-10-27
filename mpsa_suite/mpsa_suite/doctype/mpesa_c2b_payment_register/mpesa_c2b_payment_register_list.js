@@ -1,4 +1,18 @@
 frappe.listview_settings["Mpesa C2B Payment Register"] = {
+	// A receipt is unmatched, matched to a document (or only to a customer) and waiting, or booked.
+	add_fields: ["docstatus", "payment_entry", "sales_invoice", "pos_invoice", "matched_reference_name", "customer"],
+	has_indicator_for_draft: true,
+	get_indicator(doc) {
+		if (doc.docstatus === 2) return [__("Cancelled"), "red", "docstatus,=,2"];
+		if (doc.docstatus === 1) {
+			if (doc.payment_entry) return [__("Booked"), "green", "payment_entry,is,set"];
+			if (doc.sales_invoice || doc.pos_invoice) return [__("On Invoice"), "green", "docstatus,=,1"];
+			return [__("Submitted"), "blue", "docstatus,=,1"];
+		}
+		if (doc.matched_reference_name) return [__("Matched"), "blue", "matched_reference_name,is,set"];
+		if (doc.customer) return [__("Customer Matched"), "yellow", "customer,is,set"];
+		return [__("Unmatched"), "orange", "customer,is,not set"];
+	},
 	onload: function (listview) {
 		// Always remove the previous listener before re-registering.
 		// The guard-on-instance approach fails on navigation because each

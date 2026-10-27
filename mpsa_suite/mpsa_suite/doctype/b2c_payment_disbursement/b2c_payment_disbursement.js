@@ -169,7 +169,7 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 			(reference) => reference.payment_status === "Failed"
 		);
 
-		if (has_failed_references && frm.doc.docstatus === 1) {
+		if (has_failed_references && frm.doc.docstatus === 1 && frappe.boot.mpsa?.can_pay) {
 			frm.add_custom_button(
 				__("Retry Failed Transactions"),
 				function () {
@@ -312,7 +312,7 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 			});
 		} else {
 			frappe.db.get_value("Company", company, "default_payable_account").then((response) => {
-				const account = response.message ? response.message[accountField] : null;
+				const account = response.message ? response.message.default_payable_account : null;
 				if (account) {
 					frm.set_value("paid_to", account);
 				}
@@ -596,7 +596,7 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 			from_due_date: filters.from_due_date,
 			to_due_date: filters.to_due_date,
 			outstanding_amt_greater_than: filters.outstanding_amt_greater_than,
-			outstanding_amt_greater_than: filters.outstanding_amt_greater_than,
+			outstanding_amt_less_than: filters.outstanding_amt_less_than,
 		};
 
 		frappe.flags.allocate_payment_amount = filters["allocate_payment_amount"];

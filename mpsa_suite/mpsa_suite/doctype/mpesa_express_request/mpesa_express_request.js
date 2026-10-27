@@ -5,9 +5,14 @@ const HAS_ERPNEXT = frappe.boot?.app_data?.some((app) => app.app_name === "erpne
 
 frappe.ui.form.on("Mpesa Express Request", {
 	refresh(frm) {
-		frappe.realtime.on("refresh_form", function () {
-			frm.reload_doc();
-		});
+		// one listener per form: refresh runs on every reload, and each on() added another
+		if (frm._mpesa_refresh_handler) {
+			frappe.realtime.off("refresh_form", frm._mpesa_refresh_handler);
+		}
+		frm._mpesa_refresh_handler = () => frm.reload_doc();
+		frappe.realtime.on("refresh_form", frm._mpesa_refresh_handler);
+		// the Mpesa Actions call endpoints for COLLECT_ROLES (Reconcile: ADMIN_ROLES) only
+		const can_collect = Boolean(frappe.boot.mpsa?.can_collect);
 
 		autofill_gateway_settings(frm);
 
@@ -17,7 +22,7 @@ frappe.ui.form.on("Mpesa Express Request", {
 
 		convertAmountToKES(frm);
 
-		if (frm.doc.status !== "Completed" && frm.doc.docstatus == 1) {
+		if (frm.doc.status !== "Completed" && frm.doc.docstatus == 1 && can_collect) {
 			frm.add_custom_button(
 				__("Check Transaction Status"),
 				function () {
@@ -70,7 +75,7 @@ frappe.ui.form.on("Mpesa Express Request", {
 			);
 		}
 
-		if (frm.doc.docstatus == 1 && can_prompt_again(frm)) {
+		if (frm.doc.docstatus == 1 && can_prompt_again(frm) && can_collect) {
 			frm.add_custom_button(
 				__("Initiate STK Push"),
 				function () {
@@ -86,17 +91,17 @@ frappe.ui.form.on("Mpesa Express Request", {
 						// 	phone_number: frm.doc.phone_number,
 						// 	request_amount: frm.doc.amount,
 						// },
+						// initiate_request returns nothing: no error means the prompt went out
 						callback: function (r) {
-							const res = r.message;
-							if (res) {
-								frappe.msgprint({
-									message: msg,
-									indicator: "green",
-									title: __("STK Push Initiated"),
-								});
-							} else {
-								frappe.msgprint(__("No response received."));
-							}
+							if (r.exc) return;
+							frappe.msgprint({
+								message: __("STK Push sent to {0}. The request updates when the customer answers.", [
+									frappe.utils.escape_html(frm.doc.phone_number || ""),
+								]),
+								indicator: "green",
+								title: __("STK Push Initiated"),
+							});
+							frm.reload_doc();
 						},
 					});
 				},
@@ -104,7 +109,12 @@ frappe.ui.form.on("Mpesa Express Request", {
 			);
 		}
 
-		if (!frm.doc.is_reconciled && frm.doc.status === "Completed" && frm.doc.docstatus == 1) {
+		if (
+			!frm.doc.is_reconciled &&
+			frm.doc.status === "Completed" &&
+			frm.doc.docstatus == 1 &&
+			frappe.boot.mpsa?.can_approve
+		) {
 			frm.add_custom_button(
 				__("Reconcile Payment"),
 				function () {

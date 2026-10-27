@@ -201,6 +201,8 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `gateway.v1.resend_prompt` | API client with can_prompt | api |
 | `gateway.v1.verify_receipt` | API client with can_verify_receipts | api |
 | `money_in.c2b_verify.release` | CONFIG_ROLES | roles:RELEASE_ROLES |
+| `money_in.collect.collect_options` | COLLECT_ROLES + read the order / invoice | roles:COLLECT_ROLES, perm |
+| `money_in.collect.request_payment` | COLLECT_ROLES + read the order / invoice + create Payment Request | roles:COLLECT_ROLES, perm |
 | `money_out.api.b2b_queue_timeout` | Safaricom (guest) | callback |
 | `money_out.api.b2b_result` | Safaricom (guest) | callback |
 | `money_out.api.b2c_status_result` | Safaricom (guest) | callback |
