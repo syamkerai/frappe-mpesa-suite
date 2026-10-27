@@ -15,14 +15,14 @@ document drifts from them, and when a whitelisted function has no server-side ch
 | Role | Job | Created by |
 |---|---|---|
 | System Manager | Site administrator (IT). Changes permissions and configures the suite (settings, Daraja secrets: `CONFIG_ROLES`). Since round 4 (D5) it does not prepare or send payouts, approve payee accounts or see salary payouts: it reads payouts, their schedules and supplier accounts, and has no access to Employee M-Pesa Accounts. That work needs the M-Pesa roles below (or an Accounts / HR role to prepare), held by named people. | Frappe |
-| M-Pesa Manager | M-Pesa administrator: settings, Daraja secrets, shortcodes, C2B/Pull registration, approves payee accounts (Approve), releases held receipts, settles Unknown payouts, resets M-Pesa permissions. | the suite (`install.SUITE_ROLES`) |
+| M-Pesa Manager | M-Pesa administrator: settings, Daraja secrets, shortcodes, C2B/Pull registration, approves payee accounts (Approve), releases held receipts, settles Unknown payouts, marks a claim's payee line settled outside M-Pesa, resets M-Pesa permissions. | the suite (`install.SUITE_ROLES`) |
 | M-Pesa Payer | Sends payouts (B2C, B2B, reversals) from documents others prepared, with **Send via M-Pesa** (D6); retries failed ones. | the suite |
 | M-Pesa Collector | Sends STK prompts and attaches received payments to invoices. | the suite |
 | M-Pesa Viewer | Reads M-Pesa transactions and reports. Changes nothing, sees no secrets. | the suite |
 | Accounts User | Prepares payouts (drafts), books and reconciles entries, collects. Proposes supplier accounts and presses Make Default on them. With read on Expense Claims (granted by the site) also prepares claim payouts and sees them (D9). | ERPNext |
 | Accounts Manager | As Accounts User, plus booking work (C2B register cancel, statement imports). Prepares payouts; does not send them or do M-Pesa admin work (decisions D1, D2, D5). Sees supplier payouts, and claim payouts only with read on Expense Claims; never salary payouts (D4). | ERPNext |
-| HR Manager / HR User | Prepare B2C payroll and claim disbursements, prepare claim payees, and propose employees' payee accounts; an M-Pesa Payer sends them (D1). HR Manager presses Make Default on employees' accounts. With the pay roles, the only ones who see salary payouts (D4). Salary schedules need an Accounts role as well (the schedule's rights). | ERPNext / HRMS |
-| Expense Approver | Approves Expense Claims and, with them, their M-Pesa payees. Reads claims, so sees claim payouts (D9). Sends nothing. | HRMS |
+| HR Manager / HR User | Prepare B2C payroll disbursements, the payouts of claims (B2C and B2B: Pay employee (phone), Pay employee (bank / paybill / till)) and of advances where the site lets them read Employee Advances, prepare claim payees, and propose employees' payee accounts; an M-Pesa Payer sends them (D1). HR Manager presses Make Default on employees' accounts. With the pay roles, the only ones who see salary payouts (D4); they also see supplier payouts. Salary schedules need an Accounts role as well (the schedule's rights). | ERPNext / HRMS |
+| Expense Approver | Approves Expense Claims and, with them, their M-Pesa payees. Prepares (never sends) the payouts of the claims and advances it reads: Pay employee, Pay Merchants and Payees, Pay by M-Pesa on an advance (HRMS lets no other default role read Employee Advances). Sees claim and advance payouts (D9) and supplier payouts, never salary payouts. | HRMS |
 | Employee | Enters their own claim and its payees (when the site allows it). Never sees other people's payouts. | ERPNext |
 | Sales User | Collects: STK prompts, C2B receipts on invoices. | ERPNext |
 | Purchase Manager / User | Proposes / reads supplier M-Pesa accounts; Purchase Manager presses Make Default on them. No B2B access. | ERPNext |
@@ -78,23 +78,25 @@ Server checks, whatever the button shows. "Own" rules: the person who prepared o
 payout does not send it, the person who entered a payee account (or the employee it pays) does not
 approve it, and nobody pays themselves.
 
-| Task | M-Pesa Manager | M-Pesa Payer | Accounts Manager / User | HR Manager / User | System Manager | Administrator (shared login) |
-|---|---|---|---|---|---|---|
-| **Prepare** a payout (draft B2B or B2C, schedule line, claim or slip button) | Yes | No [1] | Yes (B2B, schedules; B2C disbursement Accounts Manager only) | B2C disbursements (HR Manager), claim payees, B2C requests; salary schedules only with an Accounts role | No | Not refused |
-| **Send** a payout (Send via M-Pesa, Pay Selected, retry) | Yes | Yes | No | No | No | Refused [2] |
-| **Approve** a payee account (Approve, Receiver Name Confirmed) | Yes | No | No | No | No | Refused [2] |
-| **Enter** a payee account (draft) | Both | Supplier | Supplier | Employee | No | Not refused |
-| **Make Default** on a payee account | Both | No | Supplier | Employee (HR Manager) | No | Refused [2] |
-| **Configure** (M-Pesa Suite Settings, Mpesa Settings and secrets, the bank paybill list, Check Permissions) | Yes | No | No | No | Yes | Yes |
-| **See salary payouts** (slips, payroll schedules, employee payouts with no document, Employee M-Pesa Accounts) | Yes | Yes (no Employee M-Pesa Accounts) | No [3] | Yes | No | Yes |
-| **See claim and advance payouts** (within the payout DocType's rights) | Yes | Yes | Only with read on Expense Claim / Employee Advance | Yes (B2C payouts: HR has no rights on B2B requests) | No | Yes |
-| **Collect** (STK, Request Payment) | Yes | No | Yes | No | Yes | Yes |
-| **Book** (Make Entry, Check Entry Again) | Yes | No | Yes | No | Yes (ERPNext rights) | Yes |
+| Task | M-Pesa Manager | M-Pesa Payer | Accounts Manager / User | HR Manager / User | Expense Approver | System Manager | Administrator (shared login) |
+|---|---|---|---|---|---|---|---|
+| **Prepare** a payout (draft B2B or B2C, schedule line, claim, advance or slip button) | Yes | No [1] | Yes (B2B, schedules; B2C disbursement Accounts Manager only) | B2B and B2C payouts of claims (and of advances, with read on Employee Advance), B2C payroll disbursements, claim payees, B2C requests; salary schedules only with an Accounts role | B2B and B2C payouts of the claims and advances it reads, claim payees | No | Not refused |
+| **Send** a payout (Send via M-Pesa, Pay Selected, retry) | Yes | Yes | No | No | No | No | Refused [2] |
+| **Approve** a payee account (Approve, Receiver Name Confirmed) | Yes | No | No | No | No | No | Refused [2] |
+| **Settle** a claim's payee line outside M-Pesa (a Draft or Failed line of a submitted claim, paid another way) | Yes | No | No | No | No | No | Refused [2] |
+| **Enter** a payee account (draft) | Both | Supplier | Supplier | Employee | No | No | Not refused |
+| **Make Default** on a payee account | Both | No | Supplier | Employee (HR Manager) | No | No | Refused [2] |
+| **Configure** (M-Pesa Suite Settings, Mpesa Settings and secrets, the bank paybill list, Check Permissions) | Yes | No | No | No | No | Yes | Yes |
+| **See salary payouts** (slips, payroll schedules, employee payouts with no document, Employee M-Pesa Accounts) | Yes | Yes (no Employee M-Pesa Accounts) | No [3] | Yes | No [3] | No | Yes |
+| **See claim and advance payouts** (within the payout DocType's rights) | Yes | Yes | Only with read on Expense Claim / Employee Advance | Yes (B2C and B2B) | Yes | No | Yes |
+| **Collect** (STK, Request Payment) | Yes | No | Yes | No | No | Yes | Yes |
+| **Book** (Make Entry, Check Entry Again) | Yes | No | Yes | No | No | Yes (ERPNext rights) | Yes |
 
 [1] An M-Pesa Payer can still make a B2B draft from the B2B list (its DocPerm); someone else must
 then send it. [2] While "Administrator May Not Send Payouts or Approve Accounts" is on (the
 default). [3] Unless the site gave the role read on Salary Slip, or the user created the record.
-Expense Approver approves claims and their payees and reads claim payouts. Employee enters their own claim.
+Expense Approver also approves claims and their payees. Claim and advance payouts are not salary data.
+Employee enters their own claim.
 
 ## 2. Audit findings, ranked
 
@@ -286,6 +288,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_in.c2b_verify.release` | CONFIG_ROLES | roles:RELEASE_ROLES |
 | `money_in.collect.collect_options` | COLLECT_ROLES + read the order / invoice | roles:COLLECT_ROLES, perm |
 | `money_in.collect.request_payment` | COLLECT_ROLES + read the order / invoice + create Payment Request | roles:COLLECT_ROLES, perm |
+| `money_in.payment_request.prompts_being_booked` | COLLECT_ROLES + read the Payment Request | roles:COLLECT_ROLES, perm |
 | `money_out.api.b2b_queue_timeout` | Safaricom (guest) | callback |
 | `money_out.api.b2b_result` | Safaricom (guest) | callback |
 | `money_out.api.b2c_status_result` | Safaricom (guest) | callback |
@@ -497,10 +500,10 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 | M-Pesa Payer | Send via M-Pesa on a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user): the summary shows the receiver, destination and amount, Confirm works after 5 seconds; Pay Selected on M-Pesa Payments Due for a line someone else prepared; Send via M-Pesa on a B2C disbursement; retry a failed B2C | Send via M-Pesa on a payout they prepared or last changed, and Pay Selected on such a line (maker-checker on); Actions > Submit on the payout lists (not offered; an API submit is refused); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
 | System Manager | M-Pesa Suite Settings and Mpesa Settings, credentials; Check Permissions; the bank paybill list; reading supplier payouts, schedules and Supplier M-Pesa Accounts | New, edit or delete a payout, a schedule or a Supplier M-Pesa Account; Move Date, Plan Again, Close Schedule, Create M-Pesa Payment Schedule; Send via M-Pesa, Approve, Pay Selected (no button; refused by the server); Employee M-Pesa Accounts (not in the list, the form or the Employee's dashboard); salary payouts (employee B2C/B2B, payroll schedules) |
 | Administrator (shared login) | Configuration, as System Manager | Send via M-Pesa, Approve, Pay Selected, retries, Receiver Name Confirmed, cancelling a payout that may have been paid and planning its line again ("Use your own login") while the Suite setting is on |
-| HR Manager / HR User | An Employee M-Pesa Account as a draft; a B2C payroll disbursement as a draft; Pay employee (phone) on an approved claim (HR Manager); Pay Merchants and Payees on a claim; Make Default on an employee's account (HR Manager) | Approving an Employee M-Pesa Account; submitting (sending) a B2C disbursement; Create M-Pesa Payment Schedule on a Payroll Entry and Pay by M-Pesa on a Salary Slip without an Accounts role (an Accounts role prepares it) |
-| Expense Approver | Approving a claim with M-Pesa payees; seeing that claim's payouts | Pay Merchants and Payees (not a preparer); Send via M-Pesa |
+| HR Manager / HR User | An Employee M-Pesa Account as a draft; a B2C payroll disbursement as a draft; Pay employee (phone) and Pay employee (bank / paybill / till) on an approved claim (HR Manager and HR User); Pay Merchants and Payees on a claim; Make Default on an employee's account (HR Manager) | Approving an Employee M-Pesa Account; submitting (sending) a B2C disbursement; Create M-Pesa Payment Schedule on a Payroll Entry and Pay by M-Pesa on a Salary Slip without an Accounts role (an Accounts role prepares it) |
+| Expense Approver | Approving a claim with M-Pesa payees; seeing that claim's payouts; Pay Merchants and Payees and Pay employee (phone, or bank / paybill / till) on an approved claim; Pay by M-Pesa on an Employee Advance | Send via M-Pesa; salary payouts (employee B2C/B2B for a slip, payroll schedules) |
 | Accounts User (round 4) | Pay employee (bank / paybill / till) on a claim, once the site gives Accounts read on Expense Claim; Make Default on a supplier account; Request Payment on a submitted Sales Order or Invoice | Salary payouts; claim payouts while it reads no claims; Make Default on an employee's account |
-| M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; Check Permissions | Approving an account they entered themselves |
+| M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; mark a Draft or Failed payee line of a submitted claim settled outside M-Pesa (with your own login); Check Permissions | Approving an account they entered themselves |
 | Portal / website user | nothing M-Pesa | `/api/v2/method/Mpesa Express Request/initiate_stk_push` and `/api/v2/method/Mpesa Settings/get_account_balance?name=<record>` answer 403 |
 | Guest (logged out) | the pay page `/pay/<token>`; Safaricom callbacks keep arriving | `/api/method/mpsa_suite.utils.utils.convert_amount_to_kes?currency=USD&amount=1` answers 403 |
 

@@ -452,13 +452,17 @@ def _paid_employees(doc) -> set:
 
 
 def _payer_problems(doc, user) -> list:
-    """What the send would refuse about the payer: their own payment, and a B2B payment to an
-    employee for no Salary Slip, Expense Claim or Employee Advance by someone who is no manager."""
+    """What the send would refuse about the payer: their own payment, and a payment to an employee
+    for no Salary Slip, Expense Claim or Employee Advance by someone who is no manager (a B2B
+    request without one, or any B2C Disbursement Request made by hand: employee_documents)."""
     from . import b2b, employee_accounts, owed
 
     problems = [p for p in (employee_accounts.own_payment_problem(e, user) for e in sorted(_paid_employees(doc))) if p]
     if (doc.doctype == B2B and b2b.is_employee(doc) and not b2b.salary_slip(doc)
             and not owed.employee_document_of(doc)[0] and not employee_accounts.is_manager(user)):
+        problems.append(_(b2b.NO_DOCUMENT))
+    if (doc.doctype == B2C_REQUEST and doc.get("party_type") == "Employee" and cstr(doc.get("party")).strip()
+            and not employee_accounts.is_manager(user)):
         problems.append(_(b2b.NO_DOCUMENT))
     return problems
 
@@ -490,6 +494,8 @@ def _payee_problems(doc) -> list:
         if problem:
             problems.append(f"{line.parent}: {problem}")
         capped += flt(amount)
+    if doc.doctype == B2C:
+        capped = claim_payees._capped_rows_total(doc)  # the send's own batch total (check_b2c_row)
     if s.daily_cap and capped:
         sent = claim_payees.sent_today(doc.get("company"), (doc.doctype, doc.name))
         if sent + capped > s.daily_cap + 0.001:
