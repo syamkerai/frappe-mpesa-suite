@@ -622,6 +622,7 @@ class TestPayroll(_Base):
         self.assertTrue(payable)
         self.assertFalse(any(r.get("mpesa_b2b_payment_request") for r in reversal.accounts))  # no_copy
         self.assertTrue(all(flt(r.credit_in_account_currency) > 0 for r in payable))
+        reversal.posting_date = nowdate()  # the desk's Reverse Journal Entry asks for it; the mapper leaves it empty
         reversal.insert()
         self.assertEqual((reversal.docstatus, reversal.reversal_of), (0, entry))
         self.assertRaisesRegex(frappe.ValidationError, f"M-Pesa pays salaries of {pe}", self._bank_entry, pe)

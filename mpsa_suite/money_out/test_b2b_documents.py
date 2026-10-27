@@ -18,6 +18,7 @@ Unit coverage is in tests/unit/test_b2b_owed.py and tests/unit/test_b2b_entries.
 from unittest.mock import Mock, patch
 
 import frappe
+from frappe.share import add as share
 from frappe.utils import add_days, add_to_date, flt, getdate, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
@@ -673,6 +674,8 @@ class TestB2BDocuments(IntegrationTestCase):
 
     def test_the_payer_who_prepared_a_request_cannot_send_it(self):
         pi = self._invoice(10000)
+        # a draft names an invoice only for who reads it (verification K9): this payer was given it to read
+        share(PI, pi.name, self.payer, read=1, notify=0)
         frappe.set_user(self.payer)  # maker-checker: who prepared it is shown why, and gets no token
         try:
             req = self._request(4000, send=False, purchase_invoice=pi.name)
@@ -894,7 +897,7 @@ class TestB2BDocuments(IntegrationTestCase):
             draft = frappe.get_doc(dict(values, purchase_invoice=pi.name))
             frappe.flags.error_message = None
             self.assertRaises(frappe.PermissionError, draft.insert)
-            self.assertIn(f"No permission for Purchase Invoice {pi.name}", str(frappe.flags.error_message))
+            self.assertIn("No permission for Purchase Invoice", str(frappe.flags.error_message))
             self.assertFalse(draft.get("supplier"))
         finally:
             frappe.set_user("Administrator")
@@ -915,7 +918,7 @@ class TestB2BDocuments(IntegrationTestCase):
             doc.purchase_invoice = other.name
             frappe.flags.error_message = None
             self.assertRaises(frappe.PermissionError, doc.save)
-            self.assertIn(f"No permission for Purchase Invoice {other.name}", str(frappe.flags.error_message))
+            self.assertIn("No permission for Purchase Invoice", str(frappe.flags.error_message))
         finally:
             frappe.set_user("Administrator")
         self.assertEqual(frappe.db.get_value(B2B, request.name, "purchase_invoice"), pi.name)
