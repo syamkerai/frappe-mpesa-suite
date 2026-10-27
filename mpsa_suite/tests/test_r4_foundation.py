@@ -14,6 +14,7 @@ from frappe.utils import cint
 
 from mpsa_suite import boot
 from mpsa_suite.compat import IntegrationTestCase
+from mpsa_suite.money_in.testing import allow_test_users
 from mpsa_suite.money_out import maker_checker
 from mpsa_suite.permissions import require_named_user
 
@@ -40,6 +41,7 @@ class TestR4Foundation(IntegrationTestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.refusal_after_migrate = frappe.db.get_single_value(SUITE, "refuse_administrator_payouts")
+        allow_test_users()
         for email, role in ROLES.items():
             _user(email, role)
 

@@ -116,6 +116,7 @@ class TestClaimPayees(IntegrationTestCase):
         _claim_type(FUEL, 1, expense)
         _claim_type(TRAVEL, 0, expense)
         cls.payable = _payable()
+        cls.cost_center = frappe.db.get_value("Company", t.COMPANY, "cost_center")
         _bank_paybill()
         frappe.db.commit()  # fixtures stay; each test rolls back to here
 
@@ -141,8 +142,9 @@ class TestClaimPayees(IntegrationTestCase):
         doc = frappe.get_doc({
             "doctype": CLAIM, "employee": self.claimant, "company": t.COMPANY, "posting_date": nowdate(),
             "expense_approver": APPROVER, "approval_status": "Approved", "payable_account": self.payable,
+            "cost_center": self.cost_center,  # the desk fills the rows' cost center; HRMS requires it
             "expenses": [{"expense_type": expense_type, "expense_date": nowdate(), "amount": amount,
-                          "sanctioned_amount": amount}],
+                          "sanctioned_amount": amount, "cost_center": self.cost_center}],
             "mpesa_payees": payees, **values})
         doc.insert()
         if submit:

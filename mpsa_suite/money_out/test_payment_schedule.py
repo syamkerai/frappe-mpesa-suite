@@ -107,6 +107,7 @@ class TestPaymentSchedule(IntegrationTestCase):
             p.stop()
         frappe.set_user("Administrator")
         frappe.db.rollback()
+        t.forget_roles(PREPARER, PAYER, MANAGER)  # roles a test added are rolled back, not uncached
         frappe.local.mpesa_suite_bank_accounts = None
         frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")  # a switch a test changed
 

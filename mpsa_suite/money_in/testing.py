@@ -38,8 +38,22 @@ def before_tests() -> None:
     frappe.db.commit()
 
 
+def allow_test_users() -> None:
+    """A full run makes more named test users than the 60 an hour Frappe's User.before_insert
+    allows (``throttle_user_limit``); raise it for this process only."""
+    frappe.local.conf.throttle_user_limit = max(int(frappe.local.conf.get("throttle_user_limit") or 0), 1000)
+
+
+def forget_roles(*emails) -> None:
+    """Drop the cached roles of ``emails``. A test that gave a user a role and rolled back leaves
+    the role in Frappe's roles cache, which outlives the rollback, for the next test."""
+    for email in emails:
+        frappe.clear_cache(user=email)
+
+
 def bootstrap() -> None:
     frappe.set_user("Administrator")
+    allow_test_users()
     if not frappe.db.a_row_exists("Company"):
         before_tests()  # e.g. a single module run with --skip-before-tests
     if not frappe.db.exists("Company", COMPANY):
