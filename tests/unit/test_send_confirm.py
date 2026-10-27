@@ -125,8 +125,8 @@ def test_the_summary_shows_receiver_destination_amount_and_maker(env):
     r = prepared(env)
     assert r["token"] and r["delay"] == 5 and r["expires_in"] == 600 and r["problems"] == []
     assert r["rows"] == [{"receiver": "Acme Hardware Ltd", "party": "ACME", "expected_name": "ACME HARDWARE",
-                          "destination": "Paybill 888880, account ACME-1", "amount": 3000.0, "charge": None,
-                          "document": "Purchase Invoice PINV-1"}]
+                          "destination": "Paybill 888880, account ACME-1", "account_holder": None, "amount": 3000.0,
+                          "charge": None, "document": "Purchase Invoice PINV-1"}]
     assert (r["total"], r["pay_from"], r["shortcode"], r["prepared_by"], r["changed_by"]) == (
         3000.0, "WORKING", "4139683", CLERK, CLERK)
     assert r["charge"] is None and "after it pays" in r["charge_note"]
@@ -150,6 +150,32 @@ def test_a_till_and_a_typed_number_read_as_such(env):
     row = prepared(env)["rows"][0]
     assert row["destination"] == "Till 5123456 (a number not saved on a supplier)"
     assert row["receiver"] == "Not saved on a supplier" and row["document"] is None
+
+
+BANK = "Bank Account (via Bank Paybill)"
+
+
+def test_a_supplier_bank_account_names_its_bank_and_its_holder(env):
+    # round 4: Supplier M-Pesa Accounts hold bank accounts too; the bank's name is its paybill row's
+    env.frappe.db.table("M-Pesa Bank Paybill")["EQUITY"] = {"name": "EQUITY", "institution_name": "Equity Bank"}
+    env.frappe.db.table(SUPPLIER_ACCOUNT)["MSA-2"] = {
+        "name": "MSA-2", "expected_name": "EQUITY BANK", "account_type": BANK, "bank_paybill": "EQUITY", "bank": None,
+        "account_holder_name": "Acme Hardware Ltd"}
+    b2b(env, supplier_mpesa_account="MSA-2", receiver_shortcode="247247", account_reference="0123456789")
+    row = prepared(env)["rows"][0]
+    assert row["destination"] == "Equity Bank (bank paybill 247247), account 0123456789"
+    assert (row["account_holder"], row["expected_name"]) == ("Acme Hardware Ltd", "EQUITY BANK")
+
+
+def test_an_employee_bank_account_without_its_paybill_row_names_the_erpnext_bank(env):
+    env.frappe.db.table("Employee M-Pesa Account")["EMA-2"] = {
+        "name": "EMA-2", "expected_name": "KCB", "account_type": BANK, "bank_paybill": None, "bank": "KCB Bank",
+        "account_holder_name": "Jane Wanjiru"}
+    b2b(env, supplier=None, supplier_mpesa_account=None, employee="EMP-1", employee_mpesa_account="EMA-2",
+        receiver_shortcode="522522", account_reference="1234567890", purchase_invoice=None)
+    row = prepared(env)["rows"][0]
+    assert (row["receiver"], row["destination"], row["account_holder"]) == (
+        "Jane Wanjiru", "KCB Bank (bank paybill 522522), account 1234567890", "Jane Wanjiru")
 
 
 def test_b2c_rows_show_each_masked_phone_amount_charge_and_the_total(env, monkeypatch):
@@ -361,6 +387,16 @@ def test_an_account_summary_shows_the_destination_and_who_entered_it(env):
     assert (r["entered_by"], r["proof"]) == (CLERK, "/private/files/letter.pdf")
 
 
+def test_approving_a_bank_account_shows_the_bank_and_whose_account_it_is(env):
+    env.frappe.db.table("M-Pesa Bank Paybill")["EQUITY"] = {"name": "EQUITY", "institution_name": "Equity Bank"}
+    account(env, account_type=BANK, bank_paybill="EQUITY", shortcode="247247", account_number="0123456789",
+            account_holder_name="Someone Else Ltd", expected_name="EQUITY BANK")
+    env.frappe.session.user, env.frappe.user_roles = MANAGER, {"M-Pesa Manager"}
+    row = prepared(env, SUPPLIER_ACCOUNT, "MSA-9")["rows"][0]
+    assert row["destination"] == "Equity Bank (bank paybill 247247), account 0123456789"
+    assert (row["account_holder"], row["document"]) == ("Someone Else Ltd", BANK)
+
+
 @pytest.mark.parametrize("values,message", [
     (dict(entered_by=MANAGER), "you entered or changed the details"),
     (dict(owner=MANAGER), "you entered or changed the details"),
@@ -482,12 +518,39 @@ def test_retries_pay_selected_and_receiver_name_confirm_need_a_named_login(path,
     assert "require_named_user()" in _statements(_function(path, name, cls=cls))
 
 
-@pytest.mark.parametrize("path", [APP / "money_out" / "maker_checker.py"])
+@pytest.mark.parametrize("path", [APP / "money_out" / "maker_checker.py", APP / "money_out" / "schedule.py"],
+                         ids=lambda p: p.name)
 def test_no_administrator_exemption_is_left_in_maker_checker(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     compared = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
                 and any(isinstance(c, ast.Constant) and c.value == "Administrator" for c in n.comparators)]
     assert compared == []
+
+
+def test_plan_again_of_a_line_that_may_have_been_paid_needs_a_named_manager():
+    # decision 1: Administrator holds every role, M-Pesa Manager too, so it is refused by name first
+    statements = _statements(_function(APP / "money_out" / "schedule.py", "_named_manager"))
+    assert statements[0] == "require_named_user()"
+    for name in ("plan_again", "_check_b2c_not_paid"):
+        assert "_named_manager()" in ast.unparse(_function(APP / "money_out" / "schedule.py", name)), name
+
+
+@pytest.mark.parametrize("doctype", [B2B, B2C_REQUEST])
+def test_a_cancel_of_a_payout_that_may_have_paid_needs_a_named_manager(doctype):
+    """Each ``require(ADMIN_ROLES)`` of before_cancel (the payout may have been paid) comes right after
+    ``require_named_user()``: ``require`` lets Administrator through."""
+    node = _function(CONTROLLERS[doctype], "before_cancel", cls=True)
+    found = 0
+    for n in ast.walk(node):
+        body = getattr(n, "body", None)
+        if not isinstance(body, list):
+            continue
+        lines = [ast.unparse(s) for s in body]
+        for i, line in enumerate(lines):
+            if line == "require(ADMIN_ROLES)":
+                found += 1
+                assert i and lines[i - 1] == "require_named_user()", lines
+    assert found == 2
 
 
 def test_pay_selected_checks_administrator_like_everyone():
@@ -569,10 +632,17 @@ LABELS = {"schedule_maker_checker": ("Check", "Who Sends a Payout Must Not Be Wh
           "supplier_account_hold_hours": ("Int", "Hold New Supplier M-Pesa Accounts (Hours)"),
           "employee_account_hold_hours": ("Int", "Hold New Employee M-Pesa Accounts (Hours)"),
           "integration_user": ("Link", "Integration User"),
-          "notify_role": ("Link", "Notify Role")}
+          "notify_role": ("Link", "Notify Role"),
+          "b2c_approved_phones_only": ("Check", "Pay Employees by B2C Only to Approved Phones"),
+          "allow_claim_payees": ("Check", "Allow Paying Merchants and Casual Payees from Expense Claims"),
+          "claim_payee_max_amount": ("Currency",
+                                     "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap)"),
+          "claim_payee_daily_cap": ("Currency", "Most per Day to Such Payees, per Company (0 = no cap)"),
+          "enforce_ip_allowlist": ("Check", "Enforce IP Allow-list")}
 SAFE = dict(schedule_maker_checker=1, refuse_administrator_payouts=1, allow_one_off_b2b=0,
             supplier_account_hold_hours=24, employee_account_hold_hours=24, integration_user="mpesa@x",
-            notify_role="Accounts Manager")
+            notify_role="Accounts Manager", b2c_approved_phones_only=1, allow_claim_payees=0,
+            claim_payee_max_amount=0, claim_payee_daily_cap=0, enforce_ip_allowlist=0)
 
 
 @pytest.fixture
@@ -582,7 +652,8 @@ def settings(env, monkeypatch):
     module = importlib.import_module("mpsa_suite.mpsa_suite.doctype.m_pesa_suite_settings.m_pesa_suite_settings")
     accounts = importlib.import_module("mpsa_suite.money_out.party_accounts")
     alerts, comments = [], []
-    monkeypatch.setattr(accounts, "alert", lambda message, doc: alerts.append((message, doc.doctype)))
+    monkeypatch.setattr(accounts, "alert",
+                        lambda message, doc, roles=None: alerts.append((message, doc.doctype, roles)))
 
     def make(before, **now):
         doc = module.MPesaSuiteSettings()
@@ -605,7 +676,7 @@ def test_switching_off_maker_checker_or_the_administrator_refusal_alerts_the_not
     message = ("it@example.com changed M-Pesa Suite Settings: Who Sends a Payout Must Not Be Who Prepared It from on "
                "to off; Administrator May Not Send Payouts or Approve Accounts from on to off.")
     assert comments == [("Comment", message)]
-    assert alerts == [(message, "M-Pesa Suite Settings")]
+    assert alerts == [(message, "M-Pesa Suite Settings", ["Accounts Manager"])]
 
 
 @pytest.mark.parametrize("change,text", [
@@ -614,6 +685,12 @@ def test_switching_off_maker_checker_or_the_administrator_refusal_alerts_the_not
     (dict(employee_account_hold_hours=2), "Hold New Employee M-Pesa Accounts (Hours) from 24 to 2"),
     (dict(integration_user="someone@x"), "Integration User from mpesa@x to someone@x"),
     (dict(integration_user=None), "Integration User from mpesa@x to not set"),
+    (dict(b2c_approved_phones_only=0), "Pay Employees by B2C Only to Approved Phones from on to off"),
+    (dict(allow_claim_payees=1), "Allow Paying Merchants and Casual Payees from Expense Claims from off to on"),
+    (dict(claim_payee_max_amount=5000),
+     "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap) from 0 to 5,000"),
+    (dict(claim_payee_daily_cap=12500.5), "Most per Day to Such Payees, per Company (0 = no cap) from 0 to 12,500.50"),
+    (dict(notify_role="HR Manager"), "Notify Role from Accounts Manager to HR Manager"),
 ])
 def test_each_payout_safety_change_is_told(settings, change, text):
     make, alerts, comments = settings
@@ -621,9 +698,25 @@ def test_each_payout_safety_change_is_told(settings, change, text):
     assert text in comments[0][1] and len(alerts) == 1
 
 
+def test_a_save_that_also_changes_the_notify_role_tells_the_old_role_and_the_new(settings):
+    # a role nobody holds, with maker-checker off in the same save: the old role still hears of both
+    make, alerts, _comments = settings
+    make(SAFE, notify_role="Nobody's Role", schedule_maker_checker=0).alert_safety_changes()
+    (message, _doctype, roles), = alerts
+    assert roles == ["Accounts Manager", "Nobody's Role"]
+    assert "Notify Role from Accounts Manager to Nobody's Role" in message and "Prepared It from on to off" in message
+    alerts.clear()
+    make(SAFE, notify_role=None).alert_safety_changes()
+    assert alerts[0][2] == ["Accounts Manager"]
+    alerts.clear()
+    make(dict(SAFE, notify_role=None), notify_role=None, allow_one_off_b2b=1).alert_safety_changes()
+    assert alerts[0][2] is None  # none set before or after: the alert finds the default role itself
+
+
 def test_other_changes_and_the_first_save_tell_nobody(settings):
     make, alerts, comments = settings
-    make(SAFE, notify_role="HR Manager").alert_safety_changes()
+    make(SAFE, enforce_ip_allowlist=1).alert_safety_changes()  # not a payout-safety switch
+    make(dict(SAFE, claim_payee_max_amount=None), claim_payee_max_amount=0).alert_safety_changes()  # no cap either way
     make(dict(SAFE, schedule_maker_checker="1"), schedule_maker_checker=1).alert_safety_changes()  # same value
     make(None, schedule_maker_checker=0).alert_safety_changes()  # install
     assert alerts == comments == []

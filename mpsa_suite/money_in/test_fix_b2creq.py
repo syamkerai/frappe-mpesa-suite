@@ -2,9 +2,12 @@
 
 Rows and entries are written with db_insert, so no company, accounts or Mpesa Settings are
 needed. Nothing is ever sent: the send and the queue are patched. The concurrency tests
-commit their rows (a second connection must see them) and delete them again afterwards.
+commit their rows (a second connection must see them) and delete them again afterwards. Retries
+are a named M-Pesa Payer's (round 4): the shared Administrator login is refused
+(permissions.require_named_user).
 """
 
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 import frappe
@@ -12,6 +15,7 @@ from frappe.utils import add_days, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.connectors.mpesa import b2c_connector
+from mpsa_suite.money_in import testing as t
 from mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request import (
     b2c_disbursement_request as request_module,
 )
@@ -24,6 +28,13 @@ COMMITTED = (REQ, REF, PARENT, "Purchase Invoice", "Payment Entry", "Payment Ent
 
 
 class TestFixB2CRequests(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        frappe.set_user("Administrator")
+        cls.payer = t.payer()  # retries a payout (PAYOUT_ROLES, a named login)
+        frappe.db.commit()  # the user stays; each test rolls back to here
+
     def setUp(self):
         frappe.set_user("Administrator")
         self.tag = frappe.generate_hash(length=8)
@@ -236,10 +247,19 @@ class TestFixB2CRequests(IntegrationTestCase):
         self.assertIn("no M-Pesa receipt", error)
 
     # ------------------------------------------------------------ C13: retry guard
+    @contextmanager
+    def _as_payer(self):
+        """Retry as the named payer (Retry Failed Payment), then Administrator again."""
+        frappe.set_user(self.payer)
+        try:
+            yield
+        finally:
+            frappe.set_user("Administrator")
+
     def _retry(self, request):
         doc = frappe.get_doc(REQ, request)
         sent = Mock()
-        with patch.object(request_module, "make_b2c_payment_request", sent):
+        with patch.object(request_module, "make_b2c_payment_request", sent), self._as_payer():
             doc.retry_failed_payment()
         return sent
 
@@ -247,6 +267,7 @@ class TestFixB2CRequests(IntegrationTestCase):
         sent = Mock()
         with (
             patch.object(request_module, "make_b2c_payment_request", sent),
+            self._as_payer(),
             self.assertRaisesRegex(frappe.ValidationError, message),
         ):
             (doc or frappe.get_doc(REQ, request)).retry_failed_payment()
@@ -331,6 +352,7 @@ class TestFixB2CRequests(IntegrationTestCase):
         with (
             patch.object(request_module, "make_b2c_payment_request", sent),
             patch("frappe.log_error") as log_error,
+            self._as_payer(),
         ):
             frappe.get_doc(PARENT, d1).retry_failed_payments()
 
@@ -340,6 +362,22 @@ class TestFixB2CRequests(IntegrationTestCase):
         self.assertIn(refused, logged)
         self.assertIn("owes 0.0", logged)
         self._assert_unchanged(refused)
+
+    def test_retry_failed_transactions_refuses_the_shared_administrator_login(self):
+        """Round 4 (decision 1): refused before any row is retried, not only in the log."""
+        d1 = self._disbursement()
+        _, request = self._row(d1, 1, self._invoice(50000), 50000, status="Failed")
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        sent = Mock()
+        try:
+            with patch.object(request_module, "make_b2c_payment_request", sent):
+                self.assertRaisesRegex(frappe.PermissionError, "Use your own login",
+                                       frappe.get_doc(PARENT, d1).retry_failed_payments)
+        finally:
+            frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        sent.assert_not_called()
+        self._assert_unchanged(request)
 
     def test_retry_reads_the_status_a_concurrent_retry_committed(self):
         pinv = self._invoice(50000)

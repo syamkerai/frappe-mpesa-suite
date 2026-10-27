@@ -4,14 +4,16 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, cstr
+from frappe.utils import cint, cstr, flt
 
 from ....daraja.guard import parse_allowlist
 from ....permissions import CONFIG_ROLES, require
 
 # Switches that guard who sends payouts and where: a change to any is written on the settings and
 # sent to the Notify Role, naming who changed what (turning off maker-checker, allowing one-off
-# B2B, shortening the hold on new payee accounts, another Integration User, Administrator sends).
+# B2B, shortening the hold on new payee accounts, another Integration User, Administrator sends,
+# employees paid to phones not approved, paying merchants and casual payees and their caps, and
+# the Notify Role itself: that alert goes to the old role and the new one).
 WATCHED = (
     "schedule_maker_checker",
     "refuse_administrator_payouts",
@@ -19,6 +21,11 @@ WATCHED = (
     "supplier_account_hold_hours",
     "employee_account_hold_hours",
     "integration_user",
+    "notify_role",
+    "b2c_approved_phones_only",
+    "allow_claim_payees",
+    "claim_payee_max_amount",
+    "claim_payee_daily_cap",
 )
 
 
@@ -41,7 +48,9 @@ class MPesaSuiteSettings(Document):
         self.alert_safety_changes()
 
     def alert_safety_changes(self):
-        """A comment on the settings and an alert to the Notify Role for each WATCHED change."""
+        """A comment on the settings and an alert to the Notify Role for each WATCHED change: the
+        role before this save and the one after it, so a save that also changes the Notify Role
+        cannot send the alert to nobody (the database already holds the new role here)."""
         before = self.get_doc_before_save()
         if not before:
             return  # first save (install)
@@ -58,7 +67,8 @@ class MPesaSuiteSettings(Document):
 
         message = _("{0} changed M-Pesa Suite Settings: {1}.").format(frappe.session.user, "; ".join(changes))
         self.add_comment("Comment", message)
-        alert(message, self)
+        roles = [r for r in dict.fromkeys(cstr(d.get("notify_role")).strip() for d in (before, self)) if r]
+        alert(message, self, roles=roles or None)
 
     @frappe.whitelist()
     def regenerate_callback_token(self):
@@ -85,4 +95,6 @@ def _shown(df, value) -> str:
         return _("on") if cint(value) else _("off")
     if df.fieldtype == "Int":
         return str(cint(value))
+    if df.fieldtype in ("Currency", "Float"):
+        return f"{flt(value, 2):,.2f}".removesuffix(".00")
     return cstr(value).strip() or _("not set")

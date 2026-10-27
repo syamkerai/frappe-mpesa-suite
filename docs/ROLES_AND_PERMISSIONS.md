@@ -13,7 +13,7 @@ document drifts from them, and when a whitelisted function has no server-side ch
 
 | Role | Job | Created by |
 |---|---|---|
-| System Manager | Site administrator (IT). Changes permissions and configures the suite (settings, Daraja secrets: `CONFIG_ROLES`). Since round 4 (D5) it does not send payouts, approve payee accounts or see salary payouts: those need the M-Pesa roles below, held by named people. | Frappe |
+| System Manager | Site administrator (IT). Changes permissions and configures the suite (settings, Daraja secrets: `CONFIG_ROLES`). Since round 4 (D5) it does not prepare or send payouts, approve payee accounts or see salary payouts: it reads payouts, their schedules and supplier accounts, and has no access to Employee M-Pesa Accounts. That work needs the M-Pesa roles below (or an Accounts / HR role to prepare), held by named people. | Frappe |
 | M-Pesa Manager | M-Pesa administrator: settings, Daraja secrets, shortcodes, C2B/Pull registration, approves payee accounts (Approve), releases held receipts, settles Unknown payouts, resets M-Pesa permissions. | the suite (`install.SUITE_ROLES`) |
 | M-Pesa Payer | Sends payouts (B2C, B2B, reversals) from documents others prepared, with **Send via M-Pesa** (D6); retries failed ones. | the suite |
 | M-Pesa Collector | Sends STK prompts and attaches received payments to invoices. | the suite |
@@ -43,9 +43,10 @@ Separation of duties the code enforces:
   Actions > Submit, REST, `frappe.client.submit`, `run_doc_method`) is refused at `before_submit`
   (`money_out/send_confirm.py`). Pay Selected and the jobs of a sent disbursement are deliberate
   steps of their own.
-- **Named logins** (D5): the shared Administrator login may not send, retry, Pay Selected or
-  confirm a receiver name while M-Pesa Suite Settings > "Administrator May Not Send Payouts or
-  Approve Accounts" is on (the default); installs, migrates and patches are not refused.
+- **Named logins** (D5): the shared Administrator login may not send, retry, Pay Selected,
+  confirm a receiver name, cancel a payout that may have been paid or plan its line again while
+  M-Pesa Suite Settings > "Administrator May Not Send Payouts or Approve Accounts" is on (the
+  default); installs, migrates and patches are not refused.
 - **Secrets** (Daraja credentials, the callback token, API client secrets) are visible to
   `CONFIG_ROLES` only: System Manager and M-Pesa Manager.
 - **Salary payouts** (each employee's net pay, phone and bank account) are visible to
@@ -54,8 +55,10 @@ Separation of duties the code enforces:
   `money_out/salary_access.py`). System Manager left the set with D5 (HRMS does not let it read
   Salary Slips either); Administrator still sees them.
 - **Payout-safety settings**: switching off maker-checker or the Administrator refusal, allowing
-  one-off B2B, changing a hold period or the Integration User is written on M-Pesa Suite Settings
-  as a comment and sent to its Notify Role, naming who changed what.
+  one-off B2B, changing a hold period, the Integration User, the Notify Role, "Pay Employees by
+  B2C Only to Approved Phones", or paying merchants and casual payees and their caps is written on
+  M-Pesa Suite Settings as a comment and sent to its Notify Role, naming who changed what. A save
+  that changes the Notify Role tells the role before it and the one after it.
 
 ## 2. Audit findings, ranked
 
@@ -78,9 +81,9 @@ Line numbers are on this branch. "Fixed" means fixed here, with tests.
 | G14 | Medium | **Reports refuse readers of their Link columns.** Frappe drops or refuses every report row whose Link column points at a document the reader cannot read (`frappe.desk.query_report.get_filtered_data`), but only once the report has rows. M-Pesa Payments Due had a hidden Currency Link, which a Payer or Viewer cannot read on Frappe 15, so their main screen failed as soon as a line existed. The four upstream reports link to Payment Request and Entry, invoices, Customer and Mode of Payment, which only Accounts (and for some, Sales) roles read; upstream lists Sales User on two of them and HR Manager on B2C Disbursement Summary, roles that cannot read all those links. | `m_pesa_payments_due.py` columns; the upstream report JSON | Fixed for Payments Due (the column is Data). The suite roles stay off the upstream reports (their users reach them through Accounts User / Sales User). The upstream Sales User / HR Manager listing is left as it was: a follow-up decides between dropping those roles and changing the columns |
 | G15 | **High** | **Salary data shown to roles that cannot read Salary Slips** (found in the payouts Phase 3 review). Payroll schedules and their lines in M-Pesa Payments Due, B2C payouts and B2B requests to employees, their status queries and Employee M-Pesa Accounts showed each employee's net pay, phone and bank account to Accounts User, Accounts Manager and M-Pesa Viewer. | the five payout DocTypes, Employee M-Pesa Account, the two reports | Fixed after decision D4: row-level `has_permission` and `permission_query_conditions` hooks, Employee M-Pesa Account rights, and filters in M-Pesa Payments Due and B2C Disbursement Summary |
 | G16 | **High** | **A submitted B2C payout's M-Pesa answer could be rewritten by one payer** (found merging payouts Phase 3). Its status, send marker and result fields allow on submit, so the Result can save them, and Frappe does not enforce read only on the server. A save after submit needs submit, so any M-Pesa Payer (or M-Pesa Manager, System Manager) could save a paid scheduled payout as Failed, or clear its send marker; the payment schedule would then treat it as never sent and let it be paid again: a second payment of the same salary or bill, by one person, with the records showing a single payment. | `b2c_disbursement_request.py` | Fixed: `before_update_after_submit` writes back what the database holds for those fields on every save that checked permissions (form, API); the Result saves with `ignore_permissions` and keeps its values. The B2B request already did this |
-| G17 | **High** | **The shared Administrator login skipped the checks** (round 4 review, handover F3). `require()` lets Administrator through, maker-checker returned early for it, Pay Selected's maker-checker and one-off rule exempted it, and payee-account approval skipped the "you entered it" check for it: one login entered and approved the same account on a live site. | `permissions.py:require`, `money_out/maker_checker.py:check`, `money_out/schedule.py:line_problem`, `:_send_problem`, `money_out/party_accounts.py:approve` | Fixed: M-Pesa Suite Settings "Administrator May Not Send Payouts or Approve Accounts" (on by default, on after migrate) and `permissions.require_named_user()` first in every payout `before_submit`, both retries, Pay Selected (summary and confirm), Receiver Name Confirmed and Send via M-Pesa; the exemptions in maker-checker and Pay Selected are gone (the payee-account approval's goes with the payee-account work, WP2). `salary_access` keeps Administrator's view |
+| G17 | **High** | **The shared Administrator login skipped the checks** (round 4 review, handover F3). `require()` lets Administrator through, maker-checker returned early for it, Pay Selected's maker-checker and one-off rule exempted it, and payee-account approval skipped the "you entered it" check for it: one login entered and approved the same account on a live site. Cancelling a payout that may have been paid (B2B Unknown, Initiated or interrupted; a scheduled B2C one Initiated or Status Unknown) and planning its line again rely on "a manager checked the statement", which Administrator passed. | `permissions.py:require`, `money_out/maker_checker.py:check`, `money_out/schedule.py:line_problem`, `:_send_problem`, `:plan_again`, `:_check_b2c_not_paid`, the B2B and B2C requests' `before_cancel`, `money_out/party_accounts.py:approve` | Fixed: M-Pesa Suite Settings "Administrator May Not Send Payouts or Approve Accounts" (on by default, on after migrate) and `permissions.require_named_user()` first in every payout `before_submit`, both retries, Pay Selected (summary and confirm), Receiver Name Confirmed and Send via M-Pesa, and next to `require(ADMIN_ROLES)` in the maybe-paid cancels and Plan Again's manager path; the exemptions in maker-checker, Pay Selected and Plan Again are gone (the payee-account approval's goes with the payee-account work, WP2). `salary_access` keeps Administrator's view |
 | G18 | **High** | **List bulk Submit and the other submit routes sent money.** Frappe offers Actions > Submit on every submittable DocType without a Workflow to anyone with submit (v15 `list_view.js:2109`, v16 `:3189`): bulk send of payouts, bulk approval of payee accounts, enqueued as the same user from 20 documents. REST (`docstatus` 1), `frappe.client.submit`, `run_doc_method` and the form's own Submit reach the same `doc.submit()`. | Frappe `bulk_update.py`, `client.py`, `document.py`; the six DocTypes | Fixed: Send via M-Pesa / Approve (`money_out/send_confirm.py`) is the only submit; `assert_deliberate` at the top of the four payouts' `before_submit` refuses the rest with a plain message (the bulk action reports each document as failed). The list menu no longer offers Submit on these DocTypes (`public/js/mpsa_send.js`) |
-| G19 | **High** | **System Manager could send, approve and see salaries.** It was in `PAYOUT_ROLES`, `ADMIN_ROLES` and `SALARY_ROLES` and held submit and cancel on every payout and payee-account DocType; on Trident 11 System Managers would have sent money and approved payee accounts after the deploy. | `permissions.py`, `permission_matrix.py` | Fixed after decision D5: System Manager keeps `CONFIG_ROLES` (settings, secrets), collects and queries; its rows on the six DocTypes are PREPARE (no submit or cancel) |
+| G19 | **High** | **System Manager could send, approve and see salaries.** It was in `PAYOUT_ROLES`, `ADMIN_ROLES` and `SALARY_ROLES` and held submit and cancel on every payout and payee-account DocType; on Trident 11 System Managers would have sent money and approved payee accounts after the deploy. It also prepared payouts (create, write, delete on the payouts, their schedule and the payee accounts; Move Date, Plan Again, Close Schedule and the payroll schedule through `FINANCE_ROLES`) and read every employee's salary phone and bank account on Employee M-Pesa Account. | `permissions.py`, `permission_matrix.py`, `money_out/schedule.py`, `money_out/payroll.py` | Fixed after decision D5: System Manager keeps `CONFIG_ROLES` (settings, secrets), collects and queries. It reads (`rRep`) the four payouts, M-Pesa Payment Schedule and Supplier M-Pesa Account, and has no row on Employee M-Pesa Account; the schedule's prepare endpoints check `PREPARE_ROLES`. M-Pesa Payments Due offers Pay Selected, Move Date and Plan Again from `frappe.boot.mpsa` |
 | G20 | Medium | **Maker-checker missed who and what is paid.** On B2B it compared only amount, shortcode, supplier and supplier account; not the employee, the employee account, the slip, invoice or order, the paybill, account and command; on B2C rows not the document, on B2C requests not the document or party. The submitting save could change who or what was paid unnoticed. | `money_out/maker_checker.py:PAID` | Fixed (round 4 foundation): every field that decides who is paid, how much, from where and for which document; the Send via M-Pesa token is bound to the same fields |
 | G21 | Medium | **A reversal had no maker-checker.** Whoever pressed Make Reversal could submit it straight away: one person returned a customer's payment. | `mpesa_reversal_request.py:before_submit` | Fixed: maker-checker as on the other payouts (receipt, register, amount, shortcode), behind the same switch |
 | G13 | Info | Supplier M-Pesa Account grants share to Accounts User, M-Pesa Payer and Purchase Manager. Frappe 15 and 16 let a user share only rights they hold, and approving needs `ADMIN_ROLES` on the server, so sharing cannot approve an account. | `supplier_m_pesa_account.json` | No change (payouts Phase 3 mirrors this DocType) |
@@ -142,14 +145,14 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 | DocType | SysMgr | M-Pesa Mgr | Payer | Collector | Viewer | Acc Mgr | Acc User | HR Mgr | HR User | Sales User | Pur Mgr | Pur User |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| B2C Disbursement Request | `rwcadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
-| B2C Payment Disbursement | `rwcadRepmh` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
-| Employee M-Pesa Account | `rwcadRepmh` | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
+| B2C Disbursement Request | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
+| B2C Payment Disbursement | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
+| Employee M-Pesa Account |  | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
 | M-Pesa Bank Paybill | `rwcdRe` | `rwcdRe` | `rRe` |  | `rRe` | `rRe` | `rRe` | `rRe` | `rRe` |  | `rRe` |  |
-| M-Pesa Payment Schedule | `rwcdRepmh` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
+| M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa B2B Payment Request | `rwcadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` |  |  |  |  |  |
+| Mpesa B2B Payment Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` |  |  |  |  |  |
 | Mpesa B2C Status Query | `rdRep` | `rRep` | `rRep` |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Balance Snapshot | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa C2B Payment Register | `rwdRepmh` | `rwsxaRepmh` | `rRp` | `rRp` | `rRep` | `rwsxaRepmh` | `rwsRepmh` |  |  | `rwsRepmh` |  |  |
@@ -158,14 +161,14 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | Mpesa Match Log | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Payment Intent | `rwcdRepmh` | `rwcdRepmh` |  | `rRep` | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Public Key Certificate | `rwcdpmh` | `rwc` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa Reversal Request | `rwcadRepmh` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |
+| Mpesa Reversal Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |
 | Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
 | Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `S` | `S` | `S` | `S` | `S` |  |  |  |  |  |
 | Mpesa Statement Import | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rwcdRep` | `rRep` |  |  |  |  |  |
 | Mpesa Statement Row | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
 | Mpesa Webhook Delivery | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
 | Payment Gateway | `rwcd` |  |  |  |  |  |  |  |  |  |  |  |
-| Supplier M-Pesa Account | `rwcadRepmh` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` |  |  |  | `rwcaRepmh` | `rRep` |
+| Supplier M-Pesa Account | `rRep` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` |  |  |  | `rwcaRepmh` | `rRep` |
 
 ### Role sets of the server checks (mpsa_suite/permissions.py)
 
@@ -181,7 +184,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 
 ### Salary payouts (decision D4)
 
-Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` (`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on every site.
+Rows that pay an employee (Payroll schedules and employee lines, B2C payouts and B2B requests to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the DocType rights above: M-Pesa Payment Schedule, B2C Payment Disbursement, B2C Disbursement Request, Mpesa B2B Payment Request, Mpesa B2C Status Query. Employee M-Pesa Account is closed to other roles, System Manager included, by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` (`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on every site.
 
 ### Report roles
 
@@ -238,13 +241,13 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
-| `money_out.payroll.from_payroll_entry` | FINANCE_ROLES + read the Payroll Entry + create a schedule | roles:FINANCE_ROLES, perm |
+| `money_out.payroll.from_payroll_entry` | PREPARE_ROLES + read the Payroll Entry + create a schedule | roles:PREPARE_ROLES, perm |
 | `money_out.payroll.payroll_status` | Read the Payroll Entry | perm |
-| `money_out.schedule.close_schedule` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.close_schedule` | PREPARE_ROLES + write the schedule | roles:PREPARE_ROLES, perm |
 | `money_out.schedule.confirm_payment` | PAYOUT_ROLES, the user the summary was made for | roles:PAYOUT_ROLES |
-| `money_out.schedule.from_payroll_entry` | FINANCE_ROLES + read the Payroll Entry + create a schedule | via:from_payroll_entry |
-| `money_out.schedule.move_date` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
-| `money_out.schedule.plan_again` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
+| `money_out.schedule.from_payroll_entry` | PREPARE_ROLES + read the Payroll Entry + create a schedule | via:from_payroll_entry |
+| `money_out.schedule.move_date` | PREPARE_ROLES + write the schedule | roles:PREPARE_ROLES, perm |
+| `money_out.schedule.plan_again` | PREPARE_ROLES + write the schedule | roles:PREPARE_ROLES, perm |
 | `money_out.schedule.prepare_payment` | PAYOUT_ROLES + read the schedule | roles:PAYOUT_ROLES, perm |
 | `money_out.send_confirm.confirm_send` | As prepare_send, and the user the summary was made for | via:_sendable |
 | `money_out.send_confirm.prepare_send` | PAYOUT_ROLES (ADMIN_ROLES to approve a payee account), a named login, submit on the document | via:_sendable |
@@ -409,8 +412,8 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 | M-Pesa Collector | New Mpesa Express Request and Submit (a KES 1 prompt to your own phone, by the user); quick pay on a draft invoice | Mpesa Settings credentials; submitting B2C or B2B; Supplier M-Pesa Account approval |
 | Accounts User (Finance Clerk) | Draft B2B request and B2C request; a payment schedule line and Move Date; Make Entry / Check Entry Again; Refresh Balances on M-Pesa Payments Due; Transaction Status Query from the C2B register list | Submitting a B2B request and Pay Selected (need a pay role); approving a Supplier M-Pesa Account; opening Mpesa Settings |
 | M-Pesa Payer | Send via M-Pesa on a B2B request an Accounts User prepared (sandbox, or KES 10 sent by the user): the summary shows the receiver, destination and amount, Confirm works after 5 seconds; Pay Selected on M-Pesa Payments Due for a line someone else prepared; Send via M-Pesa on a B2C disbursement; retry a failed B2C | Send via M-Pesa on a payout they prepared or last changed, and Pay Selected on such a line (maker-checker on); Actions > Submit on the payout lists (not offered; an API submit is refused); editing a schedule; approving a Supplier M-Pesa Account; editing Mpesa Settings; seeing credentials |
-| System Manager | M-Pesa Suite Settings and Mpesa Settings, credentials; Check Permissions; drafts of payouts and payee accounts | Send via M-Pesa, Approve, Pay Selected (no button; refused by the server); salary payouts (employee B2C/B2B, payroll schedules) |
-| Administrator (shared login) | Configuration, as System Manager | Send via M-Pesa, Approve, Pay Selected, retries, Receiver Name Confirmed ("Use your own login") while the Suite setting is on |
+| System Manager | M-Pesa Suite Settings and Mpesa Settings, credentials; Check Permissions; the bank paybill list; reading supplier payouts, schedules and Supplier M-Pesa Accounts | New, edit or delete a payout, a schedule or a Supplier M-Pesa Account; Move Date, Plan Again, Close Schedule, Create M-Pesa Payment Schedule; Send via M-Pesa, Approve, Pay Selected (no button; refused by the server); Employee M-Pesa Accounts (not in the list, the form or the Employee's dashboard); salary payouts (employee B2C/B2B, payroll schedules) |
+| Administrator (shared login) | Configuration, as System Manager | Send via M-Pesa, Approve, Pay Selected, retries, Receiver Name Confirmed, cancelling a payout that may have been paid and planning its line again ("Use your own login") while the Suite setting is on |
 | HR Manager / HR User | An Employee M-Pesa Account as a draft; a B2C payroll disbursement as a draft | Approving an Employee M-Pesa Account; submitting (sending) a B2C disbursement; Create M-Pesa Payment Schedule on a Payroll Entry (an Accounts role prepares it) |
 | M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; Check Permissions | Approving an account they entered themselves |
 | Portal / website user | nothing M-Pesa | `/api/v2/method/Mpesa Express Request/initiate_stk_push` and `/api/v2/method/Mpesa Settings/get_account_balance?name=<record>` answer 403 |
@@ -463,11 +466,15 @@ Round 4 (send safety and roles), on every site at once:
 
 - **Only named payers send** (D5): System Manager can no longer send a payout, Pay Selected, retry,
   approve a payee account, do the other `ADMIN_ROLES` work (C2B/Pull registration by hand, Unknown
-  payouts, reconcile by hand, the Sandbox Lab) or see salary payouts. Give the people who do this
-  work M-Pesa Payer or M-Pesa Manager. The shared Administrator login is refused for sends,
-  approvals, Pay Selected, retries and Receiver Name Confirmed ("Use your own login"); a site
-  that must still pay from it switches M-Pesa Suite Settings > "Administrator May Not Send
-  Payouts or Approve Accounts" off (an alert tells the Notify Role).
+  payouts, reconcile by hand, the Sandbox Lab) or see salary payouts. Nor does it prepare: it
+  reads the payouts, schedules and Supplier M-Pesa Accounts but creates, changes and deletes none
+  of them, cannot Move Date, Plan Again, Close Schedule or Create M-Pesa Payment Schedule, and no
+  longer opens Employee M-Pesa Accounts at all. Give the people who do this work M-Pesa Payer or
+  M-Pesa Manager (an Accounts or HR role to prepare). The shared Administrator login is refused
+  for sends, approvals, Pay Selected, retries, Receiver Name Confirmed, cancelling a payout that
+  may have been paid and planning its line again ("Use your own login"); a site that must still
+  pay from it switches M-Pesa Suite Settings > "Administrator May Not Send Payouts or Approve
+  Accounts" off (an alert tells the Notify Role).
 - **Send via M-Pesa replaces Submit** (D6) on B2B requests, B2C disbursements and requests and
   reversals, and **Approve** on Supplier and Employee M-Pesa Accounts: a summary, then Confirm
   after 5 seconds. The list's Actions > Submit is gone from these lists; a script, REST call or
@@ -475,8 +482,9 @@ Round 4 (send safety and roles), on every site at once:
   wrapped in `send_confirm.deliberate`).
 - **Maker-checker** now covers reversals (whoever pressed Make Reversal does not send it) and
   Administrator.
-- Changing maker-checker, the Administrator refusal, one-off B2B, the hold hours or the
-  Integration User alerts the Notify Role.
+- Changing maker-checker, the Administrator refusal, one-off B2B, the hold hours, the
+  Integration User, the Notify Role, approved phones only for employees' B2C, or the merchant and
+  casual payee switch and caps alerts the Notify Role (the old and the new one).
 
 ## 9. Decisions taken (the user, 2026-10-23)
 
@@ -508,9 +516,13 @@ Round 4 (the user, 2026-10-27):
 
 - **D5. Only named payers send.** `PAYOUT_ROLES` = M-Pesa Manager and M-Pesa Payer;
   `ADMIN_ROLES` (approve payee accounts) = M-Pesa Manager; `SALARY_ROLES` without System Manager;
-  `CONFIG_ROLES` unchanged (System Manager, M-Pesa Manager). The shared Administrator login is
-  refused for sends and approvals (`refuse_administrator_payouts`, on by default). Supersedes the
-  System Manager parts of D1, D2 and D4, and D3's Administrator exemption.
+  `CONFIG_ROLES` unchanged (System Manager, M-Pesa Manager). System Manager is configuration only:
+  read only on the payout DocTypes, M-Pesa Payment Schedule and Supplier M-Pesa Account, no access
+  to Employee M-Pesa Account, full rights on the configuration DocTypes; the schedule's prepare
+  endpoints are `PREPARE_ROLES`. The shared Administrator login is refused for sends and
+  approvals, and so for a manager's statement check (`refuse_administrator_payouts`, on by
+  default). Supersedes the System Manager parts of D1, D2 and D4, and D3's Administrator
+  exemption.
 - **D6. Send via M-Pesa replaces Submit** on the payout DocTypes, and Approve on the payee
   accounts: a server token bound to the user, the document, its modified time, amount and
   destination; any submit without it is refused.

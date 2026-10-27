@@ -371,10 +371,52 @@ class TestRolesPermissions(IntegrationTestCase):
         for role in (M.AM, M.AU, M.MV, M.HM):
             with self.as_user(user_for(role)):
                 self.refused(path, doctype="Mpesa B2B Payment Request", name=name)
-        with self.as_user(user_for(M.MP)):  # through the gate: the summary of what it would send
-            answer = json.loads(self.call(path, doctype="Mpesa B2B Payment Request", name=name).get_data())
-        self.assertEqual((answer["message"]["name"], answer["message"]["action"]), (name, "Send via M-Pesa"))
-        self.assertTrue(answer["message"]["token"])
+        from mpsa_suite.money_out import send_confirm
+
+        confirm = "/api/method/mpsa_suite.money_out.send_confirm.confirm_send"
+        with patch.object(send_confirm, "_clock", return_value=1000.0):  # no time passes between the calls
+            with self.as_user(user_for(M.MP)):  # through the gate: the summary of what it would send
+                answer = json.loads(self.call(path, doctype="Mpesa B2B Payment Request", name=name).get_data())
+            self.assertEqual((answer["message"]["name"], answer["message"]["action"]), (name, "Send via M-Pesa"))
+            token = answer["message"]["token"]
+            self.assertTrue(token)
+            # Confirm through the API: not for another payer, not before the 5 seconds (the token stays)
+            with self.as_user(user_for(M.MM)), self.assertRaisesRegex(frappe.ValidationError, "made for another user"):
+                self.call(confirm, doctype="Mpesa B2B Payment Request", name=name, token=token)
+            with self.as_user(user_for(M.MP)), self.assertRaisesRegex(frappe.ValidationError, "Read the summary first"):
+                self.call(confirm, doctype="Mpesa B2B Payment Request", name=name, token=token)
+        self.assertEqual(frappe.db.get_value("Mpesa B2B Payment Request", name, "docstatus"), 0)
+        self.assertTrue(send_confirm.get_cache().get_value(send_confirm._token_key(token)))  # not used up
+
+    def test_system_manager_configures_and_reads_but_prepares_nothing(self):
+        """Decision 1 (2026-10-27): System Manager reads the payouts, their schedule and the supplier
+        accounts; it creates, changes and deletes none of them, has no access at all to Employee M-Pesa
+        Accounts (employees' salary phones and bank accounts), and the schedule's prepare endpoints
+        refuse it. Its rights on the suite's settings stay."""
+        from mpsa_suite.money_out import payroll, schedule
+        from mpsa_suite.mpsa_suite.doctype.employee_m_pesa_account import (
+            employee_m_pesa_account,
+        )
+
+        sm_user = _user(f"sysmgr@{DOMAIN}", [M.SM])
+        for doctype in ("B2C Disbursement Request", "B2C Payment Disbursement", "Mpesa B2B Payment Request",
+                        "Mpesa Reversal Request", "Supplier M-Pesa Account", "M-Pesa Payment Schedule"):
+            for ptype in ("read", "report", "export", "print"):
+                self.assertTrue(frappe.has_permission(doctype, ptype, user=sm_user), f"{doctype} {ptype}")
+            for ptype in ("create", "write", "delete", "submit", "cancel", "amend", "email", "share"):
+                self.assertFalse(frappe.has_permission(doctype, ptype, user=sm_user), f"{doctype} {ptype}")
+        for ptype in ("read", "select", "report", "export", "create", "write"):
+            self.assertFalse(frappe.has_permission("Employee M-Pesa Account", ptype, user=sm_user), ptype)
+        for doctype in ("M-Pesa Suite Settings", "Mpesa Settings", "M-Pesa Bank Paybill", "Mpesa API Client"):
+            self.assertTrue(frappe.has_permission(doctype, "write", user=sm_user), doctype)
+        with self.as_user(sm_user):
+            self.assertRaises(frappe.PermissionError, employee_m_pesa_account.accounts_for_employee, "HR-EMP-X")
+            for name, call in (("move_date", lambda: schedule.move_date(["X"], frappe.utils.nowdate())),
+                               ("plan_again", lambda: schedule.plan_again("X")),
+                               ("close_schedule", lambda: schedule.close_schedule("X")),
+                               ("from_payroll_entry", lambda: payroll.from_payroll_entry("X"))):
+                with self.assertRaises(frappe.PermissionError, msg=name):
+                    call()
 
     def test_only_mpesa_managers_do_admin_work(self):
         """D2: approving payee accounts and the other ADMIN_ROLES actions left Accounts Manager; D5:

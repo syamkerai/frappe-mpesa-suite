@@ -796,6 +796,17 @@ def test_b2b_cancel_of_a_request_that_may_have_paid_is_for_managers(env, monkeyp
     doc.before_cancel()
 
 
+@pytest.mark.parametrize("values", [{"status": "Initiated"}, {"status": "Unknown"},
+                                    {"status": "Not Initiated", "send_started_on": datetime.datetime(2026, 10, 18)}])
+def test_b2b_cancel_of_a_request_that_may_have_paid_is_not_for_the_shared_administrator_login(env, monkeypatch,
+                                                                                            values):
+    # decision 1: require() lets Administrator through, and it holds every role: a named manager only
+    doc, _ = _saved_after_submit(env, monkeypatch, **values)
+    env.frappe.session.user, env.frappe.user_roles = "Administrator", {"System Manager", "M-Pesa Manager"}
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        doc.before_cancel()
+
+
 def test_b2b_paid_request_cannot_be_cancelled(env, monkeypatch):
     doc, _ = _saved_after_submit(env, monkeypatch, status="Paid")
     env.frappe.user_roles = {"System Manager"}

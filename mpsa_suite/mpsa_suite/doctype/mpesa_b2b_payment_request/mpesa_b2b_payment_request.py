@@ -69,6 +69,7 @@ class MpesaB2BPaymentRequest(Document):
             # The schedule's send began and never recorded an answer: M-Pesa may have paid it
             # (R1). Only an admin who has checked the statement cancels it, and it is kept as
             # Unknown, so a late Result still matches it and the sweep's rule holds.
+            require_named_user()  # a named manager: the shared login checked no statement
             require(ADMIN_ROLES)
             self.status = "Unknown"
             self.error_message = INTERRUPTED
@@ -79,6 +80,7 @@ class MpesaB2BPaymentRequest(Document):
             # The payment may have gone through (an Initiated one whose Result never came): only
             # an admin who has checked the statement may cancel, and so allow a new request. A
             # Result that comes later is still recorded, and counts against the document.
+            require_named_user()
             require(ADMIN_ROLES)
             return
         frappe.throw(f"A B2B payment that is {self.status} cannot be cancelled")

@@ -27,6 +27,7 @@ SUPPLIER = "_T Schedule Supplier"
 ACCOUNT = "_T-MSA-SCHEDULE"
 BUYING = "_Test M-Pesa KES Buying"
 PREPARER, PAYER = "_t_sched_accounts@example.com", "_t_sched_payer@example.com"
+MANAGER = "_t_sched_manager@example.com"  # settles a payout that may have been paid (ADMIN_ROLES)
 SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, payout_lines_from=None, allow_one_off_b2b=0,
                     entry_reminder_days=3, schedule_maker_checker=1, send_interval_seconds=0)
 
@@ -83,6 +84,7 @@ class TestPaymentSchedule(IntegrationTestCase):
         frappe.db.set_value("Item", t.ITEM, "is_purchase_item", 1)
         _user(PREPARER, ("Accounts User",))
         _user(PAYER, ("M-Pesa Payer",))
+        _user(MANAGER, ("M-Pesa Manager",))
         # what an interrupted run committed for the test supplier (it exists only for these tests)
         frappe.db.delete(B2B, {"supplier": cls.supplier})
         for (name,) in frappe.db.sql(f"SELECT DISTINCT parent FROM `tab{LINE}` WHERE party = %s", cls.supplier):
@@ -261,6 +263,11 @@ class TestPaymentSchedule(IntegrationTestCase):
             frappe.db.set_value(LINE, line.name, {"request": req.name, "status": "Sending"}, update_modified=False)
             req.flags.mpesa_send_later = True
             self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", req.submit)
+            # the refused submit left this copy's modified changed in memory only (Frappe sets it
+            # before before_submit runs): a fresh copy, with the flags set by hand again
+            req = frappe.get_doc(B2B, req.name)
+            req.flags.mpesa_from_schedule = True
+            req.flags.mpesa_send_later = True
             with send_confirm.deliberate("a console", req):
                 self.assertRaisesRegex(frappe.ValidationError, "Not due until", req.submit)
             frappe.set_user("Administrator")
@@ -395,7 +402,15 @@ class TestPaymentSchedule(IntegrationTestCase):
         finally:
             frappe.set_user("Administrator")
         self.assertEqual(frappe.db.get_value(B2B, name, "docstatus"), 1)
-        frappe.get_doc(B2B, name).cancel()  # Administrator, after checking the statement
+        self._refuse_administrator()
+        # nor the shared Administrator login (decision 1): it holds every role but checked nothing
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", frappe.get_doc(B2B, name).cancel)
+        self.assertEqual(frappe.db.get_value(B2B, name, "docstatus"), 1)
+        frappe.set_user(MANAGER)
+        try:
+            frappe.get_doc(B2B, name).cancel()  # an M-Pesa Manager, after checking the statement
+        finally:
+            frappe.set_user("Administrator")
         self.assertEqual(frappe.db.get_value(B2B, name, ["docstatus", "status", "error_message"]),
                          (2, "Unknown", schedule.INTERRUPTED))
         self.assertRaisesRegex(frappe.ValidationError, "is the record of that payment", frappe.delete_doc, B2B, name)
@@ -412,8 +427,19 @@ class TestPaymentSchedule(IntegrationTestCase):
                                    line.name)
         finally:
             frappe.set_user("Administrator")
-        schedule.plan_again(line.name)
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", schedule.plan_again, line.name)
+        frappe.set_user(MANAGER)
+        try:
+            schedule.plan_again(line.name)
+        finally:
+            frappe.set_user("Administrator")
         self.assertEqual((self._line(line.name).status, self._line(line.name).request), ("Planned", None))
+
+    def _refuse_administrator(self):
+        """M-Pesa Suite Settings refuses the shared Administrator login (the default); tearDown
+        rolls the value back and clears the cached settings."""
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
 
     # ------------------------------------------------------------ planned lines and direct payments
     def test_a_planned_line_stops_a_direct_payment_beyond_what_is_left(self):

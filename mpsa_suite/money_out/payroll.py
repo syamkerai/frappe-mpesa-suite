@@ -26,7 +26,7 @@ from frappe.utils import cint, cstr, flt, getdate, nowdate
 
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..permissions import FINANCE_ROLES, require
+from ..permissions import PREPARE_ROLES, require
 from . import owed, party_accounts
 
 PAYROLL_ENTRY = "Payroll Entry"
@@ -81,9 +81,10 @@ def _slips(payroll_entry: str) -> list:
 
 @frappe.whitelist(methods=["POST"])
 def from_payroll_entry(payroll_entry, b2b_settings=None, b2c_settings=None, planned_date=None) -> dict:
-    """Build the Payroll Entry's M-Pesa Payment Schedule. Accounts (FINANCE_ROLES) prepare it, so
-    they are its lines' preparer: someone else pays them (maker-checker)."""
-    require(FINANCE_ROLES)
+    """Build the Payroll Entry's M-Pesa Payment Schedule. Who prepares payouts (PREPARE_ROLES, not
+    System Manager) with create on the schedule prepares it, so they are its lines' preparer:
+    someone else pays them (maker-checker)."""
+    require(PREPARE_ROLES)
     if not owed.hrms_installed():
         frappe.throw("Paying a payroll needs HRMS.")
     frappe.has_permission(PAYROLL_ENTRY, "read", doc=payroll_entry, throw=True)
