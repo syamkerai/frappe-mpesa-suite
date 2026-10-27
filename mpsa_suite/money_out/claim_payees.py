@@ -36,7 +36,7 @@ Account, approved once and then paid like any supplier.
 
 Each line's status follows its payouts (sync_lines): Draft (no payout), Queued (a payout not sent
 yet), In Flight, Paid, Failed (paid again with Retry failed payees), Cancelled (the claim was
-rejected or cancelled).
+rejected or cancelled, or an M-Pesa Manager settled a Draft or Failed line outside M-Pesa: settle_line).
 """
 
 import contextlib
@@ -552,6 +552,17 @@ def on_cancel_claim(doc, method=None) -> None:
             frappe.db.set_value(LINE, row.name, "status", CANCELLED, update_modified=False)
 
 
+def lines_paid_or_on_their_way(claim: str) -> list:
+    """The payouts of the claim's payee lines that paid it or may have (Paid or In Flight, as the
+    lines read them: a request cancelled while Initiated or Unknown too, b2b_state and b2c_state).
+    money_out.employee_documents.before_cancel refuses the claim's cancel while there is one: its
+    amended copy would start its lines afresh and pay them again."""
+    if not paid_in_parts(CLAIM, claim):
+        return []
+    payouts = payouts_of([r.name for r in read_lines(claim)])
+    return list(dict.fromkeys(p.name for p in payouts if p.state in (PAID, IN_FLIGHT)))
+
+
 # ---------------------------------------------------------------- a line's payouts and status
 def _locking(for_update: bool) -> str:
     return "FOR UPDATE" if for_update and frappe.db.db_type == "mariadb" else ""
@@ -694,9 +705,11 @@ def deciding_payout(payouts):
 
 
 def line_values(line, payouts, claim_docstatus) -> dict:
-    """A line's status and result from its payouts (pure)."""
+    """A line's status and result from its payouts (pure). A Cancelled line stays Cancelled, with its
+    note, while no payout of it is live (settle_line: settled outside M-Pesa after its payout failed)."""
     best = deciding_payout(payouts)
-    status = best.state if best else (CANCELLED if line.get("status") == CANCELLED else DRAFT)
+    settled = line.get("status") == CANCELLED and (not best or best.state == FAILED)
+    status = CANCELLED if settled else (best.state if best else DRAFT)
     if cint(claim_docstatus) == 2 and status not in (PAID, IN_FLIGHT):
         status = CANCELLED
     values = {
@@ -706,7 +719,7 @@ def line_values(line, payouts, claim_docstatus) -> dict:
         "receipt": best.receipt if best and status == PAID else None,
         "paid_on": best.paid_on if best and status == PAID else None,
         "receiver_name": (cstr(best.receiver_name).strip() or None) if best and status == PAID else None,
-        "error_message": best.error if best and status == FAILED else None,
+        "error_message": line.get("error_message") if settled else (best.error if best and status == FAILED else None),
     }
     paid = sorted({p.name for p in payouts if p.state == PAID})
     if len(paid) > 1:
@@ -928,9 +941,11 @@ def check_b2b(doc) -> None:
         frappe.throw(f"KES {money(doc.amount)} is not what payee row #{line.idx} of {claim} pays "
                      f"(KES {money(line.amount)}): a payee is paid its whole line.")
     if not sending:
+        _check_not_settled(line)
         _check_others(line, (B2B, doc.name))
         return
     with _day_lock(doc.company), owed.doc_lock(CLAIM, claim):
+        _check_not_settled(line, for_update=True)
         _check_others(line, (B2B, doc.name), for_update=True)
         _check_sending(claim, line, flt(doc.amount), (B2B, doc.name), doc.company, flt(doc.amount), doc)
 
@@ -983,9 +998,11 @@ def check_b2c_row(parent, row) -> None:
     if _sent_already(row):
         return  # an amended copy of a row its original sent: not sent again
     if cint(parent.docstatus) != 1:
+        _check_not_settled(line)
         _check_others(line, (B2C, parent.name))
         return
     with _day_lock(parent.get("company")), owed.doc_lock(CLAIM, line.parent):
+        _check_not_settled(line, for_update=True)
         _check_others(line, (B2C, parent.name), for_update=True)
         batch = _memo(parent, "mpsa_claim_payee_batch", lambda: _capped_rows_total(parent))
         _check_sending(line.parent, line, flt(row.allocated_amount), (B2C, parent.name), parent.get("company"),
@@ -1009,6 +1026,15 @@ def _capped_rows_total(parent) -> float:
     supplier = {r.name: r.supplier_account for r in frappe.get_all(
         LINE, filters={"name": ["in", [r.claim_payee for r in rows]]}, fields=["name", "supplier_account"])}
     return flt(sum(flt(r.allocated_amount) for r in rows if not supplier.get(r.claim_payee)), 2)
+
+
+def _check_not_settled(line, for_update: bool = False) -> None:
+    """A Cancelled line (settled outside M-Pesa: settle_line; or its claim was cancelled) is never paid
+    by M-Pesa. ``for_update``: read again with a lock, under the claim's lock (a send)."""
+    status = frappe.db.get_value(LINE, line.name, "status", for_update=True) if for_update else line.get("status")
+    if status == CANCELLED:
+        frappe.throw(f"Payee row #{line.idx} of {line.parent} ({line.payee_name}) is Cancelled: it is not paid by "
+                     "M-Pesa.")
 
 
 def _check_others(line, this: tuple, for_update: bool = False) -> None:
@@ -1055,6 +1081,7 @@ def check_retry(request: str) -> None:
     company = frappe.db.get_value(B2C, values.b2c_payment_disbursement, "company") or frappe.db.get_value(
         CLAIM, line.parent, "company")
     with _day_lock(company), owed.doc_lock(CLAIM, line.parent):
+        _check_not_settled(line, for_update=True)
         problem = retry_problem(request, for_update=True)
         if problem:
             frappe.throw(problem)
@@ -1499,6 +1526,43 @@ def repair_reimbursed(claim: str) -> dict:
         doc.add_comment("Comment", f"Total Amount Reimbursed repaired from {money(gap[0])} to {money(gap[1])} (the "
                                    f"entries booked against the claim) by {frappe.session.user}.")
     return {"repaired": True, "from": gap[0], "to": gap[1]}
+
+
+# ---------------------------------------------------------------- a line settled outside M-Pesa
+@frappe.whitelist(methods=["POST"])
+def settle_line(claim: str, line: str, reason: str | None = None) -> dict:
+    """Settle Payee Outside M-Pesa: a Draft or Failed payee line of a submitted claim that M-Pesa will
+    not pay (the merchant was paid by bank while the till was down, payees were switched off since) is
+    Cancelled, with who settled it and how (``reason``: the bank Payment Entry, say). Its money is no
+    longer held from the employee (unpaid_lines) and M-Pesa never pays it (make_payouts, check_b2b,
+    check_b2c_row and a retry refuse it). For a named M-Pesa Manager (ADMIN_ROLES) who can read the
+    claim; under the claim's lock, refused while a payout of the line is queued, on its way, paid or
+    in doubt. A Comment on the claim records it."""
+    require_named_user()
+    require(ADMIN_ROLES)
+    doc = frappe.get_doc(CLAIM, claim)
+    doc.check_permission("read")
+    reason = cstr(reason).strip()
+    if not reason:
+        frappe.throw("Say how the payee was paid outside M-Pesa (the bank Payment Entry, say).")
+    with owed.doc_lock(CLAIM, claim):
+        if cint(frappe.db.get_value(CLAIM, claim, "docstatus")) != 1:
+            frappe.throw(f"{claim} is not submitted.")
+        # the lines and their payouts as they are now (locking reads): a payout sent meanwhile is seen
+        row = next((r for r in sync_lines(claim, for_update=True) if r.name == line), None)
+        if not row:
+            frappe.throw(f"{line} is not a payee row of {claim}.")
+        live = [p for p in payouts_of([row.name], for_update=True) if p.state in (QUEUED, IN_FLIGHT, PAID)]
+        if row.status not in (DRAFT, FAILED) or live:
+            by = f" by {live[0].doctype} {live[0].name}" if live else ""
+            frappe.throw(f"Payee row #{row.idx} of {claim} ({row.payee_name}) is {row.status}{by}: only a Draft or "
+                         "Failed line is settled outside M-Pesa.")
+        note = f"Settled outside M-Pesa by {frappe.session.user}: {reason}"
+        frappe.db.set_value(LINE, row.name, {"status": CANCELLED, "error_message": note}, update_modified=False)
+        doc.add_comment("Comment", f"Payee row #{row.idx} ({row.payee_name}, {describe(row)}, KES {money(row.amount)}) "
+                                   f"settled outside M-Pesa by {frappe.session.user}: {reason}. M-Pesa will not pay "
+                                   "it, and its amount is no longer held from the employee.")
+    return {"line": row.name, "status": CANCELLED}
 
 
 # ---------------------------------------------------------------- casual payees: paste or upload

@@ -22,7 +22,7 @@ from frappe.utils import add_days, flt, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, employee_documents, party_accounts, salary_access, send_confirm
+from mpsa_suite.money_out import b2b, employee_documents, owed, party_accounts, salary_access, send_confirm
 from mpsa_suite.money_out.test_b2b_documents import _settings
 from mpsa_suite.money_out.test_payroll_payouts import _employee
 
@@ -204,9 +204,10 @@ class TestEmployeeDocuments(IntegrationTestCase):
             b2b.book_payment_entry(name)
         return receipt
 
-    def _b2c_paid(self, jobs, user=PAYER) -> list:
+    def _b2c_paid(self, jobs, user=PAYER, before_result=None) -> list:
         """The create_b2c_request jobs the send queued, with Daraja's ack replaced, then each
-        payout's Result written as the B2C callback writes it, and its job run."""
+        payout's Result written as the B2C callback writes it, and its job run. ``before_result``:
+        called once the payouts are on their way, before M-Pesa answers."""
         from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import b2c_payment_disbursement as disb
         from mpsa_suite.services import b2c_response_service
 
@@ -221,6 +222,8 @@ class TestEmployeeDocuments(IntegrationTestCase):
             for job in [c for c in jobs if c.args and c.args[0].endswith("create_b2c_request")]:
                 disb.create_b2c_request(job.kwargs["ref"], job.kwargs["settings"], job.kwargs["b2c_disbursement"])
                 requests.append(frappe.db.get_value(ROW, job.kwargs["ref"].name, "b2c_disbursement_request"))
+        if before_result:
+            before_result()
         for name in requests:
             frappe.db.set_value(REQ, name, {
                 "status": "Paid", "result_code": "0", "result_desc": "ok",
@@ -333,6 +336,38 @@ class TestEmployeeDocuments(IntegrationTestCase):
         self.assertRaisesRegex(frappe.ValidationError, f"less draft Payment Entry {entry.name}", self._send, DISB,
                                out["name"])
         self.assertEqual(frappe.db.get_value(DISB, out["name"], "docstatus"), 0)
+
+    def test_a_partly_booked_b2c_payouts_rest_still_counts_once_the_bank_entry_is_cancelled(self):
+        # verify (K1): the claim was paid 2,000 by bank while its B2C payout of 5,000 was on its way. The payout's
+        # entry takes the 3,000 left and keeps 2,000 unallocated; staff then cancel the bank entry. HRMS shows
+        # 2,000 owed again, but the employee has it on M-Pesa's entry: nothing is offered (as for a B2B payout).
+        claim = self._claim(self.phone_employee, 5000)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+        jobs = self._send(DISB, out["name"])
+        bank = frappe.get_doc({"doctype": PE, "payment_type": "Pay", "company": t.COMPANY, "posting_date": nowdate(),
+                               "party_type": "Employee", "party": self.phone_employee, "paid_from": self.gl,
+                               "paid_to": self.payable, "paid_amount": 2000, "received_amount": 2000,
+                               "source_exchange_rate": 1, "target_exchange_rate": 1, "reference_no": "BANK-T2",
+                               "reference_date": nowdate(), "cost_center": self.cost_center,
+                               "references": [{"reference_doctype": EC, "reference_name": claim,
+                                               "allocated_amount": 2000}]})
+        request = self._b2c_paid(jobs, before_result=lambda: bank.insert().submit())[0]
+        receipt = frappe.db.get_value(REQ, request, "transaction_id")
+        entry = frappe.get_doc(PE, frappe.db.get_value(PE, {"reference_no": receipt, "docstatus": 1}))
+        self.assertEqual(([(r.reference_name, flt(r.allocated_amount)) for r in entry.references],
+                          flt(entry.unallocated_amount)), ([(claim, 3000)], 2000))
+        self.assertEqual(frappe.db.get_value(REQ, request, "accounting_booked"), 1)
+        frappe.get_doc(PE, bank.name).cancel()
+        left = owed.employee_doc_left_to_pay(EC, claim, for_update=False)
+        self.assertEqual((left.owed, [(p.kind, p.amount) for p in left.parts], left.left), (2000, [("b2c", 2000)], 0))
+        with _as(HR):
+            self.assertRaisesRegex(frappe.ValidationError, "Nothing is left to pay by M-Pesa",
+                                   employee_documents.prepare_b2c, EC, claim)
+        # once the 2,000 is allocated to the claim on that entry (Payment Reconciliation does; written here), the
+        # entry counts it and the payout no longer does
+        frappe.db.set_value("Payment Entry Reference", entry.references[0].name, "allocated_amount", 5000)
+        self.assertEqual(owed.employee_doc_left_to_pay(EC, claim, for_update=False).parts, [])
 
     def test_an_accounts_manager_without_an_hr_role_gets_no_salary_data(self):
         # final review (decision D4): Get References for Salary Slips (net pay and phone of every employee of a

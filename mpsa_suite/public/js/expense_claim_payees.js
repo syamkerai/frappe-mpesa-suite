@@ -195,6 +195,7 @@ const mpsa_payees = {
 			);
 		}
 		if (line && line.status === "Paid" && line.name_note) notes.push(e(line.name_note));
+		if (line && line.status === "Cancelled" && line.error_message) notes.push(e(line.error_message));
 		field.$wrapper.html(notes.map((n) => `<p class="text-muted">${n}</p>`).join(""));
 	},
 
@@ -217,6 +218,49 @@ const mpsa_payees = {
 		if (flags.can_approve && s.reimbursed) {
 			frm.add_custom_button(__("Repair Reimbursed Total"), () => this.repair(frm), __("M-Pesa"));
 		}
+		if (flags.can_approve && lines.some((l) => l.status === "Draft" || l.status === "Failed")) {
+			frm.add_custom_button(__("Settle Payee Outside M-Pesa"), () => this.settle(frm), __("M-Pesa"));
+		}
+	},
+
+	// a Draft or Failed line M-Pesa will not pay (paid by bank instead): Cancelled with how it was paid, so its
+	// money is no longer held from the employee (claim_payees.settle_line, a named M-Pesa Manager's)
+	settle(frm) {
+		const rows = Object.fromEntries((frm.doc.mpesa_payees || []).map((r) => [r.name, r]));
+		const open = (this.state(frm).lines || []).filter((l) => l.status === "Draft" || l.status === "Failed");
+		const options = open.map((l) => {
+			const r = rows[l.name] || {};
+			return {
+				value: l.name,
+				label: `#${l.idx} ${r.payee_name || ""} ${format_currency(flt(r.amount), "KES", 0)} (${__(l.status)})`,
+			};
+		});
+		frappe.prompt(
+			[
+				{
+					fieldtype: "Select",
+					fieldname: "line",
+					label: __("Payee Row"),
+					reqd: 1,
+					options,
+					default: open.length === 1 ? open[0].name : undefined,
+				},
+				{
+					fieldtype: "Small Text",
+					fieldname: "reason",
+					label: __("How It Was Paid"),
+					reqd: 1,
+					description: __("The bank Payment Entry or other reference. M-Pesa will never pay this row."),
+				},
+			],
+			(values) =>
+				frappe.xcall(`${MPSA_PAYEES_API}.settle_line`, { claim: frm.doc.name, ...values }).then(() => {
+					frappe.show_alert({ message: __("Payee settled outside M-Pesa"), indicator: "green" });
+					frm.reload_doc();
+				}),
+			__("Settle Payee Outside M-Pesa"),
+			__("Settle")
+		);
 	},
 
 	pay(frm, method, status) {

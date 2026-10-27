@@ -317,6 +317,11 @@ def paid_without_entry(doctype: str, name: str) -> list:
     always is. Without ERPNext there is no Payment Entry (nor its tables) and nothing can
     have booked them, so they all count.
 
+    A booked payout of an Expense Claim or Employee Advance counts by amount, as B2B's
+    (owed.b2b_open): what its entries carrying the receipt do not allocate to the document. Its
+    entry takes only what HRMS says is still owed (paid in part another way since the send), and
+    the rest stays unallocated on it: counted until staff allocate it to the document.
+
     Every read is a locking read, as in ``open_payouts``: it sees what is committed now (a
     Cancel All or a Payment Entry cancel committed after this transaction's snapshot) and
     waits for one still in flight. So, given that ``open_payouts`` reads the same way, no
@@ -324,6 +329,7 @@ def paid_without_entry(doctype: str, name: str) -> list:
     """
     from frappe.utils import add_days, nowdate
 
+    from ....money_out import owed
     from ....services.b2c_postprocess_service import RETRY_WINDOW_DAYS, booked_docstatus
 
     locking = "FOR UPDATE" if frappe.db.db_type == "mariadb" else ""
@@ -394,6 +400,13 @@ def paid_without_entry(doctype: str, name: str) -> list:
             reference_no=seen.transaction_id or seen.reference_no,
         )
         if erpnext and booked_docstatus(seen.sent_from or seen.parent, paid, for_update=True) == 1:
-            continue
+            if doctype not in owed.EMPLOYEE_DOC_FIELDS:
+                continue
+            allocated = owed.allocated_on(doctype, name, paid.reference_no, for_update=True)
+            rest = flt(paid.allocated_amount - allocated, 2)
+            # booked whole, or by an entry that does not carry its receipt (one made by hand)
+            if allocated <= owed.MIN or rest <= owed.MIN:
+                continue
+            paid.allocated_amount = rest
         rows.append(paid)
     return rows

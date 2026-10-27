@@ -333,6 +333,8 @@ ENDPOINTS = {
     "mpsa_suite.money_out.claim_payees.claim_state": ("Read the Expense Claim", ("perm",)),
     "mpsa_suite.money_out.claim_payees.parse_payees": ("Write the Expense Claim (create one, before its first save)", ("perm",)),
     "mpsa_suite.money_out.claim_payees.repair_reimbursed": ("ADMIN_ROLES + read the Expense Claim", ("roles:ADMIN_ROLES", "perm")),
+    "mpsa_suite.money_out.claim_payees.settle_line": (
+        "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
     _D + "b2c_disbursement_request.b2c_disbursement_request.B2CDisbursementRequest.retry_failed_payment": (
         "PAYOUT_ROLES", ("roles:PAYOUT_ROLES",)),
     _D + "b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.retry_failed_payments": (

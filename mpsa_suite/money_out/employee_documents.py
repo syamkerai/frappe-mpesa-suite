@@ -886,11 +886,17 @@ def paid_or_on_their_way(dt: str, dn: str) -> list:
 def before_cancel(doc, method=None):
     """Expense Claim and Employee Advance before_cancel (hooks.py doc_events): refused while an
     M-Pesa payout of the document is paid or on its way. Payouts are found by the document's name,
-    so its amended copy would show the whole amount as unpaid and could be paid again."""
+    so its amended copy would show the whole amount as unpaid and could be paid again. A claim's
+    payee lines read their payouts as claim_payees does: one a manager cancelled while it may still
+    have paid (Unknown) holds the cancel too, until M-Pesa's answer settles it."""
     name = cstr(doc.get("name")).strip()
     if doc.get("doctype") not in DOCTYPES or not name:
         return
     paying = paid_or_on_their_way(doc.doctype, name)
+    if doc.doctype == EXPENSE_CLAIM:
+        from .claim_payees import lines_paid_or_on_their_way
+
+        paying = list(dict.fromkeys(paying + lines_paid_or_on_their_way(name)))
     if paying:
         frappe.throw(f"{name} cannot be cancelled while M-Pesa payouts of it are paid or on their way: "
                      f"{', '.join(paying[:10])}. Its amended copy would show the whole amount as unpaid again.")

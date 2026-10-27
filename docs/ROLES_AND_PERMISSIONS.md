@@ -307,6 +307,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.claim_payees.pay_payees` | PREPARE_ROLES + read the Expense Claim | roles:PREPARE_ROLES, perm |
 | `money_out.claim_payees.repair_reimbursed` | ADMIN_ROLES + read the Expense Claim | roles:ADMIN_ROLES, perm |
 | `money_out.claim_payees.retry_payees` | PREPARE_ROLES + read the Expense Claim | roles:PREPARE_ROLES, perm |
+| `money_out.claim_payees.settle_line` | ADMIN_ROLES, a named login + read the Expense Claim | roles:ADMIN_ROLES, via:require_named_user, perm |
 | `money_out.employee_documents.document_status` | Read the claim / advance | perm |
 | `money_out.employee_documents.prepare_b2b` | PREPARE_ROLES + read the claim / advance + create the request | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_b2c` | PREPARE_ROLES + read the claim / advance + create the disbursement | roles:PREPARE_ROLES, perm |

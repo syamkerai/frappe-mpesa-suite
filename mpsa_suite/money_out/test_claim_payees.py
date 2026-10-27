@@ -134,6 +134,7 @@ class TestClaimPayees(IntegrationTestCase):
         self._no_commit.stop()
         frappe.set_user("Administrator")
         frappe.db.rollback()
+        t.forget_roles(self.manager)  # a test gives the manager a role that reads claims
         frappe.local.mpesa_suite_bank_accounts = None
         frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
 
@@ -482,6 +483,64 @@ class TestClaimPayees(IntegrationTestCase):
         line = next(iter(self._lines(claim.name).values()))
         self.assertEqual(line.status, "In Flight")
         self.assertEqual(owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False).left, 8000)
+        # verify (K13): nor is the claim cancelled and amended meanwhile, which would pay the till again
+        self.assertRaisesRegex(frappe.ValidationError, f"cannot be cancelled while M-Pesa payouts of it are paid or on "
+                                                       f"their way: {name}", frappe.get_doc(CLAIM, claim.name).cancel)
+        # M-Pesa's answer since (a status query or a late Result) says it failed: the claim may be cancelled
+        frappe.db.set_value(B2B, name, "status", "Failed")
+        frappe.get_doc(CLAIM, claim.name).cancel()
+        self.assertEqual(frappe.db.get_value(CLAIM, claim.name, "docstatus"), 2)
+
+    def test_a_manager_settles_a_line_paid_outside_mpesa_and_its_money_goes_back_to_the_employee(self):
+        # verify (K2): a merchant line paid another way (by bank while the till was down) no longer holds the
+        # employee's share; M-Pesa never pays it after, and a line on its way is never settled
+        claim = self._claim([
+            {"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811", "amount": 2000},
+            {"payee_type": "Paybill", "payee_name": "_T Nairobi County", "shortcode": "647647",
+             "account_number": "park-77", "amount": 1500},
+        ], amount=5000)
+        till, paybill = self._lines(claim.name)
+        made = self._pay(claim.name)
+        frappe.delete_doc(B2B, made["b2b"][1])  # the paybill's draft: it is paid by bank instead
+        self.assertEqual(owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False).left, 1500)
+        _user(self.manager, "HR User")  # reads the claim
+        with _as(PAYER):
+            self.assertRaises(frappe.PermissionError, claim_payees.settle_line, claim.name, paybill, "Bank ACC-PAY-T1")
+        with _as(self.manager):
+            self.assertRaisesRegex(frappe.ValidationError, "is Queued", claim_payees.settle_line, claim.name, till,
+                                   "Bank ACC-PAY-T1")
+            claim_payees.settle_line(claim.name, paybill, "Bank ACC-PAY-T1")
+        line = self._lines(claim.name)[paybill]
+        self.assertEqual((line.status, line.error_message),
+                         ("Cancelled", f"Settled outside M-Pesa by {self.manager}: Bank ACC-PAY-T1"))
+        self.assertTrue(frappe.db.exists("Comment", {"reference_doctype": CLAIM, "reference_name": claim.name,
+                                                     "content": ["like", "%settled outside M-Pesa%ACC-PAY-T1%"]}))
+        # its 1,500 is the employee's again; the till's draft still holds its 2,000
+        self.assertEqual(owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False).left, 3000)
+        claim_payees.sync_lines(claim.name)
+        self.assertEqual(self._lines(claim.name)[paybill].status, "Cancelled")
+        self.assertRaisesRegex(frappe.ValidationError, "Nothing to pay", self._pay, claim.name)
+        self._send_b2b(made["b2b"][0])
+        with _as(self.manager):
+            self.assertRaisesRegex(frappe.ValidationError, "is In Flight", claim_payees.settle_line, claim.name, till,
+                                   "Bank ACC-PAY-T2")
+
+    def test_the_forms_cancel_lists_no_failed_mpesa_payout_of_the_claim(self):
+        # verify (K14): Frappe's Cancel All dialog lists every submitted document that links the claim, and could
+        # cancel none of a failed payout's (its request and its disbursement link each other). The form leaves
+        # the M-Pesa payouts out (public/js/expense_claim.js), as these DocTypes; the server refuses the cancel
+        # while one is paid or on its way.
+        from frappe.desk.form.linked_with import get_submitted_linked_docs
+
+        claim = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Jane Wanjiku", "phone": "0711000396",
+                              "amount": 1000}], amount=3000)
+        self._send_b2c(self._pay(claim.name)["b2c"], {"254711000396": ("Failed", None)})
+        payouts = {DISB, REQ, B2B}
+        listed = {d["doctype"] for d in get_submitted_linked_docs(CLAIM, claim.name)["docs"]}
+        self.assertTrue(listed & payouts)
+        listed = {d["doctype"] for d in get_submitted_linked_docs(CLAIM, claim.name, sorted(payouts))["docs"]}
+        self.assertFalse(listed & payouts)
+        frappe.get_doc(CLAIM, claim.name).cancel()  # what the form's Cancel then does
 
     # ------------------------------------------------------------ what a claim may not pay
     def test_an_employees_phone_and_a_type_without_payees_are_refused(self):
