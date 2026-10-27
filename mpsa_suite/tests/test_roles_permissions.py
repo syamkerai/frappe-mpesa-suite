@@ -20,7 +20,7 @@ from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
 
 DOMAIN = "roles.example.com"
-ROLES = (M.MM, M.MP, M.MC, M.MV, M.AM, M.AU, M.HM, M.HU, M.SU, M.PM, M.PU)
+ROLES = (M.MM, M.MP, M.MC, M.MV, M.AM, M.AU, M.HM, M.HU, M.EA, M.SU, M.PM, M.PU)
 PTYPES = ("read", "select", "write", "create", "submit", "cancel", "amend", "delete", "report", "export", "print",
           "email", "share")
 SECRETS = M.SECRET_FIELDS["Mpesa Settings"]
@@ -417,6 +417,33 @@ class TestRolesPermissions(IntegrationTestCase):
                                ("from_payroll_entry", lambda: payroll.from_payroll_entry("X"))):
                 with self.assertRaises(frappe.PermissionError, msg=name):
                     call()
+
+    def test_who_reads_a_claim_or_advance_by_default_may_prepare_its_payouts(self):
+        """Round 4 final review (plan section 1, Roles): with HRMS's own DocPerms and the suite's alone (no site
+        grant, nothing shipped on HRMS DocTypes), each default role that reads Expense Claims (HR Manager, HR
+        User, Expense Approver) or Employee Advances (Expense Approver) passes every server gate of Pay employee
+        on both routes (employee_documents.prepare_b2c / prepare_b2b / prepare_bulk: PREPARE_ROLES, read on
+        the document's DocType, create on the payout), and its desk shows the buttons (boot can_prepare)."""
+        from mpsa_suite import boot
+        from mpsa_suite.permissions import PREPARE_ROLES
+
+        if "hrms" not in frappe.get_installed_apps():
+            self.skipTest("HRMS is not installed")
+        readers = {"Expense Claim": (M.HM, M.HU, M.EA), "Employee Advance": (M.EA,)}
+        for doctype, roles in readers.items():
+            for role in roles:
+                user = user_for(role)
+                self.assertIn(role, frappe.get_roles(user), role)
+                self.assertIn(role, PREPARE_ROLES)
+                self.assertTrue(frappe.has_permission(doctype, "read", user=user), f"HRMS: {role} reads {doctype}")
+                for payout in ("B2C Payment Disbursement", "Mpesa B2B Payment Request"):
+                    self.assertTrue(frappe.has_permission(payout, "create", user=user), f"{role} creates {payout}")
+                    for ptype in ("submit", "cancel"):  # prepares, never sends
+                        self.assertFalse(frappe.has_permission(payout, ptype, user=user), f"{role} {ptype} {payout}")
+                self.assertTrue(boot.flags(user)["can_prepare"], role)
+                self.assertFalse(boot.flags(user)["can_pay"], role)
+        # an Expense Approver sees no salary (a claim's payout is not one)
+        self.assertFalse(boot.flags(user_for(M.EA))["can_see_salaries"])
 
     def test_only_mpesa_managers_do_admin_work(self):
         """D2: approving payee accounts and the other ADMIN_ROLES actions left Accounts Manager; D5:

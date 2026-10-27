@@ -172,3 +172,30 @@ class TestMPesaSuiteSettings(IntegrationTestCase):
         finally:
             frappe.db.set_single_value(SETTINGS, {f: v for f, v in was.items()})
             frappe.clear_document_cache(SETTINGS, SETTINGS)
+
+    def test_widening_the_claim_states_that_may_be_paid_is_written_and_alerted(self):
+        """Round 4 final review: Expense Claim Workflow States That May Be Paid is the payable gate of claims
+        (plan C.3; blank = any approved claim): a change, or clearing it, is told like the other switches."""
+        field = "claim_payable_workflow_states"
+        settings = frappe.get_single(SETTINGS)
+        was = settings.get(field)
+        try:
+            with patch("mpsa_suite.money_out.party_accounts.alert") as alert:
+                settings.set(field, "Approved")
+                settings.save()
+                settings.reload()
+                alert.reset_mock()
+                settings.set(field, "Approved\nPending Attachment")
+                settings.save()
+                (message, _doc), _ = alert.call_args
+                self.assertIn("Expense Claim Workflow States That May Be Paid from Approved to Approved, Pending "
+                              "Attachment", message)
+                settings.reload()
+                alert.reset_mock()
+                settings.set(field, "")
+                settings.save()
+                (message, _doc), _ = alert.call_args
+                self.assertIn("to not set", message)
+        finally:
+            frappe.db.set_single_value(SETTINGS, field, was)
+            frappe.clear_document_cache(SETTINGS, SETTINGS)

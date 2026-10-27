@@ -420,6 +420,179 @@ def test_an_employee_cannot_approve_their_own_account(env):
     assert r["token"] is None and "your own M-Pesa account" in r["problems"][0]
 
 
+# ---------------------------------------------------------------- final review: who an Expense Claim payee payout pays
+CLAIM_PAYEE = "M-Pesa Claim Payee"
+SUITE = "M-Pesa Suite Settings"
+
+
+def claim_payees(env, *lines, allow=1, max_amount=0, daily_cap=0):
+    """Expense Claim EC-9 of Jane Wanjiru (EMP-1) with payee ``lines`` (M-Pesa Claim Payee rows)."""
+    env.frappe.db.table("Expense Claim")["EC-9"] = {"name": "EC-9", "employee": "EMP-1", "employee_name": "Jane Wanjiru"}
+    env.frappe.db.table(SUITE)[SUITE] = {"allow_claim_payees": allow, "claim_payee_max_amount": max_amount,
+                                         "claim_payee_daily_cap": daily_cap}
+    for i, values in enumerate(lines, start=1):
+        row = dict(name=f"CP-{i}", idx=i, parent="EC-9", parenttype="Expense Claim", **values)
+        env.frappe.db.table(CLAIM_PAYEE)[row["name"]] = row
+
+
+def payee_b2b(env, **values):
+    return b2b(env, **dict(dict(supplier=None, supplier_mpesa_account=None, purchase_invoice=None, employee="EMP-1",
+                                expense_claim="EC-9", claim_payee="CP-1", command_id="BusinessBuyGoods",
+                                receiver_shortcode="835811", account_reference=None), **values))
+
+
+def test_a_merchant_payee_is_the_receiver_not_the_claimant(env):
+    claim_payees(env, dict(payee_type="Till (Buy Goods)", payee_name="Shell Kilimani", shortcode="835811", amount=3000))
+    payee_b2b(env)
+    r = prepared(env)
+    assert r["rows"] == [{"receiver": "Shell Kilimani", "party": "payee on EC-9, claimant Jane Wanjiru",
+                          "expected_name": None,
+                          "destination": "Till 835811 (payee of Expense Claim EC-9, not an approved account)",
+                          "account_holder": None, "amount": 3000.0, "charge": None,
+                          "document": "Expense Claim EC-9, payee row #1"}]
+    assert r["token"] and r["problems"] == []
+
+
+def test_a_bank_payee_names_its_bank_and_a_paybill_its_account(env):
+    env.frappe.db.table("M-Pesa Bank Paybill")["EQUITY"] = {"name": "EQUITY", "institution_name": "Equity Bank"}
+    claim_payees(env, dict(payee_type=BANK, payee_name="Mama Mboga Ltd", bank_paybill="EQUITY", shortcode="247247",
+                           account_number="0123456789", amount=3000),
+                 dict(payee_type="Paybill", payee_name="Nairobi County", shortcode="647647", account_number="PARK-7",
+                      amount=3000))
+    payee_b2b(env, command_id="BusinessPayBill", receiver_shortcode="247247", account_reference="0123456789")
+    row = prepared(env)["rows"][0]
+    assert row["destination"] == ("Equity Bank (bank paybill 247247), account 0123456789 (payee of Expense Claim EC-9, "
+                                  "not an approved account)")
+    assert row["receiver"] == "Mama Mboga Ltd"
+    payee_b2b(env, claim_payee="CP-2", command_id="BusinessPayBill", receiver_shortcode="647647",
+              account_reference="PARK-7")
+    row = prepared(env)["rows"][0]
+    assert (row["receiver"], row["document"]) == ("Nairobi County", "Expense Claim EC-9, payee row #2")
+    assert row["destination"].startswith("Paybill 647647, account PARK-7 (payee of Expense Claim EC-9")
+
+
+def test_a_payee_that_is_a_suppliers_approved_account_shows_its_name(env, monkeypatch):
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    monkeypatch.setattr(cp, "approved_supplier_account", lambda line: "MSA-1")
+    claim_payees(env, dict(payee_type="Till (Buy Goods)", payee_name="Acme", shortcode="835811", amount=3000))
+    payee_b2b(env)
+    row = prepared(env)["rows"][0]
+    assert row["destination"] == "Till 835811 (a supplier's approved account, MSA-1)"
+    assert row["expected_name"] == "ACME HARDWARE"
+
+
+def test_casual_payees_in_one_batch_are_each_named(env):
+    claim_payees(env, dict(payee_type="Phone (B2C)", payee_name="Peter Otieno", phone="254711000111", amount=800),
+                 dict(payee_type="Phone (B2C)", payee_name="Mary Akinyi", phone="254711000222", amount=700))
+    rows = [fake_frappe._dict(name=f"R{i}", party_type="Employee", party="EMP-1", partyb=phone, allocated_amount=amount,
+                              reference_doctype="Expense Claim", reference_name="EC-9", claim_payee=f"CP-{i}")
+            for i, (phone, amount) in enumerate((("254711000111", 800.0), ("254711000222", 700.0)), start=1)]
+    disbursement(env, references=rows, company="Test Co")
+    r = prepared(env, B2C, "B2C-1")
+    assert [(x["receiver"], x["party"], x["destination"]) for x in r["rows"]] == [
+        ("Peter Otieno", "payee on EC-9, claimant Jane Wanjiru",
+         "M-Pesa phone 2547****0111 (payee of Expense Claim EC-9, not an approved account)"),
+        ("Mary Akinyi", "payee on EC-9, claimant Jane Wanjiru",
+         "M-Pesa phone 2547****0222 (payee of Expense Claim EC-9, not an approved account)"),
+    ]
+    assert r["total"] == 1500.0 and r["token"]
+
+
+@pytest.mark.parametrize("settings,message", [
+    (dict(allow=0), "switched off"),
+    (dict(max_amount=1000), "EC-9: Row #1: KES 3,000 is more than may be paid at once"),
+])
+def test_the_payee_switch_and_caps_are_said_before_the_token(env, settings, message):
+    claim_payees(env, dict(payee_type="Till (Buy Goods)", payee_name="Shell Kilimani", shortcode="835811", amount=3000),
+                 **settings)
+    payee_b2b(env)
+    r = prepared(env)
+    assert r["token"] is None and message in " ".join(r["problems"])
+
+
+def test_the_days_payee_cap_is_said_before_the_token(env, monkeypatch):
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    seen = []
+    monkeypatch.setattr(cp, "sent_today", lambda company, exclude=(None, None), for_update=False:
+                        seen.append((company, exclude)) or 4000.0)
+    claim_payees(env, dict(payee_type="Till (Buy Goods)", payee_name="Shell Kilimani", shortcode="835811", amount=3000),
+                 daily_cap=5000)
+    payee_b2b(env, company="Test Co")
+    r = prepared(env)
+    assert r["token"] is None and "with this KES 3,000 it would pass the day's cap of KES 5,000" in r["problems"][0]
+    assert seen == [("Test Co", (B2B, "MB2B-1"))]  # this payout is not counted twice
+    monkeypatch.setattr(cp, "sent_today", lambda *a, **kw: 2000.0)
+    assert prepared(env)["token"]
+
+
+# ---------------------------------------------------------------- final review: what the send would refuse, said first
+def test_nobody_is_offered_to_send_their_own_payout(env):
+    env.frappe.session.user = "jane@x"  # EMP-1's user, an M-Pesa Payer
+    b2b(env, supplier=None, supplier_mpesa_account=None, purchase_invoice=None, employee="EMP-1",
+        expense_claim="EC-1")
+    r = prepared(env)
+    assert r["token"] is None and "You are EMP-1: another person must pay you." in r["problems"]
+    disbursement(env)  # both rows pay EMP-1
+    assert "You are EMP-1" in " ".join(prepared(env, B2C, "B2C-1")["problems"])
+
+
+def test_a_row_paying_their_own_claim_is_refused_even_to_another_party(env):
+    env.frappe.db.table("Expense Claim")["EC-1"] = {"name": "EC-1", "employee": "EMP-1"}
+    env.frappe.session.user = "jane@x"
+    rows = [fake_frappe._dict(name="R1", party_type="Employee", party="EMP-2", partyb="254712345678",
+                              allocated_amount=1500.0, reference_doctype="Expense Claim", reference_name="EC-1")]
+    disbursement(env, references=rows)
+    r = prepared(env, B2C, "B2C-1")
+    assert r["token"] is None and "You are EMP-1" in r["problems"][0]
+
+
+def test_a_hand_made_b2c_request_to_the_payer_is_refused_first(env):
+    env.frappe.db.table(B2C_REQUEST)["B2CR-1"] = dict(
+        name="B2CR-1", docstatus=0, owner=CLERK, modified_by=CLERK, modified=MODIFIED, party_type="Employee",
+        party="EMP-1", phone_number="254712345678", amount=500.0, mpesa_settings="WORKING")
+    env.frappe.session.user = "jane@x"
+    r = prepared(env, B2C_REQUEST, "B2CR-1")
+    assert r["token"] is None and "You are EMP-1" in r["problems"][0]
+
+
+def test_an_employee_payment_for_no_document_is_for_a_manager_only(env):
+    b2b(env, supplier=None, supplier_mpesa_account=None, purchase_invoice=None, employee="EMP-1")
+    r = prepared(env)
+    assert r["token"] is None and "paid by an M-Pesa" in r["problems"][0]
+    env.frappe.session.user, env.frappe.user_roles = MANAGER, {"M-Pesa Manager"}
+    assert prepared(env)["token"]
+    env.frappe.session.user, env.frappe.user_roles = PAYER, {"M-Pesa Payer"}
+    b2b(env, supplier=None, supplier_mpesa_account=None, purchase_invoice=None, employee="EMP-1", salary_slip="SAL-1")
+    assert prepared(env)["token"], "a Salary Slip caps it: a Payer sends it"
+
+
+# ---------------------------------------------------------------- final review: Approve says what to check
+def test_approving_a_third_partys_bank_account_says_so(env):
+    env.frappe.db.table("M-Pesa Bank Paybill")["EQUITY"] = {"name": "EQUITY", "institution_name": "Equity Bank"}
+    account(env, account_type=BANK, bank_paybill="EQUITY", shortcode="247247", account_number="0123456789",
+            account_holder_name="Someone Else Ltd", expected_name="EQUITY BANK")
+    env.frappe.session.user, env.frappe.user_roles = MANAGER, {"M-Pesa Manager"}
+    r = prepared(env, SUPPLIER_ACCOUNT, "MSA-9")
+    assert r["warnings"] == ["The account holder Someone Else Ltd is not Acme Hardware Ltd: this pays a third party's "
+                             "account. Check the proof before approving."]
+    assert r["token"], "a warning, not a refusal"
+    env.frappe.db.table(SUPPLIER_ACCOUNT)["MSA-9"]["account_holder_name"] = "ACME HARDWARE LTD"
+    assert prepared(env, SUPPLIER_ACCOUNT, "MSA-9")["warnings"] == []
+
+
+def test_approving_an_employees_business_number_says_so(env):
+    env.frappe.db.table(EMPLOYEE_ACCOUNT)["EMA-2"] = dict(
+        name="EMA-2", docstatus=0, owner=CLERK, entered_by=CLERK, modified_by=CLERK, modified=MODIFIED,
+        employee="EMP-1", account_type="Till (Buy Goods)", shortcode="835811", expected_name="JANE SHOP",
+        proof="/private/files/reg.pdf")
+    env.frappe.session.user, env.frappe.user_roles = MANAGER, {"M-Pesa Manager"}
+    r = prepared(env, EMPLOYEE_ACCOUNT, "EMA-2")
+    assert "business paybill or till" in r["warnings"][0] and r["token"]
+    b2b(env)
+    env.frappe.session.user, env.frappe.user_roles = PAYER, {"M-Pesa Payer"}
+    assert prepared(env)["warnings"] == []  # payouts carry none
+
+
 # ---------------------------------------------------------------- assert_deliberate / deliberate
 def _doc(doctype=B2B, name="MB2B-1"):
     return fake_frappe._dict(doctype=doctype, name=name)
@@ -638,11 +811,13 @@ LABELS = {"schedule_maker_checker": ("Check", "Who Sends a Payout Must Not Be Wh
           "claim_payee_max_amount": ("Currency",
                                      "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap)"),
           "claim_payee_daily_cap": ("Currency", "Most per Day to Such Payees, per Company (0 = no cap)"),
+          "claim_payable_workflow_states": ("Small Text", "Expense Claim Workflow States That May Be Paid"),
           "enforce_ip_allowlist": ("Check", "Enforce IP Allow-list")}
 SAFE = dict(schedule_maker_checker=1, refuse_administrator_payouts=1, allow_one_off_b2b=0,
             supplier_account_hold_hours=24, employee_account_hold_hours=24, integration_user="mpesa@x",
             notify_role="Accounts Manager", b2c_approved_phones_only=1, allow_claim_payees=0,
-            claim_payee_max_amount=0, claim_payee_daily_cap=0, enforce_ip_allowlist=0)
+            claim_payee_max_amount=0, claim_payee_daily_cap=0, claim_payable_workflow_states="Approved\nPaid Out",
+            enforce_ip_allowlist=0)
 
 
 @pytest.fixture
@@ -691,6 +866,11 @@ def test_switching_off_maker_checker_or_the_administrator_refusal_alerts_the_not
      "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap) from 0 to 5,000"),
     (dict(claim_payee_daily_cap=12500.5), "Most per Day to Such Payees, per Company (0 = no cap) from 0 to 12,500.50"),
     (dict(notify_role="HR Manager"), "Notify Role from Accounts Manager to HR Manager"),
+    # final review: the payable gate of claims (plan C.3): widened, or cleared (any approved claim is payable)
+    (dict(claim_payable_workflow_states="Approved\nPaid Out\nPending Attachment"),
+     "Expense Claim Workflow States That May Be Paid from Approved, Paid Out to Approved, Paid Out, Pending Attachment"),
+    (dict(claim_payable_workflow_states=""),
+     "Expense Claim Workflow States That May Be Paid from Approved, Paid Out to not set"),
 ])
 def test_each_payout_safety_change_is_told(settings, change, text):
     make, alerts, comments = settings
@@ -718,5 +898,7 @@ def test_other_changes_and_the_first_save_tell_nobody(settings):
     make(SAFE, enforce_ip_allowlist=1).alert_safety_changes()  # not a payout-safety switch
     make(dict(SAFE, claim_payee_max_amount=None), claim_payee_max_amount=0).alert_safety_changes()  # no cap either way
     make(dict(SAFE, schedule_maker_checker="1"), schedule_maker_checker=1).alert_safety_changes()  # same value
+    # the same states, written with other spacing or blank lines
+    make(SAFE, claim_payable_workflow_states=" Approved \n\nPaid Out\n").alert_safety_changes()
     make(None, schedule_maker_checker=0).alert_safety_changes()  # install
     assert alerts == comments == []

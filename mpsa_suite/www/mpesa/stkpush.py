@@ -70,10 +70,20 @@ def clean(value):
 
 
 def _check_can_push(doc):
-    """Only users who may edit the request can (re)send its prompt; never re-push a paid one."""
+    """Only users who may edit the request can (re)send its prompt; never re-push a paid one, nor
+    one of a Payment Request that another prompt paid, not booked yet, leaves too little for."""
     doc.check_permission("write")
     if doc.status == "Completed":
         frappe.throw(_("This M-Pesa request is already paid."))
+    if doc.get("reference_doctype") == "Payment Request" and doc.get("reference_name"):
+        from mpsa_suite.money_in.payment_request import being_booked
+        from mpsa_suite.mpsa_suite.doctype.mpesa_express_request.mpesa_express_request import prompt_left
+
+        payment_request = frappe.get_doc("Payment Request", doc.reference_name)
+        left, paid = prompt_left(payment_request, exclude=doc.name)
+        asked = float(doc.get("base_amount") or doc.get("amount") or 0)
+        if paid and asked > left + 0.005:
+            frappe.throw(being_booked(payment_request.name, paid))
 
 
 @frappe.whitelist()

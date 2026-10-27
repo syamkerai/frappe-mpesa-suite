@@ -36,14 +36,16 @@ FINANCE_ROLES = (
 )
 
 # Prepare a payout (a draft B2B request or B2C payout, a payment schedule line) from a document
-# they can read: Accounts for invoices and orders, HR for claims, advances and salaries. Only
-# PAYOUT_ROLES send it.
+# they can read: Accounts for invoices and orders, HR for claims, advances and salaries, and HRMS's
+# Expense Approver for the claims and advances it reads (HRMS lets no other default role but the
+# employee read an Employee Advance). Only PAYOUT_ROLES send it.
 PREPARE_ROLES = (
     "M-Pesa Manager",
     "Accounts Manager",
     "Accounts User",
     "HR Manager",
     "HR User",
+    "Expense Approver",
 )
 
 # Send money: submit B2C payouts, B2B payments and reversals, retry them, Pay Selected. Named

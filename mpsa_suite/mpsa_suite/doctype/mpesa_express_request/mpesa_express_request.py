@@ -76,8 +76,13 @@ class MpesaExpressRequest(Document):
         # Keep the amount the caller asked for (a manual or gateway prompt for part of the
         # request; MpesaSettings.request_for_payment prompts a Payment Request once, never in
         # parts): overwriting it with the grand total asked the customer for the whole request
-        # again. Default to, and never ask more than, what the request still owes.
-        owed = payment_request_owed(payment_request)
+        # again. Default to, and never ask more than, what the request still owes, less what a
+        # prompt the customer paid, not booked yet, brings (prompt_left).
+        owed, paid = prompt_left(payment_request, exclude=getattr(self, "name", None))
+        if paid and owed <= 0.005:
+            from ....money_in.payment_request import being_booked
+
+            frappe.throw(being_booked(payment_request.name, paid))
         asked = flt(self.base_amount)
         if not asked or asked > owed:
             self.base_amount = owed  # amount (KES) derived from it
@@ -324,6 +329,17 @@ def payment_request_owed(payment_request) -> float:
     if (payment_request.get("party_account_currency") or payment_request.currency) == payment_request.currency:
         owed = min(owed, outstanding)
     return owed
+
+
+def prompt_left(payment_request, exclude: str | None = None) -> tuple:
+    """(left, paid): what may still be asked of the customer for the Payment Request, in its
+    currency (payment_request_owed less the prompts the customer paid that are not booked yet,
+    ``exclude`` aside), and those prompts."""
+    from ....money_in.payment_request import unbooked_prompts
+
+    owed = payment_request_owed(payment_request)
+    paid = unbooked_prompts(payment_request.name, exclude=exclude)
+    return flt(owed - sum(flt(p.paid) for p in paid), 2), paid
 
 
 def clean_digits(v):

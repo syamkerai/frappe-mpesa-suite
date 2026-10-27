@@ -202,32 +202,32 @@ Generated from `permission_matrix.py`; do not edit by hand (section 10).
 
 Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d` delete, `R` report, `e` export, `p` print, `m` email, `h` share, `S` select. `L1:` is permission level 1 (the credential fields). A blank cell is no access.
 
-| DocType | SysMgr | M-Pesa Mgr | Payer | Collector | Viewer | Acc Mgr | Acc User | HR Mgr | HR User | Sales User | Pur Mgr | Pur User |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| B2C Disbursement Request | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |
-| B2C Payment Disbursement | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` |  |  |  |  |
-| Employee M-Pesa Account |  | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |
-| M-Pesa Bank Paybill | `rwcdRe` | `rwcdRe` | `rRe` |  | `rRe` | `rRe` | `rRe` | `rRe` | `rRe` |  | `rRe` |  |
-| M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |
-| M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa B2B Payment Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` |  |  |  |  |  |
-| Mpesa B2C Status Query | `rdRep` | `rRep` | `rRep` |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
-| Mpesa Balance Snapshot | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
-| Mpesa C2B Payment Register | `rwdRepmh` | `rwsxaRepmh` | `rRp` | `rRp` | `rRep` | `rwsxaRepmh` | `rwsRepmh` |  |  | `rwsRepmh` |  |  |
-| Mpesa C2B Payment Register URL | `rwcdRepmh` | `rwcdRepmh` |  |  | `rRp` | `rRepmh` | `rRepmh` |  |  | `rRepmh` |  |  |
-| Mpesa Express Request | `rwcsdRepmh` | `rwcsRepmh` |  | `rwcsRp` | `rRep` | `rwcsRepmh` | `rwcsRepmh` |  |  | `rwcsRepmh` |  |  |
-| Mpesa Match Log | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
-| Mpesa Payment Intent | `rwcdRepmh` | `rwcdRepmh` |  | `rRep` | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
-| Mpesa Public Key Certificate | `rwcdpmh` | `rwc` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa Reversal Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |
-| Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `S` | `S` | `S` | `S` | `S` |  |  |  |  |  |
-| Mpesa Statement Import | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rwcdRep` | `rRep` |  |  |  |  |  |
-| Mpesa Statement Row | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |
-| Mpesa Webhook Delivery | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |
-| Payment Gateway | `rwcd` |  |  |  |  |  |  |  |  |  |  |  |
-| Supplier M-Pesa Account | `rRep` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` |  |  |  | `rwcaRepmh` | `rRep` |
+| DocType | SysMgr | M-Pesa Mgr | Payer | Collector | Viewer | Acc Mgr | Acc User | HR Mgr | HR User | Exp Approver | Sales User | Pur Mgr | Pur User |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| B2C Disbursement Request | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` | `rwcRepmh` | `rwcadRepmh` | `rwcRepmh` |  |  |  |  |
+| B2C Payment Disbursement | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` | `rwcadRepmh` | `rwcadRepmh` |  |  |  |
+| Employee M-Pesa Account |  | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |  |
+| M-Pesa Bank Paybill | `rwcdRe` | `rwcdRe` | `rRe` |  | `rRe` | `rRe` | `rRe` | `rRe` | `rRe` |  |  | `rRe` |  |
+| M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |
+| M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |  |
+| Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |  |
+| Mpesa B2B Payment Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` | `rwcadRepmh` | `rwcadRepmh` | `rwcadRepmh` |  |  |  |
+| Mpesa B2C Status Query | `rdRep` | `rRep` | `rRep` |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa Balance Snapshot | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa C2B Payment Register | `rwdRepmh` | `rwsxaRepmh` | `rRp` | `rRp` | `rRep` | `rwsxaRepmh` | `rwsRepmh` |  |  |  | `rwsRepmh` |  |  |
+| Mpesa C2B Payment Register URL | `rwcdRepmh` | `rwcdRepmh` |  |  | `rRp` | `rRepmh` | `rRepmh` |  |  |  | `rRepmh` |  |  |
+| Mpesa Express Request | `rwcsdRepmh` | `rwcsRepmh` |  | `rwcsRp` | `rRep` | `rwcsRepmh` | `rwcsRepmh` |  |  |  | `rwcsRepmh` |  |  |
+| Mpesa Match Log | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa Payment Intent | `rwcdRepmh` | `rwcdRepmh` |  | `rRep` | `rRep` | `rRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa Public Key Certificate | `rwcdpmh` | `rwc` |  |  |  |  |  |  |  |  |  |  |  |
+| Mpesa Reversal Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rRep` |  |  |  |  |  |  |
+| Mpesa Sandbox Test Run | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |  |
+| Mpesa Settings | `rwcdRepmh L1:rw` | `rwcdRepmh L1:rw` | `S` | `S` | `S` | `S` | `S` |  |  |  |  |  |  |
+| Mpesa Statement Import | `rwcdRep` | `rwcdRep` |  |  | `rRep` | `rwcdRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa Statement Row | `rwdRep` | `rwdRep` |  |  | `rRep` | `rRep` | `rRep` |  |  |  |  |  |  |
+| Mpesa Webhook Delivery | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |  |
+| Payment Gateway | `rwcd` |  |  |  |  |  |  |  |  |  |  |  |  |
+| Supplier M-Pesa Account | `rRep` | `rwcsxadRepmh` | `rwcaRepmh` |  | `rRep` | `rwcadRepmh` | `rwcaRepmh` |  |  |  |  | `rwcaRepmh` | `rRep` |
 
 ### Role sets of the server checks (mpsa_suite/permissions.py)
 
@@ -238,7 +238,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | `CONFIG_ROLES` | System Manager, M-Pesa Manager |
 | `FINANCE_ROLES` | System Manager, M-Pesa Manager, Accounts Manager, Accounts User |
 | `PAYOUT_ROLES` | M-Pesa Manager, M-Pesa Payer |
-| `PREPARE_ROLES` | M-Pesa Manager, Accounts Manager, Accounts User, HR Manager, HR User |
+| `PREPARE_ROLES` | M-Pesa Manager, Accounts Manager, Accounts User, HR Manager, HR User, Expense Approver |
 | `SALARY_ROLES` | M-Pesa Manager, M-Pesa Payer, HR Manager, HR User |
 
 ### Salary payouts (decision D4)

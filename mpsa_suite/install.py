@@ -116,11 +116,29 @@ def after_install() -> None:
     approved_phones_only_on_new_sites()
 
 
+# The app's name before the rename (docs/RENAME_SPIKE.md): a site that has it becomes mpsa_suite by
+# install-app next to it, which runs after_install on a site with live payouts.
+OLD_APP = "frappe_mpsa_payments"
+# Payouts that pay employees by B2C: any row means the site has paid employees before this release.
+B2C_HISTORY = ("B2C Disbursement Request", "B2C Payment Disbursement")
+
+
+def has_b2c_history() -> bool:
+    """Whether the site paid by B2C before mpsa_suite was installed: it still has the old app (the
+    rename installs mpsa_suite next to it), or any B2C payout row."""
+    if OLD_APP in frappe.get_installed_apps():
+        return True
+    return any(frappe.db.table_exists(dt) and frappe.get_all(dt, limit=1, pluck="name") for dt in B2C_HISTORY)
+
+
 def approved_phones_only_on_new_sites() -> None:
-    """A new site pays employees by B2C only to phones approved on their Employee M-Pesa Accounts.
-    An upgraded site keeps its setting (off until its employees' phones are approved): install-app
-    runs this, migrate does not."""
-    if frappe.db.exists("DocType", "M-Pesa Suite Settings") and frappe.get_meta("M-Pesa Suite Settings").has_field(
-        "b2c_approved_phones_only"
-    ):
-        frappe.db.set_single_value("M-Pesa Suite Settings", "b2c_approved_phones_only", 1)
+    """A new site pays employees by B2C only to phones approved on their Employee M-Pesa Accounts
+    (plan C.9). A site with B2C history keeps its setting (off until its employees' phones are
+    approved): migrate never runs this, and install-app does not switch it on for a site that
+    still has the old app (the rename, Trident and Astral) or any B2C payout."""
+    if not (frappe.db.exists("DocType", "M-Pesa Suite Settings") and frappe.get_meta(
+            "M-Pesa Suite Settings").has_field("b2c_approved_phones_only")):
+        return
+    if has_b2c_history():
+        return
+    frappe.db.set_single_value("M-Pesa Suite Settings", "b2c_approved_phones_only", 1)

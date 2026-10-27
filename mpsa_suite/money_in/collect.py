@@ -30,7 +30,7 @@ from ..daraja.guard import STK_MAX_AMOUNT, STK_MIN_AMOUNT
 from ..permissions import COLLECT_ROLES, require
 from ..utils.phone import normalize_msisdn, to_local
 from .common import EXPRESS, enabled, named_lock
-from .payment_request import is_mpesa, supersede_unpaid
+from .payment_request import is_mpesa, supersede_unpaid, unbooked_prompts
 
 DOCTYPES = ("Sales Order", "Sales Invoice")
 PAYMENT_REQUEST = "Payment Request"
@@ -150,7 +150,8 @@ def owed(doc) -> float:
 
 def requested(doc) -> tuple:
     """(amount, names): what submitted Payment Requests of ``doc`` still ask for, which ERPNext
-    counts against a new one, less the unpaid M-Pesa ones a new prompt supersedes."""
+    counts against a new one, less the unpaid M-Pesa ones a new prompt supersedes (not one whose
+    prompt the customer paid, which is being booked: it is never superseded)."""
     supersede = enabled("supersede_unpaid_prompts")
     has_outstanding = frappe.get_meta(PAYMENT_REQUEST).has_field("outstanding_amount")
     fields = ["name", "status", "grand_total", "payment_gateway", "payment_gateway_account"]
@@ -163,7 +164,7 @@ def requested(doc) -> tuple:
         fields=fields,
         order_by="creation asc",
     ):
-        if supersede and row.status in UNPAID and is_mpesa(row):
+        if supersede and row.status in UNPAID and is_mpesa(row) and not unbooked_prompts(row.name):
             continue
         amount = flt(row.outstanding_amount) if has_outstanding else (0 if row.status == "Paid" else flt(row.grand_total))
         if amount > 0:

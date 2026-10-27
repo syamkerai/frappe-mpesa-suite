@@ -13,6 +13,8 @@ REVERSAL_DOCTYPE = "Mpesa Reversal Request"
 FINAL = ("Reversed", "Already Reversed", "Failed")
 # A register may have only one reversal in these states.
 LIVE = ("Not Initiated", "Initiated", "Unknown", "Reversed", "Already Reversed")
+# A cancelled reversal in these states may have, or did, return the money (a Result after the cancel)
+MAYBE_REVERSED = ("Unknown", "Reversed", "Already Reversed")
 
 
 def send_reversal(name: str) -> None:
@@ -151,3 +153,31 @@ def validate_request(doc) -> None:
     )
     if other:
         frappe.throw(f"Reversal {other} already exists for {doc.c2b_register}")
+    _check_cancelled(doc)
+
+
+def _check_cancelled(doc) -> None:
+    """A cancelled reversal of the register that may have returned the money: one that a Result
+    later said Reversed refuses any new reversal; one still Unknown (a manager cancelled it after
+    checking the statement) lets only a named M-Pesa Manager make the new one."""
+    from ..permissions import ADMIN_ROLES, administrator_refused
+
+    cancelled = frappe.db.get_value(
+        REVERSAL_DOCTYPE,
+        {"c2b_register": doc.c2b_register, "name": ["!=", doc.name or ""], "docstatus": 2,
+         "status": ["in", MAYBE_REVERSED]},
+        ["name", "status"],
+        as_dict=True,
+        order_by="creation desc",
+    )
+    if not cancelled:
+        return
+    if cancelled.status != "Unknown":
+        frappe.throw(f"Reversal {cancelled.name} of {doc.c2b_register} was cancelled, but M-Pesa answered later that "
+                     f"it is {cancelled.status}: the payment is back with the customer already.")
+    user = frappe.session.user
+    manager = user == "Administrator" or not set(ADMIN_ROLES).isdisjoint(frappe.get_roles())
+    if administrator_refused() or not manager:
+        frappe.throw(f"Reversal {cancelled.name} of {doc.c2b_register} was cancelled while M-Pesa had not answered "
+                     "(Unknown): it may have returned the payment. Only an M-Pesa Manager, with their own login, "
+                     "who has checked the statement makes a new reversal of it.", frappe.PermissionError)

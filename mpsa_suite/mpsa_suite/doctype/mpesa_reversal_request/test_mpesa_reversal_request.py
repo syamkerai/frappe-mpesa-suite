@@ -81,3 +81,41 @@ class TestMpesaReversalRequest(IntegrationTestCase):
             frappe.set_user("Administrator")
             frappe.db.rollback()  # the users, the register, the reversal and the switch
             frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+
+    def test_an_unknown_reversal_is_settled_by_a_named_manager_only(self):
+        """Round 4 final review: a reversal whose Result never came (Unknown) may have returned the
+        money. A payer and the shared Administrator login cannot cancel it; a named M-Pesa Manager
+        can, it stays Unknown, and only a manager makes a new reversal of that receipt."""
+        from mpsa_suite.money_in import testing as t
+
+        t.bootstrap()
+        payer, manager = t.payer(), t.manager()
+        register = frappe.get_doc({"doctype": "Mpesa C2B Payment Register", "transid": "TREV" + frappe.generate_hash(
+            length=6).upper(), "transamount": 900, "businessshortcode": t.SHORTCODE, "full_name": "TEST PAYER"})
+        register.name = f"_T-C2B-REV-{frappe.generate_hash(length=6)}"
+        register.db_insert()
+        reversal = frappe.get_doc({"doctype": "Mpesa Reversal Request", "c2b_register": register.name,
+                                   "transaction_id": register.transid, "amount": 900, "original_amount": 900,
+                                   "mpesa_settings": t.SETTINGS, "status": "Unknown", "docstatus": 1,
+                                   "remarks": "Reversal", "owner": payer})
+        reversal.name = f"_T-REV-UNK-{frappe.generate_hash(length=6)}"
+        reversal.db_insert()
+        new = {"doctype": "Mpesa Reversal Request", "c2b_register": register.name, "mpesa_settings": t.SETTINGS,
+               "reason": "Paid twice", "remarks": "Reversal"}
+        try:
+            for user, message in ((payer, "Not permitted"), ("Administrator", "Use your own login")):
+                frappe.set_user(user)
+                self.assertRaisesRegex(frappe.PermissionError, message,
+                                       frappe.get_doc("Mpesa Reversal Request", reversal.name).cancel)
+            frappe.set_user(manager)
+            frappe.get_doc("Mpesa Reversal Request", reversal.name).cancel()
+            self.assertEqual(frappe.db.get_value("Mpesa Reversal Request", reversal.name, ["docstatus", "status"]),
+                             (2, "Unknown"))
+            frappe.set_user(payer)  # Make Reversal again: M-Pesa may have reversed it already
+            self.assertRaisesRegex(frappe.PermissionError, "Only an M-Pesa Manager",
+                                   frappe.get_doc(dict(new)).insert)
+            frappe.set_user(manager)
+            self.assertTrue(frappe.get_doc(dict(new)).insert().name)
+        finally:
+            frappe.set_user("Administrator")
+            frappe.db.rollback()  # the users, the register and the reversals

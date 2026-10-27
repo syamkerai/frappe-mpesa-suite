@@ -7,7 +7,7 @@ from frappe.model.document import Document
 from ....money_out import maker_checker, send_confirm
 from ....money_out.api import PAYOUT_OR_ADMIN
 from ....money_out.reversal import send_reversal, validate_request
-from ....permissions import require, require_named_user
+from ....permissions import ADMIN_ROLES, require, require_named_user
 
 
 class MpesaReversalRequest(Document):
@@ -28,6 +28,16 @@ class MpesaReversalRequest(Document):
         send_reversal(self.name)
 
     def before_cancel(self):
+        # Decide on what the database holds (a form opened before the Result came holds an older
+        # status), and keep it on the cancelled reversal.
+        self.status = frappe.db.get_value(self.doctype, self.name, "status") or self.status
         if self.status not in ("Not Initiated", "Failed", "Unknown"):
             frappe.throw(f"A reversal that is {self.status} cannot be cancelled")
+        if self.status == "Unknown":
+            # M-Pesa may have reversed it (no Result came): only a named M-Pesa Manager who has checked the
+            # statement cancels it. It stays Unknown, so a late Result still matches it, and a new reversal of
+            # the receipt is a manager's too (money_out.reversal.validate_request).
+            require_named_user()
+            require(ADMIN_ROLES)
+            return
         require(PAYOUT_OR_ADMIN)

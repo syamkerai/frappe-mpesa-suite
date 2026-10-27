@@ -514,3 +514,71 @@ def test_without_a_round_off_account_the_cents_stay_open_and_the_order_is_still_
 
     pay(env, 1, "UHH1AAAAAS", auto_invoice=1)  # a late receipt: the order is not billed again
     assert env.frappe.invoices_made == [SO]
+
+
+# ================================================================ final review: a prompt paid, not booked yet
+def prompt_row(env, name, **kw):
+    row = dict(name=name, reference_doctype="Payment Request", reference_name=PR, docstatus=1, status="Completed",
+               transaction_id=f"T{name[-1]}RECEIPT", amount=5000.0, base_amount=5000.0, currency="KES",
+               is_reconciled=0)
+    row.update(kw)
+    env.frappe.db.table(EXPRESS)[name] = row
+    return row
+
+
+def test_a_paid_prompt_not_booked_yet_is_not_asked_for_again(env):
+    # MEXP-1 paid KES 5,000 of PR-1 (KES 5,000); its booking failed or has not run: PR-1 still owes 5,000
+    payment_request(env, 5000)
+    prompt_row(env, "MEXP-1")
+    with pytest.raises(env.frappe.ValidationError, match="paid by M-Pesa prompt MEXP-1 .receipt T1RECEIPT., which is "
+                                                         "being booked"):
+        express_doc(env, 5000, name="MEXP-2").validate_payment_request_amount()
+
+
+def test_a_paid_prompt_not_booked_yet_counts_against_what_is_left(env, monkeypatch):
+    # a request booked in parts: 5,000 of 8,000 paid by MEXP-1 (not booked yet), so at most 3,000 is asked
+    payment_request(env, 8000)
+    env.frappe.metas["Payment Request"] = Meta({"outstanding_amount", "grand_total", "currency"})
+    prompt_row(env, "MEXP-1")
+    doc = express_doc(env, 8000, name="MEXP-2")
+    monkeypatch.setattr(env.mer, "stk_books_part_payments", lambda pr: True)
+    doc.validate_payment_request_amount()
+    assert doc.base_amount == 3000
+
+
+@pytest.mark.parametrize("values", [
+    {"is_reconciled": 1},  # booked
+    {"status": "Failed", "transaction_id": None},  # never paid
+    {"docstatus": 2},
+])
+def test_only_a_paid_unbooked_prompt_holds_the_request(env, values):
+    payment_request(env, 5000)
+    prompt_row(env, "MEXP-1", **values)
+    doc = express_doc(env, 5000, name="MEXP-2")
+    doc.validate_payment_request_amount()
+    assert doc.base_amount == 5000
+
+
+def test_a_receipt_booked_another_way_holds_nothing(env):
+    payment_request(env, 5000)
+    prompt_row(env, "MEXP-1")
+    env.frappe.db.table("Payment Entry")["ACC-PAY-9"] = {"name": "ACC-PAY-9", "reference_no": "T1RECEIPT",
+                                                        "docstatus": 1}
+    pr = importlib.import_module("mpsa_suite.money_in.payment_request")
+    assert pr.unbooked_prompts(PR) == []
+    assert [p.name for p in pr.unbooked_prompts(PR, exclude="MEXP-0")] == []
+
+
+def test_resending_a_prompt_while_another_paid_one_is_being_booked_is_refused(env, monkeypatch):
+    env.frappe.utils.now = lambda: "2026-10-27 12:00:00"
+    stkpush = importlib.import_module("mpsa_suite.www.mpesa.stkpush")
+    payment_request(env, 5000)
+    prompt_row(env, "MEXP-1")
+    failed = types.SimpleNamespace(name="MEXP-2", status="Failed", reference_doctype="Payment Request",
+                                   reference_name=PR, base_amount=5000.0, amount=5000.0,
+                                   check_permission=lambda ptype: None)
+    failed.get = lambda key, default=None: getattr(failed, key, default)
+    with pytest.raises(env.frappe.ValidationError, match="being booked"):
+        stkpush._check_can_push(failed)
+    env.frappe.db.table(EXPRESS)["MEXP-1"]["is_reconciled"] = 1  # booked: PR-1 owes what is left in ERPNext
+    stkpush._check_can_push(failed)

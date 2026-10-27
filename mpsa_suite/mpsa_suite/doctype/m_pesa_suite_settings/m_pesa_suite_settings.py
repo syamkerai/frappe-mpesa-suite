@@ -12,8 +12,9 @@ from ....permissions import CONFIG_ROLES, require
 # Switches that guard who sends payouts and where: a change to any is written on the settings and
 # sent to the Notify Role, naming who changed what (turning off maker-checker, allowing one-off
 # B2B, shortening the hold on new payee accounts, another Integration User, Administrator sends,
-# employees paid to phones not approved, paying merchants and casual payees and their caps, and
-# the Notify Role itself: that alert goes to the old role and the new one).
+# employees paid to phones not approved, paying merchants and casual payees and their caps, the
+# Expense Claim workflow states that may be paid, and the Notify Role itself: that alert goes to the
+# old role and the new one).
 WATCHED = (
     "schedule_maker_checker",
     "refuse_administrator_payouts",
@@ -26,6 +27,7 @@ WATCHED = (
     "allow_claim_payees",
     "claim_payee_max_amount",
     "claim_payee_daily_cap",
+    "claim_payable_workflow_states",  # the payable gate of claims and advances (blank = any approved one)
 )
 
 
@@ -97,4 +99,6 @@ def _shown(df, value) -> str:
         return str(cint(value))
     if df.fieldtype in ("Currency", "Float"):
         return f"{flt(value, 2):,.2f}".removesuffix(".00")
+    if df.fieldtype in ("Small Text", "Text", "Long Text"):  # one value per line: "Approved, Paid Out"
+        return ", ".join(line.strip() for line in cstr(value).splitlines() if line.strip()) or _("not set")
     return cstr(value).strip() or _("not set")

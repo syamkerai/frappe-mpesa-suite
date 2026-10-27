@@ -93,3 +93,17 @@ def test_send_summary_names_the_holder_of_a_bank_account(tmp_path):
     assert "Equity Bank (bank paybill 247247), account 0123456789" in with_holder
     assert "Account holder: Someone Else Ltd" in with_holder
     assert "Account holder" not in without
+
+
+WARNED = """
+const r = {doctype: "Supplier M-Pesa Account", rows: [], problems: [], warnings: ["The account holder X is not Y"]};
+return [mpsa_send.summary_html(r), mpsa_send.summary_html(Object.assign({}, r, {warnings: []}))];
+"""
+
+
+def test_the_summary_shows_what_to_check_before_confirming(tmp_path):
+    # final review: Approve shows the third-party account warning, which used to show only at the submit
+    warned, plain = run(tmp_path, SEND, WARNED)
+    assert "Check before you confirm" in warned and "The account holder X is not Y" in warned
+    assert "Cannot be confirmed" not in warned, "a warning does not stop the confirm"
+    assert "Check before you confirm" not in plain

@@ -61,6 +61,10 @@ B2B_DOCUMENTS = (("purchase_invoice", "Purchase Invoice"), ("purchase_order", "P
                  ("employee_advance", "Employee Advance"))
 # What a confirm refuses when it changed since the summary
 CHANGED = {"modified": "it was saved again", "amount": "the amount", "destination": "who is paid or where"}
+# An Expense Claim's payee line (money_out.claim_payees): a merchant or casual payee paid straight from the claim
+CLAIM_PAYEE = "M-Pesa Claim Payee"
+PAYEE_FIELDS = ("name", "idx", "parent", "parenttype", "payee_type", "payee_name", "bank_paybill", "shortcode",
+                "account_number", "phone", "amount", "destination_key")
 
 
 def _clock() -> float:
@@ -264,9 +268,63 @@ def _bank_destination(acc, shortcode, number) -> str | None:
                                                           shortcode, number)
 
 
+def _payee_lines(names) -> dict:
+    """{name: line} of the Expense Claim payee lines (M-Pesa Claim Payee) ``names``, each with
+    ``claimant`` (the claim's employee name) and ``approved_account`` (a supplier's approved Supplier
+    M-Pesa Account with the line's destination, which the payee caps skip; claim_payees)."""
+    from . import claim_payees
+
+    wanted = sorted({cstr(n).strip() for n in names if cstr(n).strip()})
+    if not wanted:
+        return {}
+    lines = {r.name: r for r in frappe.get_all(CLAIM_PAYEE, filters={"name": ["in", wanted]},
+                                               fields=list(PAYEE_FIELDS))}
+    claimants = {}
+    for line in lines.values():
+        if line.parent not in claimants:
+            found = frappe.db.get_value("Expense Claim", line.parent, ["employee", "employee_name"], as_dict=True)
+            claimants[line.parent] = cstr((found or {}).get("employee_name") or (found or {}).get("employee")).strip()
+        line.claimant = claimants[line.parent]
+        line.approved_account = claim_payees.approved_supplier_account(line)
+    return lines
+
+
+def _payee_row(line, destination, amount, charge=None) -> dict:
+    """A payout of an Expense Claim's payee line: the receiver is the payee the claim names (the
+    claimant is only who is reimbursed in the books), and the destination says it is no approved
+    account unless it is a supplier's."""
+    expected = None
+    if line.approved_account:
+        expected = frappe.db.get_value(SUPPLIER_ACCOUNT, line.approved_account, "expected_name")
+        destination += " " + _("(a supplier's approved account, {0})").format(line.approved_account)
+    else:
+        destination += " " + _("(payee of Expense Claim {0}, not an approved account)").format(line.parent)
+    party = _("payee on {0}, claimant {1}").format(line.parent, line.claimant or _("not named"))
+    document = _("Expense Claim {0}, payee row #{1}").format(line.parent, line.idx)
+    return _row(cstr(line.payee_name).strip() or _("Not named"), destination, amount, charge, document, party,
+                expected)
+
+
+def _b2b_payee_destination(doc, line) -> str:
+    """Where a B2B request for a payee line pays, as sent (claim_payees.check_b2b keeps it the line's)."""
+    from ..daraja import money_out as daraja
+    from . import party_accounts as pa
+
+    shortcode, number = cstr(doc.get("receiver_shortcode")).strip(), cstr(doc.get("account_reference")).strip()
+    if doc.get("command_id") == daraja.B2B_BUY_GOODS:
+        return _("Till {0}").format(shortcode)
+    bank = _bank_destination(frappe._dict(account_type=pa.BANK, bank_paybill=line.get("bank_paybill")),
+                             shortcode, number) if line.get("payee_type") == pa.BANK else None
+    return bank or _("Paybill {0}, account {1}").format(shortcode, number)
+
+
 def _b2b_rows(doc) -> list:
     from ..daraja import money_out as daraja
 
+    payee = cstr(doc.get("claim_payee")).strip()
+    line = _payee_lines([payee]).get(payee) if payee else None
+    if line:
+        return [_payee_row(line, _b2b_payee_destination(doc, line), doc.get("amount"))]
     if cstr(doc.get("employee")).strip():
         party_type, party, account_doctype = "Employee", doc.employee, EMPLOYEE_ACCOUNT
         account = doc.get("employee_mpesa_account")
@@ -291,14 +349,23 @@ def _b2b_rows(doc) -> list:
                  acc.get("expected_name") if acc else None, acc.get("account_holder_name") if acc else None)]
 
 
+def _b2c_send_rows(doc) -> list:
+    return doc._rows_to_send() if callable(getattr(doc, "_rows_to_send", None)) else doc.get("references") or []
+
+
 def _b2c_rows(doc) -> list:
-    rows = doc._rows_to_send() if callable(getattr(doc, "_rows_to_send", None)) else doc.get("references") or []
+    rows = _b2c_send_rows(doc)
+    payees = _payee_lines(row.get("claim_payee") for row in rows)
     out = []
     for row in rows:
         party_type = row.get("party_type") or doc.get("party_type")
         document = f"{_(row.reference_doctype)} {row.reference_name}" if row.get("reference_name") else None
         amount = row.get("allocated_amount")
         phone = _("M-Pesa phone {0}").format(mask(row.get("partyb")))
+        line = payees.get(cstr(row.get("claim_payee")).strip())
+        if line:  # a casual payee of a claim: the row's party is the claimant, who is not who is paid
+            out.append(_payee_row(line, phone, amount, _b2c_charge(amount)))
+            continue
         out.append(_row(_party_name(party_type, row.get("party")), phone, amount, _b2c_charge(amount), document,
                         row.get("party")))
     return out
@@ -359,7 +426,99 @@ def _problems(doc) -> list:
     if cstr(doc.get("schedule_line")).strip() or cstr(doc.get("payment_schedule")).strip():
         return [_("A scheduled payment is paid with Pay Selected in M-Pesa Payments Due, not by hand.")]
     problem = maker_checker.preview(doc, user)
-    return [problem] if problem else []
+    return ([problem] if problem else []) + _payer_problems(doc, user) + _payee_problems(doc)
+
+
+def _paid_employees(doc) -> set:
+    """The employees a payout pays, or pays for (the claim's or advance's employee): who may not
+    send it (employee_accounts.own_payment_problem), as its submit checks (b2b._check_payer,
+    employee_documents.check_not_own_b2c and check_b2c_request)."""
+    from . import employee_documents
+
+    employees = set()
+    if doc.doctype == B2B:
+        employees.add(cstr(doc.get("employee")).strip())
+    elif doc.doctype == B2C_REQUEST:
+        if doc.get("party_type") == "Employee":
+            employees.add(cstr(doc.get("party")).strip())
+    elif doc.doctype == B2C:
+        for row in _b2c_send_rows(doc):
+            if row.get("party_type") == "Employee":
+                employees.add(cstr(row.get("party")).strip())
+            dt, dn = row.get("reference_doctype"), cstr(row.get("reference_name")).strip()
+            if dt in employee_documents.DOCTYPES and dn:
+                employees.add(cstr(frappe.db.get_value(dt, dn, "employee")).strip())
+    return {e for e in employees if e}
+
+
+def _payer_problems(doc, user) -> list:
+    """What the send would refuse about the payer: their own payment, and a B2B payment to an
+    employee for no Salary Slip, Expense Claim or Employee Advance by someone who is no manager."""
+    from . import b2b, employee_accounts, owed
+
+    problems = [p for p in (employee_accounts.own_payment_problem(e, user) for e in sorted(_paid_employees(doc))) if p]
+    if (doc.doctype == B2B and b2b.is_employee(doc) and not b2b.salary_slip(doc)
+            and not owed.employee_document_of(doc)[0] and not employee_accounts.is_manager(user)):
+        problems.append(_(b2b.NO_DOCUMENT))
+    return problems
+
+
+def _payee_problems(doc) -> list:
+    """What the send would refuse about the Expense Claim payee lines a payout pays (claim_payees,
+    at the send): the switch off, and the payee caps on destinations that are no approved account
+    (M-Pesa Suite Settings, 0 = no cap): the per-payment cap and the company's day."""
+    from . import claim_payees
+
+    if doc.doctype == B2B:
+        paid = [(doc.get("claim_payee"), doc.get("amount"))]
+    elif doc.doctype == B2C:
+        paid = [(row.get("claim_payee"), row.get("allocated_amount")) for row in _b2c_send_rows(doc)]
+    else:
+        return []
+    lines = _payee_lines(name for name, _amount in paid)
+    if not lines:
+        return []
+    s = claim_payees.settings()
+    if not s.allow:
+        return [_("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")]
+    problems, capped = [], 0.0
+    for name, amount in paid:
+        line = lines.get(cstr(name).strip())
+        if not line or line.approved_account:
+            continue
+        problem = claim_payees.amount_cap_problem(frappe._dict(line, amount=amount), s)
+        if problem:
+            problems.append(f"{line.parent}: {problem}")
+        capped += flt(amount)
+    if s.daily_cap and capped:
+        sent = claim_payees.sent_today(doc.get("company"), (doc.doctype, doc.name))
+        if sent + capped > s.daily_cap + 0.001:
+            problems.append(_("KES {0} was sent today to Expense Claim payees that are not approved accounts; with "
+                              "this KES {1} it would pass the day's cap of KES {2} (M-Pesa Suite Settings).").format(
+                claim_payees.money(sent), claim_payees.money(capped), claim_payees.money(s.daily_cap)))
+    return problems
+
+
+def _warnings(doc) -> list:
+    """What the person approving should check, which does not stop them: a payee account that pays a
+    third party's bank account, or an employee paid to a business paybill or till (the warnings
+    party_accounts.validate_account shows when the account is saved)."""
+    from . import party_accounts as pa
+
+    if doc.doctype not in ACCOUNTS:
+        return []
+    p = pa.profile(doc)
+    out = []
+    if pa.is_bank(doc):
+        name = pa.party_name(p, doc.get(p.party_field))
+        holder = cstr(doc.get("account_holder_name")).strip()
+        if name and holder and not pa.names_match(name, holder):
+            out.append(_("The account holder {0} is not {1}: this pays a third party's account. Check the proof "
+                         "before approving.").format(holder, name))
+    elif doc.doctype == EMPLOYEE_ACCOUNT and doc.get("account_type") in (pa.PAYBILL, pa.TILL):
+        out.append(_("This pays an employee to a business paybill or till: check that the proof shows the number "
+                     "is the employee's."))
+    return out
 
 
 def _summary(doc) -> dict:
@@ -378,5 +537,5 @@ def _summary(doc) -> dict:
         "shortcode": _shortcode(doc.get("mpesa_settings")),
         "prepared_by": doc.owner, "changed_by": doc.get("modified_by"), "entered_by": doc.get("entered_by"),
         "proof": doc.get("proof"), "modified": cstr(doc.modified),
-        "problems": _problems(doc),
+        "problems": _problems(doc), "warnings": _warnings(doc),
     }

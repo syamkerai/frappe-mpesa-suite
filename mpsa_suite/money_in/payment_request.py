@@ -25,11 +25,51 @@ def before_insert(doc, method=None) -> None:
         supersede_unpaid(doc)
 
 
+def unbooked_prompts(payment_request: str, exclude: str | None = None) -> list:
+    """The Payment Request's M-Pesa prompts the customer paid that are not booked yet: Completed (or
+    carrying a receipt), not reconciled, no submitted Payment Entry has the receipt, and no reversal
+    returned its money. Booking
+    (money_in.stk_verify.book) can lag, fail up to MAX_BOOKING_ATTEMPTS or be held by a reversal,
+    and until it is done the Payment Request still owes their money in ERPNext. Each row has
+    ``paid``: its amount in the Payment Request's currency (``base_amount``; KES ``amount``)."""
+    if not payment_request:
+        return []
+    rows = frappe.get_all(
+        EXPRESS,
+        filters={"reference_doctype": "Payment Request", "reference_name": payment_request, "docstatus": 1,
+                 "is_reconciled": 0, "name": ["!=", exclude or ""]},
+        fields=["name", "status", "transaction_id", "amount", "base_amount", "currency"],
+        order_by="creation asc",
+    )
+    out = []
+    for row in rows:
+        receipt = cstr(row.transaction_id).strip()
+        if row.status != "Completed" and not receipt:
+            continue
+        if receipt and frappe.db.exists("Payment Entry", {"reference_no": receipt, "docstatus": 1}):
+            continue  # booked another way (a C2B register, by hand)
+        if receipt and frappe.db.exists("Mpesa Reversal Request", {
+                "transaction_id": receipt, "docstatus": ["in", [1, 2]], "status": ["in", ["Reversed", "Already Reversed"]]}):
+            continue  # its money went back to the customer: never booked, and the request still owes it
+        row.paid = flt(row.amount) if cstr(row.currency or "KES") == "KES" else flt(row.base_amount or row.amount)
+        out.append(row)
+    return out
+
+
+def being_booked(payment_request: str, prompts: list) -> str:
+    """Why nothing more is asked for: the prompts the customer paid are being booked."""
+    paid = ", ".join(f"{p.name}" + (f" (receipt {p.transaction_id})" if p.transaction_id else "") for p in prompts)
+    return (f"Payment Request {payment_request} was paid by M-Pesa prompt {paid}, which is being booked: a new prompt "
+            "would ask the customer to pay again. Wait for the booking (the Mpesa Express Request), or settle it by "
+            "hand.")
+
+
 def supersede_unpaid(doc) -> None:
     """Re-prompt: free the amount held by older unpaid M-Pesa requests for the same document.
 
     Cancelled the proper way (``cancel()``), so ERPNext releases the reserved outstanding
-    and a late payment against the old request still resolves to the same order.
+    and a late payment against the old request still resolves to the same order. A request whose
+    prompt the customer paid, not booked yet, is no unpaid one: it is kept (unbooked_prompts).
     """
     if not (doc.get("reference_doctype") and doc.get("reference_name")):
         return
@@ -47,7 +87,7 @@ def supersede_unpaid(doc) -> None:
         order_by="creation asc",
     )
     for row in older:
-        if not is_mpesa(row):
+        if not is_mpesa(row) or (row.docstatus == 1 and unbooked_prompts(row.name)):
             continue
         old = frappe.get_doc("Payment Request", row.name)
         old.flags.ignore_permissions = True
