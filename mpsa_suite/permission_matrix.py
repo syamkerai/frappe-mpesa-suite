@@ -44,21 +44,23 @@ ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
 SUITE_ROLES = (MM, MP, MC, MV)
 
 ALL = "rwcsxadRepmh"
-# Prepares money-out documents but does not send them (decision D1): no submit or cancel.
+# Prepares money-out documents but does not send them (decision D1): no submit or cancel. System
+# Manager too, on the payouts and payee accounts (decision 1, 2026-10-27: only named payers send,
+# only an M-Pesa Manager approves; System Manager keeps the settings).
 PREPARE = "rwcadRepmh"
 
 # DocType -> {role: rights}. "Role@1" is that role's row at permission level 1.
 # Child tables (istable) take their parent's permissions and are not listed.
 DOCTYPES = {
     "B2C Disbursement Request": {
-        SM: ALL, MM: ALL,
+        SM: PREPARE, MM: ALL,
         AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         AU: "rwcRepmh", HU: "rwcRepmh",
         MV: "rRep",
     },
     "B2C Payment Disbursement": {
-        SM: ALL, MM: ALL,
+        SM: PREPARE, MM: ALL,
         AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         MV: "rRep",
@@ -72,13 +74,13 @@ DOCTYPES = {
     # never who entered it, party_accounts.approve). Salary data (D4): no Accounts roles, no Viewer, and
     # no Payer either (Phase 3 review: the payer sees the destination on the line it pays).
     "Employee M-Pesa Account": {
-        SM: ALL, MM: ALL,
+        SM: PREPARE, MM: ALL,
         HM: "rwcaRepmh", HU: "rwcaRep",
     },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
-        SM: ALL, MM: ALL, MP: ALL,
+        SM: PREPARE, MM: ALL, MP: ALL,
         AM: PREPARE,
         AU: "rwcdRep",
         MV: "rRep",
@@ -106,7 +108,7 @@ DOCTYPES = {
     "Mpesa Match Log": {SM: "rwcdRep", MM: "rwcdRep", AM: "rRep", AU: "rRep", MV: "rRep"},
     "Mpesa Payment Intent": {SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rRep", AU: "rRep", MV: "rRep", MC: "rRep"},
     "Mpesa Public Key Certificate": {SM: "rwcdpmh", MM: "rwc"},
-    "Mpesa Reversal Request": {SM: ALL, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
+    "Mpesa Reversal Request": {SM: PREPARE, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
     "Mpesa Sandbox Test Run": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     # Below M-Pesa Manager: pick a shortcode in a Link field only. Balances: Payments Due's Refresh
     # Balances; transaction status: the C2B register list (both FINANCE_ROLES, no read needed).
@@ -121,7 +123,7 @@ DOCTYPES = {
     # Shipped by upstream under this app's folder; the payments app owns the same DocType.
     "Payment Gateway": {SM: "rwcd"},
     "Supplier M-Pesa Account": {
-        SM: ALL, MM: ALL,
+        SM: PREPARE, MM: ALL,
         AM: PREPARE,
         AU: "rwcaRepmh", MP: "rwcaRepmh", PM: "rwcaRepmh",
         MV: "rRep", PU: "rRep",
@@ -274,6 +276,12 @@ ENDPOINTS = {
     # Money out
     "mpsa_suite.money_out.api.check_b2c_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
     "mpsa_suite.money_out.api.make_reversal": ("PAYOUT_ROLES or ADMIN_ROLES + read register", ("roles:PAYOUT_OR_ADMIN", "perm")),
+    # Send via M-Pesa / Approve (round 4): the only submit of a payout or payee account
+    "mpsa_suite.money_out.send_confirm.prepare_send": (
+        "PAYOUT_ROLES (ADMIN_ROLES to approve a payee account), a named login, submit on the document",
+        ("via:_sendable",)),
+    "mpsa_suite.money_out.send_confirm.confirm_send": (
+        "As prepare_send, and the user the summary was made for", ("via:_sendable",)),
     "mpsa_suite.money_out.schedule.prepare_payment": ("PAYOUT_ROLES + read the schedule", ("roles:PAYOUT_ROLES", "perm")),
     "mpsa_suite.money_out.schedule.confirm_payment": ("PAYOUT_ROLES, the user the summary was made for", ("roles:PAYOUT_ROLES",)),
     "mpsa_suite.money_out.schedule.move_date": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
@@ -332,6 +340,7 @@ HELPERS = {
     "confirm_receiver_name": ("mpsa_suite.money_out.party_accounts", ("roles:ADMIN_ROLES",)),
     "accounts_for": ("mpsa_suite.money_out.party_accounts", ("perm",)),
     "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:FINANCE_ROLES", "perm")),
+    "_sendable": ("mpsa_suite.money_out.send_confirm", ("roles:PAYOUT_ROLES", "roles:ADMIN_ROLES", "perm")),
 }
 
 GUEST_EVIDENCE = ("callback", "api", "page")

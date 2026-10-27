@@ -332,8 +332,11 @@ def record_receiver_name(doctype, account, received_name, payout, notify=None) -
 
 def confirm_receiver_name(doc, adopt_name: bool = False) -> None:
     """A manager checked with the party: unblock the account, optionally taking M-Pesa's name."""
+    from ..permissions import require_named_user
+
     p = profile(doc)
     require(ADMIN_ROLES)
+    require_named_user()  # the note names who checked
     if not cint(doc.get("name_mismatch")):
         return
     values = {"name_mismatch": 0}

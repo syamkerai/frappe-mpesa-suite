@@ -9,7 +9,8 @@ event checks again on the server. Their names are what the suite's form scripts 
 - ``can_configure``: CONFIG_ROLES, M-Pesa settings;
 - ``can_see_salaries``: money_out.salary_access.can_see_salaries.
 The shared Administrator login gets no ``can_pay`` or ``can_approve`` while M-Pesa Suite Settings
-refuses it (permissions.administrator_refused).
+refuses it (permissions.administrator_refused), and System Manager none of ``can_pay``,
+``can_approve``, ``can_see_salaries`` or ``can_prepare`` (decision D5): only named payers send.
 """
 
 import frappe

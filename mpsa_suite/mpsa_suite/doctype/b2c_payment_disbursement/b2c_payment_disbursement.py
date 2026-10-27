@@ -10,8 +10,8 @@ from frappe.query_builder import DocType
 from frappe.utils import cint, flt, now
 
 from ....daraja.guard import B2C_MIN_AMOUNT
-from ....money_out import maker_checker
-from ....permissions import PAYOUT_ROLES, is_direct_call, require
+from ....money_out import maker_checker, send_confirm
+from ....permissions import PAYOUT_ROLES, is_direct_call, require, require_named_user
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
@@ -50,6 +50,8 @@ class B2CPaymentDisbursement(Document):
 
     def before_submit(self) -> None:
         """Initital payment trigger"""
+        require_named_user()
+        send_confirm.assert_deliberate(self)  # Send via M-Pesa or Pay Selected, never a plain submit
         require(PAYOUT_ROLES)  # submitting sends the money
         if not self.flags.get("mpesa_from_schedule"):
             maker_checker.check(self)
@@ -317,6 +319,7 @@ class B2CPaymentDisbursement(Document):
     @frappe.whitelist()
     def retry_failed_payments(self) -> None:
         """Retry failed B2C Payment References"""
+        require_named_user()  # as below: each retry would refuse it, but only in the log
         require(PAYOUT_ROLES)  # each retry checks again, but its refusal would only be logged
         for ref in self.references:
             if ref.payment_status == "Failed" and ref.b2c_disbursement_request:
@@ -1041,7 +1044,9 @@ def create_b2c_request(ref, settings, b2c_disbursement):
             b2c_request.flags.mpesa_from_schedule = True
             b2c_request.flags.mpesa_send_later = True
         b2c_request.insert(ignore_permissions=True)
-        b2c_request.submit()
+        # its disbursement's Send via M-Pesa (or Pay Selected) was the deliberate step
+        with send_confirm.deliberate("B2C Payment Disbursement row", b2c_request):
+            b2c_request.submit()
         frappe.db.set_value(
             ref.doctype, ref.name, "b2c_disbursement_request", b2c_request.name
         )

@@ -233,3 +233,47 @@ def receipt(amount: float, billref: str = "", msisdn: str = "", transid: str | N
     doc = frappe.get_doc({"doctype": "Mpesa C2B Payment Register", **confirmation_payload(amount, billref, msisdn, transid)})
     doc.insert(ignore_permissions=True)
     return doc.name
+
+
+# ---------------------------------------------------------------- named users (round 4)
+# Bench tests send payouts and approve payee accounts as named users holding the role that job
+# needs, never as Administrator (permissions.require_named_user) or System Manager (not a payer).
+PAYER = "_t-mpesa-payer@example.com"
+MANAGER = "_t-mpesa-manager@example.com"
+
+
+def named_user(email: str, *roles) -> str:
+    """A System User ``email`` holding at least ``roles`` (made once; commit it in setUpClass)."""
+    if not frappe.db.exists("User", email):
+        frappe.get_doc({"doctype": "User", "email": email, "first_name": email.split("@")[0].strip("_"),
+                        "send_welcome_email": 0, "user_type": "System User"}).insert(ignore_permissions=True)
+    user = frappe.get_doc("User", email)
+    missing = [r for r in roles if r not in {row.role for row in user.roles} and frappe.db.exists("Role", r)]
+    if missing:
+        user.flags.ignore_permissions = True
+        user.add_roles(*missing)
+    return email
+
+
+def payer() -> str:
+    """An M-Pesa Payer: sends payouts (Send via M-Pesa, Pay Selected)."""
+    return named_user(PAYER, "M-Pesa Payer")
+
+
+def manager() -> str:
+    """An M-Pesa Manager: approves payee accounts, sends payouts no document caps, admin work."""
+    return named_user(MANAGER, "M-Pesa Manager")
+
+
+def send_as(user: str, doc):
+    """Press Send via M-Pesa (or Approve) on the saved draft ``doc`` and Confirm, as ``user``
+    (money_out.send_confirm.send_for_test: the 5-second wait skipped). Returns the document as
+    saved; the session user is put back."""
+    from ..money_out.send_confirm import send_for_test
+
+    previous = frappe.session.user
+    frappe.set_user(user)
+    try:
+        return send_for_test(doc)
+    finally:
+        frappe.set_user(previous)

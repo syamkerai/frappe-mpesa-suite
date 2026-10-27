@@ -4,10 +4,10 @@
 import frappe
 from frappe.model.document import Document
 
-from ....money_out import maker_checker
+from ....money_out import maker_checker, send_confirm
 from ....money_out.b2b import send_b2b, validate_request
 from ....money_out.schedule import INTERRUPTED, assert_line_due, check_request
-from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
+from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require, require_named_user
 
 # Written only by the server (the send, the ack, the Result, the booking), with db writes. The
 # money checks rely on them, so a save after submit never changes them.
@@ -33,6 +33,8 @@ class MpesaB2BPaymentRequest(Document):
     def before_submit(self):
         # Every check again, under the document's lock: validate() above runs only on drafts,
         # and Frappe also submits an insert that carries docstatus 1 (F1).
+        require_named_user()
+        send_confirm.assert_deliberate(self)  # Send via M-Pesa or Pay Selected, never a plain submit
         require(PAYOUT_ROLES)
         if not self.get("schedule_line"):
             maker_checker.check(self)  # a schedule line was checked at Pay Selected

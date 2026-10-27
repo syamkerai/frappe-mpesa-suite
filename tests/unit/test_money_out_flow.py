@@ -698,7 +698,7 @@ def _controller(env, monkeypatch):
     monkeypatch.setattr(module, "validate_request", lambda doc, at_submit=False: calls.append(at_submit))
     monkeypatch.setattr(module, "send_b2b", lambda name: calls.append(("send", name)))
     doc = module.MpesaB2BPaymentRequest()
-    doc.name, doc.docstatus, doc.status = "MB2B-1", 1, None
+    doc.doctype, doc.name, doc.docstatus, doc.status = "Mpesa B2B Payment Request", "MB2B-1", 1, None
     doc.flags = fake_frappe._dict()  # as a Frappe Document has
     doc.get = lambda key, default=None: getattr(doc, key, default)
     doc.owner = "clerk@example.com"  # prepared by someone else: maker-checker lets the payer send it
@@ -712,15 +712,30 @@ def test_b2b_submit_runs_every_check_again(env, monkeypatch):
     doc, calls = _controller(env, monkeypatch)
     doc.validate()
     assert calls == []  # docstatus 1: not here
-    doc.before_submit()
+    with _sent(doc):
+        doc.before_submit()
     doc.on_submit()
     assert calls == [True, ("send", "MB2B-1")] and doc.status == "Not Initiated"
+
+
+def _sent(doc):
+    """As Send via M-Pesa submits it (money_out.send_confirm.confirm_send)."""
+    send_confirm = importlib.import_module("mpsa_suite.money_out.send_confirm")
+    return send_confirm.deliberate("Send via M-Pesa", doc)
+
+
+def test_b2b_plain_submit_is_refused_before_any_check(env, monkeypatch):
+    # the list's bulk Submit, REST, frappe.client.submit, run_doc_method: none is the deliberate step
+    doc, calls = _controller(env, monkeypatch)
+    with pytest.raises(env.frappe.ValidationError, match="Send via M-Pesa button"):
+        doc.before_submit()
+    assert calls == []
 
 
 def test_b2b_submit_needs_a_payout_role(env, monkeypatch):
     doc, calls = _controller(env, monkeypatch)
     env.frappe.user_roles = {"Accounts User"}
-    with pytest.raises(env.frappe.PermissionError):
+    with pytest.raises(env.frappe.PermissionError), _sent(doc):
         doc.before_submit()
     assert calls == []
 

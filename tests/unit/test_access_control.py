@@ -42,18 +42,30 @@ def test_require_lets_administrator_through(env):
 
 
 def test_sending_money_and_admin_work_are_for_the_suite_roles_only(env):
-    # the user's decisions D1 and D2 (2026-10-23)
+    # the user's decisions D1 and D2 (2026-10-23), and decision 1 of 2026-10-27: only named payers
+    # send, only an M-Pesa Manager approves; System Manager configures
     perms, _ = env
-    assert perms.PAYOUT_ROLES == ("System Manager", "M-Pesa Manager", "M-Pesa Payer")
-    assert perms.ADMIN_ROLES == perms.CONFIG_ROLES == ("System Manager", "M-Pesa Manager")
-    for role in ("Accounts Manager", "Accounts User", "HR Manager", "HR User"):
+    assert perms.PAYOUT_ROLES == ("M-Pesa Manager", "M-Pesa Payer")
+    assert perms.ADMIN_ROLES == ("M-Pesa Manager",)
+    assert perms.CONFIG_ROLES == ("System Manager", "M-Pesa Manager")
+    for role in ("System Manager", "Accounts Manager", "Accounts User", "HR Manager", "HR User"):
         assert role not in perms.PAYOUT_ROLES + perms.ADMIN_ROLES, role
 
 
-def test_config_roles_are_inside_every_other_set(env):
+def test_system_manager_neither_sends_nor_approves_nor_sees_salaries(env):
     perms, _ = env
-    for name in ("COLLECT_ROLES", "FINANCE_ROLES", "PAYOUT_ROLES", "ADMIN_ROLES"):
-        assert set(perms.CONFIG_ROLES) <= set(getattr(perms, name)), name
+    for name in ("PAYOUT_ROLES", "ADMIN_ROLES", "SALARY_ROLES", "PREPARE_ROLES"):
+        assert "System Manager" not in getattr(perms, name), name
+    assert perms.SALARY_ROLES == ("M-Pesa Manager", "M-Pesa Payer", "HR Manager", "HR User")
+    for name in ("COLLECT_ROLES", "FINANCE_ROLES", "CONFIG_ROLES"):
+        assert "System Manager" in getattr(perms, name), name
+
+
+def test_the_mpesa_manager_is_inside_every_other_set(env):
+    perms, _ = env
+    for name in ("COLLECT_ROLES", "FINANCE_ROLES", "PAYOUT_ROLES", "ADMIN_ROLES", "SALARY_ROLES", "CONFIG_ROLES",
+                 "PREPARE_ROLES"):
+        assert "M-Pesa Manager" in getattr(perms, name), name
 
 
 # ---------------------------------------------------------------- is_direct_call
@@ -320,10 +332,17 @@ def test_child_rows_count_for_a_b2c_disbursement(mc):
         module.check(PayoutDoc(base, references=changed, before=before))
 
 
-def test_switched_off_or_administrator_is_not_checked(mc, monkeypatch):
+def test_administrator_is_checked_like_everyone(mc):
+    # round 4: no Administrator exemption (it may not send at all while the Suite setting refuses it)
     module, frappe, doc = mc
     frappe.session.user = "Administrator"
-    module.check(doc(owner="Administrator", modified_by="Administrator"))
+    with pytest.raises(frappe.ValidationError, match="another person must send it"):
+        module.check(doc(owner="Administrator", modified_by="clerk@example.com"))
+    module.check(doc(owner="clerk@example.com", modified_by="clerk@example.com"))
+
+
+def test_switched_off_is_not_checked(mc, monkeypatch):
+    module, frappe, doc = mc
     frappe.session.user = "payer@example.com"
     monkeypatch.setattr(module, "enabled", lambda: False)
     module.check(doc(owner="payer@example.com"))
