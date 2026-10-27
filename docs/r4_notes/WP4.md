@@ -27,10 +27,15 @@ Type), and the limits are settings.
   and of **B2C Payment Disbursement Reference**: the payee line a payout pays.
 - **`money_out/claim_payees.py`**:
   - Checks on every save of the claim and at its submit (the approval), `doc_events` validate:
-    - The Suite switch must be on; an Is Paid claim and a non-KES claim pay no payee.
+    - The Suite switch must be on; an Is Paid claim and a non-KES claim pay no payee (the claim's
+      currency on v16, its company's default currency on v15, whose claim has none).
+    - A draft and its approval start every line afresh: Draft, no payout, receipt or result (an
+      amend copies them from the cancelled claim; the API could set them).
     - Every line names the expense line it pays, and that line's Expense Claim Type must allow
       payees (the claim's other lines may be of any type). A draft with several expense lines is
-      warned; the approval refuses a line without one.
+      warned; the approval refuses a line without one. An amended claim's line takes the same
+      expense line of the new claim (row number and type); one that is gone is warned on the
+      draft and picked again before the approval (a one-line claim's line is taken).
     - The lines of an expense line add up to no more than its sanctioned amount (a draft's
       claimed amount); all lines to no more than the claim owes (grand total less reimbursed).
       Whatever they leave is reimbursed to the employee as usual.
@@ -41,8 +46,9 @@ Type), and the limits are settings.
       one of the company's own shortcodes; whole shillings (a phone KES 10 to 250,000).
     - Never an employee's destination: the claimant's own or any employee's phone (Employee cell
       number, Employee M-Pesa Accounts, approved or not), M-Pesa account (till, paybill, bank) or
-      bank account number (Employee's Bank A/C No. or an account's). The other employee is not
-      named.
+      bank account number (Employee's Bank A/C No. or an account's), nor a paybill or bank line
+      whose account number is an employee's phone (many bank paybills credit the account linked
+      to that phone). The other employee is not named.
     - Caps (when above 0): Most per Payment refused per line; Most per Day: a claim whose phone
       payees (paid in one batch) are above it is refused, a claim whose payees in all are above
       it is warned. A destination that is a supplier's approved Supplier M-Pesa Account is not
@@ -52,16 +58,23 @@ Type), and the limits are settings.
   - `check_b2b(doc)` and `check_b2c_row(parent, row)`: a payout of a line pays the line's claim
     on its claimant, to the line's destination (a draft B2B request takes it from the line), at
     most the line's amount, and the line is not paid, on its way or about to be sent by another
-    payout (a second draft is allowed; whichever is sent first takes the line). At the send,
-    under the claim's lock: the switch, `employee_documents.payable_problem`, the destination
-    still no employee's, the per-payment cap and the day's cap (per company: lines sent today to
-    destinations that are not approved supplier accounts, by payouts that did not fail, plus this
-    payout; a B2C batch counts all its rows). The line then shows In Flight with its payout and
-    sent time.
+    payout (a second draft is allowed; whichever is sent first takes the line); a B2C row is of
+    the claim's company. At the send, under the claim's lock: the switch,
+    `employee_documents.payable_problem`, the destination still no employee's, the per-payment
+    cap and the day's cap (per company: lines sent today to destinations that are not approved
+    supplier accounts, by payouts that did not fail, plus this payout; a B2C batch counts all its
+    rows). While the day's cap is on, it is counted under a per-company lock
+    (`claim-payee-day:<company>`, taken before the claim's) by a locking read, so two claims of a
+    company sent at the same moment never both pass it. The line then shows In Flight with its
+    payout and sent time.
+  - `check_supplier_request(doc)`: a B2B request that pays no employee (a supplier's) and names a
+    payee line is refused, on save and at the send (`b2b.validate_request`,
+    `b2b.check_ready_to_send`).
   - `sync_lines`: each line's status and result follow its payouts (B2B requests and B2C rows
     that name it); the furthest one decides. A line paid twice is flagged and alerted.
-    `on_payout_result(doctype, name)` runs it after a B2B Result and after a B2C row's result;
-    safe to call again (a till's name that comes later is checked then).
+    `on_payout_result(doctype, name)` runs it after a B2B Result, after a B2B request's ack (one
+    M-Pesa refuses at once fails its line there and then) and after a B2C row's result; safe to
+    call again (a till's name that comes later is checked then).
   - Name check: the number in front of the name M-Pesa paid must be the line's (a masked phone's
     shown digits must agree); the name must match the claimant's name for the payee; a bank
     account is compared with its bank's Name M-Pesa Shows (only the number while the bank has
@@ -71,8 +84,17 @@ Type), and the limits are settings.
   - Supplier suggestion: a till, paybill or bank account paid `suggest_supplier_after` times (3)
     from claims, and no supplier's approved account, is offered on the claim and on the line as a
     new Supplier M-Pesa Account, prefilled (the user picks the supplier).
-  - `retry_problem(request)`: why a failed B2C payout of a payee line may not be retried by its
-    own retry once the line has another payout (for the merge to call; see below).
+  - `check_retry(request)`: a failed B2C payout of a payee line retried by its own buttons
+    (B2C Disbursement Request Retry, and the disbursement's Retry Failed Payments, which calls
+    it) is a send like the first: refused once the line has another payout paid, on its way or
+    about to be sent (`retry_problem`: Retry Failed Payees may have paid it since), then the
+    send's checks (switch, payable, never an employee's phone, caps).
+  - `paid_in_parts(doctype, name)` / `others_taken_off(...)`: an Expense Claim with payee lines is
+    paid by several payouts at once (a B2B request per merchant, a B2C batch, the rest to the
+    employee). B2C's double-payout guards then take its other open payouts (drafts of merchants'
+    B2B requests included, after the merge) off what it owes instead of refusing the send as a
+    "Duplicate Payout"; each line's own double payment stays refused by `check_b2b` /
+    `check_b2c_row`.
 - **Endpoints** (all POST, all checked on the server):
   - `pay_payees(claim, b2b_settings, b2c_settings)` (**Pay Merchants and Payees**):
     PREPARE_ROLES and read on the claim. Draft payouts for the lines with none: one B2B request
@@ -106,6 +128,13 @@ Type), and the limits are settings.
   `claim_payees.check_b2b`; `b2b._record_result` calls `on_payout_result` after the status is
   written; `B2CPaymentDisbursementReference.validate` calls `check_b2c_row` for a row with
   `claim_payee`; `b2c_response_service.update_b2c_reference_status` calls `on_payout_result`.
+  Review round: `b2b.validate_request` and `b2b.check_ready_to_send` call
+  `check_supplier_request` on their supplier path; `common.apply_ack` calls `on_payout_result`
+  for a B2B request (logged, never raised); `B2CDisbursementRequest.retry_failed_payment` calls
+  `check_retry` after `validate_still_owed` (it marks the line In Flight: last, before the send);
+  `validate_still_owed` and
+  `B2CPaymentDisbursement.validate_no_double_payout` call `paid_in_parts` / `others_taken_off`
+  (the latter adds them to the advances it takes off).
 - **Desk**: `public/js/expense_claim_payees.js` (fields by type, the bank picker filling the
   paybill, the expense line picker, the "Payees: paid / in flight / failed / left" summary,
   name-check and suggestion notes, the buttons gated by `frappe.boot.mpsa.can_prepare` /
@@ -125,11 +154,29 @@ None. Uses WP0's `allow_claim_payees` (off), `claim_payee_max_amount` and `claim
   expense approver approves them with the claim; a preparer presses Pay Merchants and Payees;
   an M-Pesa Payer who did not prepare the payouts sends each with Send via M-Pesa.
 - A claim with payee lines cannot be saved with an employee's phone, till, paybill or bank account
-  as a payee, nor with lines above what the claim owes.
+  as a payee (nor an employee's phone as a paybill or bank account number), nor with lines above
+  what the claim owes.
+- Review round:
+  - A claim's casual payees (B2C) are sent while its merchants' B2B requests are drafts or on
+    their way, and the employee's own reimbursement of the rest too: B2C counts those payouts in
+    what the claim owes instead of refusing with "Duplicate Payout". Claims without payee lines,
+    and invoices, orders, advances and salary slips, are refused as before.
+  - The Retry button of a failed casual payee's payout (and Retry Failed Payments on its batch)
+    is refused once Retry Failed Payees paid that payee by another payout, and otherwise checks
+    the switch, the claim, the phone and the caps like the first send.
+  - A merchant's request M-Pesa refuses at once shows its line Failed straight away (Retry
+    Failed Payees offers it) instead of In Flight until the claim is opened.
+  - Amend of a cancelled claim with payee lines keeps the lines as drafts on the new claim's own
+    expense lines; nothing to re-enter.
 
 ## Migration notes
 - No patch. The migrate makes the custom fields and syncs the new DocType and the two `claim_payee`
   fields (their JSONs' `modified` is 2026-10-27 21:00: keep the later timestamp in the merge).
+- Review round: no new field or setting. Its hunks in `b2b.py`, `common.py`,
+  `b2c_disbursement_request.py` and `b2c_payment_disbursement.py` merge cleanly onto payouts-r4
+  as it stands (WP3's B2B count for claims in B2C's guards included; checked with
+  `git merge-tree`). The day's cap takes a new named lock, `claim-payee-day:<company>`, only
+  while `claim_payee_daily_cap` is above 0.
 - Astral cut-over (later, not here): move the `Astral Casual Payee` rows into `M-Pesa Payees`
   (Phone lines) and tick the four casual Expense Claim Types; disable Astral's own casual-payee
   scripts first.
@@ -144,6 +191,19 @@ None. Uses WP0's `allow_claim_payees` (off), `claim_payee_max_amount` and `claim
   parser; keep_results, the cancel, the form state and the repair; hooks, JSON and migrate fields.
   `tests/unit/test_r4_foundation.py` reads list values in doctype_js / doctype_list_js and the
   Expense Claim `before_cancel` key. 1857 passed (WP0 1724).
+- Review round (unit, 141 in the file; 1871 passed in all): a draft or its approval clears copied
+  results; an amended claim's expense lines; the v15 currency; an employee's phone as an account
+  number; the day's cap under the company's lock by a locking read; a supplier request naming a
+  payee line; a B2C row of another company; a payee's own retry checked like a send and refused
+  once the line is paid again (and both retry buttons call it under the claim's lock, after
+  what the claim owes is checked and before anything is sent); an ack refusal failing its line;
+  B2C's double-payout guard and
+  retry guard counting a payee claim's other payouts in the amount (test_fix3's and
+  test_fix_b2creq's fixtures).
+- Review round (bench, written, not run): a failed payee's old payout refused by its own retry
+  once Retry Failed Payees paid the line; a mixed claim's phones paid and retried while its till's
+  request is still a draft, then the till, the claim reimbursed 4,300; an amended claim's payees
+  start as drafts on its own expense line.
 - Bench (written, not run here): `money_out/test_claim_payees.py` with named users (an Expense
   Approver submits, an HR User prepares, an M-Pesa Payer sends through
   `send_confirm.send_for_test`): a till, a paybill and a bank account paid and the claim

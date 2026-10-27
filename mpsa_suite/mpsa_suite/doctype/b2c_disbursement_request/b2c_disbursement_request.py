@@ -128,6 +128,11 @@ class B2CDisbursementRequest(Document):
                 frappe.throw(f"{self.name} was paid from a payment schedule: plan its line again (Plan Again) and "
                              "pay it with Pay Selected.")
             self.validate_still_owed()
+            from ....money_out import claim_payees
+
+            # an Expense Claim's payee: not paid since by another payout, and the send's checks (last:
+            # it marks the payee line In Flight)
+            claim_payees.check_retry(self.name)
             # Daraja rejects a reused OriginatorConversationID (500.002.1001), and the result
             # callback ignores re-sends for a request that already has a final result.
             self.db_set(
@@ -210,6 +215,10 @@ class B2CDisbursementRequest(Document):
                 bank = slip_bank_problem(dn)  # its payroll may be paid by bank already
                 if bank:
                     frappe.throw(bank, title=_("Paid by Bank?"))
+            from ....money_out.claim_payees import paid_in_parts
+
+            if paid_in_parts(dt, dn):  # an Expense Claim paying its payees: the others count in the amount below
+                elsewhere = set()
             elsewhere = sorted(elsewhere)
             if elsewhere:
                 frappe.throw(

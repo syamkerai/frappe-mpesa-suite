@@ -26,6 +26,9 @@ from pathlib import Path
 import b2b_fixture
 import fake_frappe
 import pytest
+# the faked double-payout guard of a disbursement and the faked retry of its payouts (fixtures)
+from test_fix3 import payout  # noqa: F401
+from test_fix_b2creq import retry  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "mpsa_suite"
@@ -403,6 +406,66 @@ def test_a_rejected_claim_pays_no_payee_and_its_lines_are_cancelled(env):
     assert lines[0].status == "Cancelled"
 
 
+def test_a_draft_or_its_approval_starts_its_lines_afresh_whatever_was_copied_or_typed(env):
+    # an amend copies every field of the cancelled claim's lines; the API could set them on a draft
+    copied = dict(status="Cancelled", payout_doctype=B2B, payout_name="MB2B-1", receipt="RCPT1", sent_on=NOW,
+                  paid_on=NOW, error_message="Failed", receiver_name="X", name_matches=1, name_note="n")
+    line = payee(**copied)
+    validate(env, claim(env, [line], store=False), docstatus=0)
+    assert (line.status, line.payout_name, line.receipt, line.sent_on, line.error_message, line.name_matches) == (
+        "Draft", None, None, None, None, 0)
+    line = payee(**copied)
+    validate(env, claim(env, [line], store=False, _action="submit"))  # the approval: nothing was paid before it
+    assert (line.status, line.payout_doctype) == ("Draft", None)
+    line = payee(**copied)
+    validate(env, claim(env, [line], store=False))  # a submitted claim's lines are the server's (keep_results)
+    assert line.status == "Cancelled"
+
+
+def test_an_amended_claims_lines_take_the_same_expense_line_of_the_new_claim(env):
+    env.frappe.db.table("Expense Claim Detail").update({
+        "OLD-1": {"name": "OLD-1", "parent": "HR-EXP-1", "idx": 1, "expense_type": "Fuel"},
+        "OLD-2": {"name": "OLD-2", "parent": "HR-EXP-1", "idx": 2, "expense_type": "Casuals"}})
+    two = [expense("NEW-1", 1, "Fuel"), expense("NEW-2", 2, "Casuals")]
+    lines = [payee(payee_type=PHONE, expense_detail="OLD-2"), payee("LN-2", 2, expense_detail="OLD-1")]
+    doc = claim(env, lines, name="HR-EXP-1-1", store=False, expenses=two, amended_from="HR-EXP-1", grand_total=20000)
+    assert validate(env, doc, docstatus=0) == []
+    assert [line.expense_detail for line in lines] == ["NEW-2", "NEW-1"]
+    # one that is gone: picked again before the approval (a one-line claim's line is taken)
+    line = payee(expense_detail="GONE")
+    messages = validate(env, claim(env, [line], store=False, expenses=two, grand_total=20000), docstatus=0)
+    assert "its expense line is no longer on the claim: pick its Expense Line again before the claim is approved" in (
+        messages[0])
+    assert line.expense_detail is None
+    line = payee(expense_detail="GONE")
+    validate(env, claim(env, [line], store=False), docstatus=0)
+    assert line.expense_detail == "EXP-1"
+
+
+def test_a_claim_without_a_currency_is_in_its_companys(env):
+    env.frappe.db.table("Company")["Astral"] = {"name": "Astral", "default_currency": "USD"}
+    doc = claim(env, [payee()], store=False)
+    doc.pop("currency")  # v15's Expense Claim has no currency field (v16's has)
+    with raises(env, "This claim is in USD. M-Pesa pays KES only"):
+        validate(env, doc)
+    env.frappe.db.table("Company")["Astral"]["default_currency"] = "KES"
+    validate(env, doc)
+
+
+@pytest.mark.parametrize("line, refused", [
+    (payee(payee_type=PAYBILL, account_number="0733 000 222"), "account number 0733 000 222 is an employee's phone"),
+    (payee(payee_type=BANK, account_number="0722000111"), "the account number 0722000111 is the claimant's own phone"),
+    (payee(payee_type=PAYBILL, account_number="0711000999"), None),  # nobody's phone on file
+])
+def test_an_employees_phone_as_the_account_number_is_refused(env, line, refused):
+    doc = claim(env, [line], store=False)
+    if refused:
+        with raises(env, refused):
+            validate(env, doc)
+    else:
+        validate(env, doc)
+
+
 # ---------------------------------------------------------------- a B2B request for a merchant line
 def b2b_doc(env, line, **kw):
     return _dict(request(env, line, **kw))
@@ -526,6 +589,35 @@ def test_the_day_counts_other_companies_and_approved_suppliers_out(env):
     assert env.cp.sent_today("Other Co") == 0  # yesterday's
 
 
+def test_the_days_cap_is_counted_under_the_companys_lock_by_a_locking_read(env):
+    line = payee(amount=1000)
+    claim(env, [line])
+    settings(env, claim_payee_daily_cap=5000)
+    env.cp.check_b2b(b2b_doc(env, line, docstatus=1))
+    # the company's lock first, then the claim's: two claims sent together never both pass the cap
+    assert [e[1] for e in env.log if e[0] == "lock"] == ["claim-payee-day:Astral", "b2c-pay:Expense Claim:HR-EXP-1"]
+    after = env.log.index(("lock", "claim-payee-day:Astral"))
+    assert any(e[0] == "sql" and e[1][0] == LINE and e[2] for e in env.log[after:]), "sent_today, a locking read"
+    # no cap, no company lock
+    settings(env, claim_payee_daily_cap=0)
+    env.locks.clear()
+    env.log.clear()
+    env.cp.check_b2b(b2b_doc(env, line, docstatus=1))
+    assert [e[1] for e in env.log if e[0] == "lock"] == ["b2c-pay:Expense Claim:HR-EXP-1"]
+
+
+def test_a_supplier_request_never_pays_a_payee_line(env):
+    line = payee()
+    claim(env, [line])
+    doc = _dict(name="MB2B-9", docstatus=0, supplier="ACME", employee=None, claim_payee="LN-1", amount=2000)
+    with raises(env, "names Expense Claim payee LN-1: a claim's payee is paid on the claim"):
+        env.b2b.validate_request(doc)
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    with raises(env, "names Expense Claim payee LN-1"):
+        env.b2b.check_ready_to_send(_dict(doc, docstatus=1))
+    env.cp.check_supplier_request(_dict(supplier="ACME"))  # no payee line: nothing to say
+
+
 def test_an_approved_supplier_destination_is_not_capped_at_the_send(env):
     line = payee(payee_type=PAYBILL, shortcode="888880", account_number="ACME-1", amount=9000)
     claim(env, [line])
@@ -550,6 +642,14 @@ def test_a_row_pays_its_line_only(env, extra, msg):
     claim(env, [line])
     parent, refs = disbursement(env, [(line, extra)])
     with raises(env, msg):
+        env.cp.check_b2c_row(parent, refs[0])
+
+
+def test_a_row_pays_from_its_claims_company_only(env):
+    line = phone_line()
+    claim(env, [line])
+    parent, refs = disbursement(env, [(line, {})], company="Other Co")
+    with raises(env, "Row #1: HR-EXP-1 belongs to Astral, not Other Co"):
         env.cp.check_b2c_row(parent, refs[0])
 
 
@@ -602,6 +702,59 @@ def test_a_failed_payout_is_not_retried_once_the_line_is_paid_again(env):
     assert "B2C Payment Disbursement MPESA-B2C-2 pays now" in env.cp.retry_problem("B2C-1")
     env.frappe.db.table(REQ)["B2C-5"] = {"name": "B2C-5", "b2c_payment_disbursement_reference": None}
     assert env.cp.retry_problem("B2C-5") is None  # no payee line
+
+
+def test_a_payees_own_retry_is_checked_like_a_send(env):
+    line = phone_line()
+    claim(env, [line])
+    env.frappe.db.table(REQ)["B2C-1"] = {"name": "B2C-1", "docstatus": 1, "status": "Failed", "amount": 2000,
+                                         "b2c_payment_disbursement": "MPESA-B2C-1",
+                                         "b2c_payment_disbursement_reference": "MPESA-B2C-1-R1"}
+    disbursement(env, [(line, {"b2c_disbursement_request": "B2C-1", "payment_status": "Failed"})],
+                 name="MPESA-B2C-1", docstatus=1)
+    env.problem = "HR-EXP-1 is not approved."
+    with raises(env, "is not approved"):
+        env.cp.check_retry("B2C-1")
+    env.problem = None
+    settings(env, claim_payee_daily_cap=1500)
+    with raises(env, "with this KES 2,000 it would pass the day's cap of KES 1,500"):
+        env.cp.check_retry("B2C-1")
+    settings(env, claim_payee_daily_cap=0)
+    env.cp.check_retry("B2C-1")
+    assert "b2c-pay:Expense Claim:HR-EXP-1" in env.locks
+    row = stored(env)
+    assert (row["status"], row["payout_doctype"], row["payout_name"], row["sent_on"]) == (
+        "In Flight", B2C, "MPESA-B2C-1", NOW)
+    # Retry Failed Payees paid the line since: the old payout is never sent again
+    disbursement(env, [(line, {"payment_status": "Paid"})], name="MPESA-B2C-2", docstatus=1)
+    with raises(env, "B2C-1 pays an Expense Claim payee that B2C Payment Disbursement MPESA-B2C-2 pays now"):
+        env.cp.check_retry("B2C-1")
+    assert any(e[0] == "sql" and e[1][0] == ROW and e[2] for e in env.log), "a locking read under the claim's lock"
+    env.frappe.db.table(REQ)["B2C-5"] = {"name": "B2C-5", "b2c_payment_disbursement_reference": None}
+    env.cp.check_retry("B2C-5")  # pays no payee line: nothing to check
+
+
+def test_both_retry_buttons_check_a_payee_line_before_anything_is_sent(retry, monkeypatch):  # noqa: F811
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    seen = []
+
+    def check_retry(name):
+        seen.append((name, list(retry.frappe.locks_held)))
+        raise retry.frappe.ValidationError("paid since by MPESA-B2C-2")
+
+    monkeypatch.setattr(cp, "check_retry", check_retry)
+    request = retry.failed(amount=1000, doctype=CLAIM, reference="HR-EXP-1")
+    with pytest.raises(fake_frappe.ValidationError, match="paid since"):
+        request.retry_failed_payment()
+    assert seen == [("B2C-1", ["b2c-pay:Expense Claim:HR-EXP-1"])]  # under the claim's lock
+    assert retry.sends == [] and retry.frappe.db.table(REQ)["B2C-1"]["status"] == "Failed"
+    # after what the claim owes is checked (that refusal writes nothing on the line)
+    assert [c[0] for c in retry.frappe.calls][-1] == "current_outstanding"
+    retry.owed = 0.0
+    seen.clear()
+    with pytest.raises(fake_frappe.ValidationError, match="owes 0.0"):
+        request.retry_failed_payment()
+    assert seen == []
 
 
 def test_the_send_counts_the_whole_batch_against_the_days_cap(env):
@@ -769,6 +922,22 @@ def test_a_payout_that_pays_no_line_is_left_alone_and_errors_are_only_logged(env
         env.cp.on_payout_result(B2B, "MB2B-5")
 
 
+def test_a_merchant_request_refused_at_once_fails_its_line(env, monkeypatch):
+    line = payee()
+    claim(env, [line])
+    request(env, line, docstatus=1, status="Not Initiated")
+    env.frappe.db.table(LINE)["LN-1"].update(status="In Flight", payout_doctype=B2B, payout_name="MB2B-9")
+    common = importlib.import_module("mpsa_suite.money_out.common")
+    doc = fake_frappe.FakeDoc(env.frappe, B2B, env.frappe.db.table(B2B)["MB2B-9"])
+    common.apply_ack(doc, {"ResponseCode": "1", "errorMessage": "The balance is insufficient"}, None)
+    assert (stored(env)["status"], stored(env)["error_message"]) == ("Failed", "The balance is insufficient")
+    # the ack never raises: a line that cannot follow is only logged (claim_state brings it up to date)
+    monkeypatch.setattr(env.cp, "on_payout_result",
+                        lambda *a: (_ for _ in ()).throw(env.frappe.QueryDeadlockError("deadlock")))
+    common.apply_ack(doc, None, "not_sent")
+    assert env.frappe.errors[-1][0][1] == "Mpesa B2B Payment Request MB2B-9: payee line not updated"
+
+
 # ---------------------------------------------------------------- suggest a supplier account
 def test_a_till_paid_often_is_suggested_as_a_supplier_account(env):
     lines = [payee("LN-1", 1), payee("LN-2", 2, PAYBILL), payee("LN-3", 3, PHONE)]
@@ -882,6 +1051,42 @@ def test_the_shortcode_is_the_picked_one_or_the_companys_only_one(env):
         cp.pick_settings("Astral B2C", "use_b2c", "Other Co")
     with raises(env, "Pick Pay From \\(B2C\\): Other Co has no shortcode"):
         cp.pick_settings(None, "use_b2c", "Other Co")
+
+
+# ---------------------------------------------------------------- B2C's guards for a claim paid in parts
+def test_a_payee_claims_batch_counts_its_other_payouts_in_the_amount(payout, monkeypatch):  # noqa: F811
+    # a merchant's request (a draft, merged with money_out.owed's B2B count), or another batch, is
+    # open for the claim: its casual payees are paid all the same, within what it owes
+    employee_documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    monkeypatch.setattr(employee_documents, "payable_problem", lambda doc, doctype=None: None, raising=False)
+    ec = {"reference_doctype": CLAIM, "reference_name": "HR-EXP-1"}
+    payout.open = [{"parent": "MB2B-1", "allocated_amount": 2000, "request_status": "Not Initiated"}]
+    payout.owed = 4300
+    with pytest.raises(payout.frappe.ValidationError, match="in progress or awaiting accounting: MB2B-1"):
+        payout.disbursement("D-NEW", {"allocated_amount": 2300, **ec}).validate_no_double_payout()  # no payees
+    payout.frappe.db.table(LINE)["LN-1"] = {"name": "LN-1", "parent": "HR-EXP-1", "parenttype": CLAIM}
+    payout.disbursement("D-NEW", {"allocated_amount": 2300, **ec}).validate_no_double_payout()
+    with pytest.raises(payout.frappe.ValidationError, match="HR-EXP-1 owes 4300.0, less MB2B-1 Not Initiated 2,000; "
+                                                             "this disbursement allocates 2400.0"):
+        payout.disbursement("D-NEW", {"allocated_amount": 2400, **ec}).validate_no_double_payout()
+    # an invoice is not paid in parts: refused as before
+    with pytest.raises(payout.frappe.ValidationError, match="Purchase Invoice PI-1 already has a payout in progress"):
+        payout.disbursement("D-NEW", {"allocated_amount": 500}).validate_no_double_payout()
+
+
+def test_a_payee_claims_retry_counts_its_other_payouts_in_the_amount(retry):  # noqa: F811
+    request = retry.failed(amount=1000, doctype=CLAIM, reference="HR-EXP-1")
+    retry.others = [{"parent": "MPESA-B2C-2", "allocated_amount": 800, "request_status": "Paid"}]
+    retry.owed = 1500
+    with pytest.raises(fake_frappe.ValidationError, match="awaiting accounting: MPESA-B2C-2"):
+        request.retry_failed_payment()  # no payee lines
+    retry.frappe.db.table(LINE)["LN-1"] = {"name": "LN-1", "parent": "HR-EXP-1", "parenttype": CLAIM}
+    with pytest.raises(fake_frappe.ValidationError,
+                       match="HR-EXP-1 owes 1500.0; retrying would pay 1000.0, and 800.0 is still being paid"):
+        request.retry_failed_payment()
+    retry.owed = 1800
+    request.retry_failed_payment()
+    assert [s[0] for s in retry.sends] == ["B2C-1"]
 
 
 # ---------------------------------------------------------------- casual payees: paste or upload

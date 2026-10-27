@@ -39,6 +39,7 @@ yet), In Flight, Paid, Failed (paid again with Retry failed payees), Cancelled (
 rejected or cancelled).
 """
 
+import contextlib
 import csv
 import re
 
@@ -175,6 +176,8 @@ def validate_claim(doc, method=None) -> None:
     if not rows:
         return
     at_submit = cint(doc.docstatus) == 1
+    if not at_submit or getattr(doc, "_action", None) == "submit":
+        clear_results(rows)  # a draft and its approval paid nothing: results an amend copied (or typed) go
     if doc.get("approval_status") == "Rejected":
         if at_submit:
             for row in rows:
@@ -187,8 +190,9 @@ def validate_claim(doc, method=None) -> None:
     if cint(doc.get("is_paid")):
         frappe.throw("This claim is marked Is Paid (paid at once from its Mode of Payment), so it pays no payee by "
                      "M-Pesa: untick Is Paid or remove the payee lines.")
-    if (doc.get("currency") or "KES") != "KES":
-        frappe.throw(f"This claim is in {doc.currency}. M-Pesa pays KES only: remove the payee lines.")
+    currency = claim_currency(doc)
+    if currency != "KES":
+        frappe.throw(f"This claim is in {currency}. M-Pesa pays KES only: remove the payee lines.")
     expenses = {r.name: r for r in doc.get("expenses") or []}
     allowed = types_allowing_payees({r.expense_type for r in expenses.values()})
     found = employee_destinations()
@@ -197,7 +201,7 @@ def validate_claim(doc, method=None) -> None:
     capped_total = capped_phones = 0.0
     for row in rows:
         clean_line(row, own, warnings)
-        expense = _expense_line(row, expenses, at_submit, warnings)
+        expense = _expense_line(row, expenses, at_submit, warnings, doc.get("amended_from"))
         if expense:
             row.expense_type = expense.expense_type
             if expense.expense_type not in allowed:
@@ -243,6 +247,17 @@ def validate_claim(doc, method=None) -> None:
                             "this is not one payment entered twice.")
     if warnings:
         frappe.msgprint("<br>".join(warnings), title="Check the M-Pesa payees", indicator="orange")
+
+
+def clear_results(rows) -> None:
+    """A claim not submitted yet pays no line: each line starts as a Draft with no payout or
+    result. An amend copies every field of the cancelled claim's lines (Cancelled, its payouts and
+    receipts), and the API could set them on a draft."""
+    for row in rows:
+        for field in RESULT_FIELDS:
+            setattr(row, field, None)
+        row.status = DRAFT
+        row.name_matches = 0
 
 
 def clean_line(row, own=None, warnings=None) -> None:
@@ -338,12 +353,20 @@ def _bank_with_paybill(shortcode):
                                as_dict=True)
 
 
-def _expense_line(row, expenses: dict, at_submit: bool, warnings: list):
-    """The claim's expense line the payee line pays: the claim's only one when none is picked."""
+def _expense_line(row, expenses: dict, at_submit: bool, warnings: list, amended_from=None):
+    """The claim's expense line the payee line pays: the claim's only one when none is picked. An
+    amended claim's line names the cancelled claim's expense line: the same line of this claim
+    (its row number and type) is taken; one that is gone is picked again before the approval."""
     picked = cstr(row.get("expense_detail")).strip()
+    if picked and picked not in expenses:
+        row.expense_detail = picked = _amended_expense(picked, expenses, amended_from)
+        if not picked and len(expenses) != 1:
+            gone = f"Row #{row.idx}: its expense line is no longer on the claim: pick its Expense Line again"
+            if at_submit:
+                frappe.throw(f"{gone}.")
+            warnings.append(f"{gone} before the claim is approved.")
+            return None
     if picked:
-        if picked not in expenses:
-            frappe.throw(f"Row #{row.idx}: its expense line is no longer on the claim: pick its Expense Line again.")
         return expenses[picked]
     if len(expenses) == 1:
         row.expense_detail = next(iter(expenses))
@@ -352,6 +375,27 @@ def _expense_line(row, expenses: dict, at_submit: bool, warnings: list):
         frappe.throw(f"Row #{row.idx}: pick the Expense Line this payee is paid for.")
     warnings.append(f"Row #{row.idx}: pick the Expense Line this payee is paid for before the claim is approved.")
     return None
+
+
+def _amended_expense(picked: str, expenses: dict, amended_from) -> str | None:
+    """This claim's expense line that is the one ``picked`` of the claim it amends (same row number
+    and type), or None."""
+    if not cstr(amended_from).strip():
+        return None
+    old = frappe.db.get_value("Expense Claim Detail", {"name": picked, "parent": amended_from},
+                              ["idx", "expense_type"], as_dict=True)
+    if not old:
+        return None
+    same = [r.name for r in expenses.values() if cint(r.idx) == cint(old.idx) and r.expense_type == old.expense_type]
+    return same[0] if len(same) == 1 else None
+
+
+def claim_currency(doc) -> str:
+    """The claim's currency: v16's own field, else its company's (a v15 claim has none), as
+    money_out.employee_documents reads it."""
+    return (doc.get("currency")
+            or (doc.get("company") and frappe.db.get_value("Company", doc.get("company"), "default_currency"))
+            or "KES")
 
 
 def types_allowing_payees(types) -> set:
@@ -423,11 +467,19 @@ def employee_problem(row, claimant, found) -> str | None:
     who = found.destinations.get(row.get("destination_key") or line_key(row))
     if not who and row.get("payee_type") == BANK:
         who = found.bank_numbers.get(bank_number(row.get("account_number")))
+    shown = f"{describe(row)} is"
+    if not who and row.get("payee_type") in (PAYBILL, BANK):
+        # a bank (or a paybill) that takes a phone number as the account credits that phone's owner
+        msisdn = normalize_msisdn(row.get("account_number"))
+        who = found.destinations.get(f"B2C:{msisdn}") if msisdn else None
+        shown = f"the account number {cstr(row.get('account_number')).strip()} is"
+        what = "phone number"
+    else:
+        what = WHAT.get(row.get("payee_type"), "destination")
     if not who:
         return None
     whose = "the claimant's own" if who == claimant else "an employee's"
-    return (f"Row #{row.idx}: {describe(row)} is {whose} {WHAT[row.payee_type]}. An employee is paid by reimbursing "
-            "the claim, never as a payee.")
+    return f"Row #{row.idx}: {shown} {whose} {what}. An employee is paid by reimbursing the claim, never as a payee."
 
 
 # ---------------------------------------------------------------- approved supplier destinations
@@ -808,9 +860,20 @@ def check_b2b(doc) -> None:
     if not sending:
         _check_others(line, (B2B, doc.name))
         return
-    with owed.doc_lock(CLAIM, claim):
+    with _day_lock(doc.company), owed.doc_lock(CLAIM, claim):
         _check_others(line, (B2B, doc.name), for_update=True)
         _check_sending(claim, line, flt(doc.amount), (B2B, doc.name), doc.company, flt(doc.amount), doc)
+
+
+def check_supplier_request(doc) -> None:
+    """A B2B request that pays no employee (a supplier's, or no one's yet) never pays an Expense
+    Claim's payee line: money_out.b2b's supplier checks call it. Such a line is paid on its claim,
+    with the claimant as Employee (Pay Merchants and Payees makes that request), and checked by
+    check_b2b; paid as a supplier's, its payout would take the line and be booked to the supplier."""
+    name = cstr(doc.get("claim_payee")).strip()
+    if name:
+        frappe.throw(f"This request names Expense Claim payee {name}: a claim's payee is paid on the claim, with the "
+                     "claimant as Employee (Pay Merchants and Payees on the claim), never as a supplier's payment.")
 
 
 def check_b2c_row(parent, row) -> None:
@@ -831,9 +894,14 @@ def check_b2c_row(parent, row) -> None:
     if line.payee_type != PHONE:
         frappe.throw(f"Row #{row.idx}: payee row #{line.idx} of {line.parent} is a {WHAT[line.payee_type]}: it is "
                      "paid by B2B, not to a phone.")
-    claimant = frappe.db.get_value(CLAIM, line.parent, "employee")
+    values = frappe.db.get_value(CLAIM, line.parent, ["employee", "company"], as_dict=True) or frappe._dict()
+    claimant = values.employee
     if row.get("party_type") != "Employee" or row.get("party") != claimant:
         frappe.throw(f"Row #{row.idx}: the party is the claimant, {claimant}: a payee is paid on their claim.")
+    if values.company and parent.get("company") != values.company:
+        # the payout leaves from the claim's company's shortcode, and its day's cap counts it
+        frappe.throw(f"Row #{row.idx}: {line.parent} belongs to {values.company}, not "
+                     f"{parent.get('company') or 'no company'}.")
     if normalize_msisdn(row.get("partyb")) != line.phone:
         frappe.throw(f"Row #{row.idx}: the phone is not payee row #{line.idx}'s of {line.parent} ({describe(line)}).")
     if flt(row.get("allocated_amount")) > flt(line.amount) + 0.001:
@@ -847,7 +915,7 @@ def check_b2c_row(parent, row) -> None:
     if cint(parent.docstatus) != 1:
         _check_others(line, (B2C, parent.name))
         return
-    with owed.doc_lock(CLAIM, line.parent):
+    with _day_lock(parent.get("company")), owed.doc_lock(CLAIM, line.parent):
         _check_others(line, (B2C, parent.name), for_update=True)
         batch = _memo(parent, "mpsa_claim_payee_batch", lambda: _capped_rows_total(parent))
         _check_sending(line.parent, line, flt(row.allocated_amount), (B2C, parent.name), parent.get("company"),
@@ -885,16 +953,15 @@ def _check_others(line, this: tuple, for_update: bool = False) -> None:
                          f"{p.name}: it is never paid twice.")
 
 
-def retry_problem(request: str) -> str | None:
+def retry_problem(request: str, for_update: bool = False) -> str | None:
     """Why a failed B2C payout (B2C Disbursement Request) of a casual payee line may not be sent
     again by its own retry: the line has another payout paid, on its way or about to be sent
-    (Retry failed payees made a new one). None for a payout that pays no payee line. For the
-    payout's retries (B2C Disbursement Request.retry_failed_payment) to call."""
+    (Retry failed payees made a new one). None for a payout that pays no payee line."""
     line = _line_of(B2C_REQUEST, request)
     if not line:
         return None
     parent = frappe.db.get_value(B2C_REQUEST, request, "b2c_payment_disbursement")
-    for p in payouts_of([line]):
+    for p in payouts_of([line], for_update):
         if p.doctype == B2C and p.name == parent:
             continue
         if p.state in (PAID, IN_FLIGHT) or (p.state == QUEUED and _submitted(p)):
@@ -903,17 +970,67 @@ def retry_problem(request: str) -> str | None:
     return None
 
 
+def check_retry(request: str) -> None:
+    """B2C Disbursement Request.retry_failed_payment (both retry buttons), under the claim's lock
+    (the request's document lock), before it sends again: a failed payout of a casual payee line
+    is a send like the first, so the line has no other payout paid, on its way or about to be
+    sent (retry_problem: Retry Failed Payees may have paid it since), and the send's checks apply
+    (the switch, the claim payable, the phone no employee's, the caps). Nothing for a payout that
+    pays no payee line."""
+    name = _line_of(B2C_REQUEST, request)
+    if not name:
+        return
+    line = _line(name)
+    values = frappe.db.get_value(B2C_REQUEST, request, ["amount", "b2c_payment_disbursement"], as_dict=True)
+    company = frappe.db.get_value(B2C, values.b2c_payment_disbursement, "company") or frappe.db.get_value(
+        CLAIM, line.parent, "company")
+    with _day_lock(company), owed.doc_lock(CLAIM, line.parent):
+        problem = retry_problem(request, for_update=True)
+        if problem:
+            frappe.throw(problem)
+        # the day's cap counts the rest of its batch that did not fail, and this payout
+        _check_sending(line.parent, line, flt(values.amount), (B2C, values.b2c_payment_disbursement), company,
+                       flt(values.amount), exclude=(None, None))
+
+
 def _submitted(payout) -> bool:
     """A payout submitted and not sent yet (a B2B request Not Initiated, a B2C row before its
     payout is made): it is about to take money."""
     return cint(frappe.db.get_value(payout.doctype, payout.name, "docstatus")) == 1
 
 
-def _check_sending(claim: str, line, amount: float, payout: tuple, company, batch: float, owner=None) -> None:
+def paid_in_parts(doctype: str, name: str) -> bool:
+    """An Expense Claim with payee lines: paid by several payouts at once (a B2B request per
+    merchant, a B2C batch for the phones, the rest to the employee). B2C's double-payout guards
+    (B2C Payment Disbursement.validate_no_double_payout, B2C Disbursement Request
+    .validate_still_owed) then count its other payouts in the amount instead of refusing while
+    one is open; each line's own double payment is refused by check_b2b and check_b2c_row."""
+    if doctype != CLAIM or not name or not frappe.db.table_exists(LINE):
+        return False
+    return bool(frappe.db.exists(LINE, {"parent": name, "parenttype": CLAIM}))
+
+
+def others_taken_off(doctype: str, name: str, others: list) -> tuple:
+    """For B2C Payment Disbursement.validate_no_double_payout: (the other payouts that still refuse
+    the send, those taken off what the document owes instead, like an order's advances: [{amount,
+    label}]). A claim paid in parts (paid_in_parts) has none of the first."""
+    if not others or not paid_in_parts(doctype, name):
+        return others, []
+    taken = []
+    for o in others:
+        status = o.get("request_status") or o.get("payment_status") or "in progress"
+        taken.append(frappe._dict(amount=flt(o.get("allocated_amount"), 2),
+                                  label=f"{o.get('parent')} {status} {money(o.get('allocated_amount'))}"))
+    return [], taken
+
+
+def _check_sending(claim: str, line, amount: float, payout: tuple, company, batch: float, owner=None,
+                   exclude: tuple | None = None) -> None:
     """At the send: the switch, the claim payable (money_out.employee_documents), the destination
-    still no employee's, the caps on a destination that is not an approved supplier account. Then
-    the line notes the payout sending it (the day's cap counts it from now; a send that fails
-    before the money leaves rolls this back with it)."""
+    still no employee's, the caps on a destination that is not an approved supplier account (the
+    day's: ``batch`` and what was sent today but ``exclude``, by default this payout). Then the
+    line notes the payout sending it (the day's cap counts it from now; a send that fails before
+    the money leaves rolls this back with it)."""
     s = settings()
     if not s.allow:
         frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")
@@ -931,7 +1048,10 @@ def _check_sending(claim: str, line, amount: float, payout: tuple, company, batc
         if problem:
             frappe.throw(f"{claim}: {problem}")
         if s.daily_cap:
-            sent = sent_today(company, payout)
+            with _day_lock(company, s):
+                # a locking read once the company's lock is taken: a send of another claim that
+                # committed while this one waited is counted
+                sent = sent_today(company, payout if exclude is None else exclude, for_update=True)
             if sent + batch > s.daily_cap + 0.001:
                 frappe.throw(f"KES {money(sent)} was sent today to Expense Claim payees that are not approved "
                              f"accounts; with this KES {money(batch)} it would pass the day's cap of KES "
@@ -942,10 +1062,24 @@ def _check_sending(claim: str, line, amount: float, payout: tuple, company, batc
                                           "error_message": None}, update_modified=False)
 
 
-def sent_today(company, exclude: tuple = (None, None)) -> float:
+def _day_lock(company, s=None):
+    """The company's lock for the day's cap on payees that are not approved accounts (held until
+    commit), while that cap is on: one such send of the company's claims at a time, so the next
+    one counts this one. A send takes it before the claim's lock (a B2C batch may pay several
+    claims) and re-enters it under it; a retry already holds its claim's lock. Two sends that wait
+    on each other are told to try again (the lock's timeout), never both let through."""
+    if not company or not (s or settings()).daily_cap:
+        return contextlib.nullcontext()
+    from ..money_in.common import named_lock
+
+    busy = f"Another payment to Expense Claim payees of {company} is being sent. Try again in a minute."
+    return named_lock(f"claim-payee-day:{company}", busy=busy)
+
+
+def sent_today(company, exclude: tuple = (None, None), for_update: bool = False) -> float:
     """What Expense Claim payee lines of ``company``'s claims sent today to destinations that are
     not approved supplier accounts, by payouts that did not fail (``exclude``: the payout being
-    sent, which the caller counts)."""
+    sent, which the caller counts). ``for_update``: a locking read, under the company's lock."""
     if not company:
         return 0.0
     rows = frappe.db.sql(
@@ -967,6 +1101,7 @@ def sent_today(company, exclude: tuple = (None, None)) -> float:
             OR (d.docstatus = 1 AND COALESCE(req.status, ref.payment_status, '') != 'Failed')
             OR (req.docstatus IN (1, 2) AND req.status IN ('Paid', 'Initiated', 'Status Unknown'))
           )
+        {_locking(for_update)}
         """,
         {"b2b": B2B, "b2c": B2C, "claim": CLAIM, "company": company, "today": f"{nowdate()} 00:00:00",
          "dt": exclude[0] or "", "dn": exclude[1] or ""},

@@ -349,6 +349,42 @@ class TestClaimPayees(IntegrationTestCase):
         self.assertEqual([r.partyb for r in frappe.get_all(ROW, filters={"parent": retry["b2c"]}, fields=["partyb"])],
                          ["254711000332"])
 
+    def test_a_failed_payees_old_payout_is_never_retried_once_the_line_is_paid_again(self):
+        claim = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Jane Wanjiku", "phone": "0711000351",
+                              "amount": 1000}], amount=3000)
+        old = self._send_b2c(self._pay(claim.name)["b2c"], {"254711000351": ("Failed", None)})[0]
+        retry = self._pay(claim.name, "retry_payees")["b2c"]
+        self._send_b2c(retry, {"254711000351": ("Paid", "254711000351 - JANE WANJIKU")})
+        self.assertEqual(self._entries(claim.name), [("Employee", self.claimant, 1000)])
+        # the first batch's failed row is still there: its own retry is refused, never a second payment
+        module = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+        with patch(f"{module}.make_b2c_payment_request") as send, _as(PAYER):
+            self.assertRaisesRegex(frappe.ValidationError, "pays now: retry the payee from its claim",
+                                   frappe.get_doc(REQ, old).retry_failed_payment)
+        send.assert_not_called()
+        self.assertEqual(frappe.db.get_value(REQ, old, "status"), "Failed")
+
+    def test_a_mixed_claims_phones_are_paid_and_retried_while_its_merchants_request_waits(self):
+        claim = self._claim([
+            {"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell Kilimani", "shortcode": "835811",
+             "amount": 2000},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Jane Wanjiku", "phone": "0711000361", "amount": 1500},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T John Otieno", "phone": "0711000362", "amount": 800},
+        ], amount=5000)
+        made = self._pay(claim.name)
+        till = made["b2b"][0]
+        # the till's request is still a draft: the casual workers are paid all the same (B2C's guard
+        # takes it off what the claim owes instead of refusing: claim_payees.others_taken_off)
+        self._send_b2c(made["b2c"], {"254711000361": ("Paid", "254711000361 - JANE WANJIKU"),
+                                     "254711000362": ("Failed", None)})
+        retry = self._pay(claim.name, "retry_payees")
+        self.assertEqual(retry["b2b"], [])
+        self._send_b2c(retry["b2c"], {"254711000362": ("Paid", "254711000362 - JOHN OTIENO")})
+        self._send_b2b(till)
+        self._b2b_result(till, "835811 - _T SHELL KILIMANI")
+        self.assertEqual([line.status for line in self._lines(claim.name).values()], ["Paid", "Paid", "Paid"])
+        self.assertEqual(flt(frappe.db.get_value(CLAIM, claim.name, "total_amount_reimbursed")), 4300)
+
     def test_the_list_pays_the_casual_payees_of_two_claims_in_one_batch(self):
         one = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Jane", "phone": "0711000341",
                             "amount": 1000}])
@@ -358,6 +394,20 @@ class TestClaimPayees(IntegrationTestCase):
             made = claim_payees.pay_claims([one.name, two.name], SETTINGS)
         rows = frappe.get_all(ROW, filters={"parent": made["b2c"]}, fields=["reference_name"], order_by="idx")
         self.assertEqual(sorted(r.reference_name for r in rows), sorted([one.name, two.name]))
+
+    def test_an_amended_claims_payees_start_as_drafts_on_its_own_expense_line(self):
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811",
+                              "amount": 2000}])
+        frappe.get_doc(CLAIM, claim.name).cancel()  # no payout yet: its line becomes Cancelled
+        cancelled = frappe.get_doc(CLAIM, claim.name)
+        self.assertEqual(cancelled.mpesa_payees[0].status, "Cancelled")
+        # as the form's Amend copies it: every field of every row, its expense line's name too
+        amended = frappe.copy_doc(cancelled)
+        amended.update({"amended_from": claim.name, "docstatus": 0})
+        amended.insert()
+        line = amended.mpesa_payees[0]
+        self.assertEqual((line.status, line.payout_doctype, line.payout_name), ("Draft", None, None))
+        self.assertEqual(line.expense_detail, amended.expenses[0].name)
 
     # ------------------------------------------------------------ what a claim may not pay
     def test_an_employees_phone_and_a_type_without_payees_are_refused(self):

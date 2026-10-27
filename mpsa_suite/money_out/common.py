@@ -180,6 +180,12 @@ def apply_ack(doc, data, error, *, settings_ids=True) -> None:
         from .schedule import sync_line_later
 
         sync_line_later(doc)  # a payment schedule's line follows its request (never raises)
+        from . import claim_payees
+
+        try:
+            claim_payees.on_payout_result(doc.doctype, doc.name)  # an Expense Claim's payee line: refused at once
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), f"{doc.doctype} {doc.name}: payee line not updated")
 
 
 def log_callback(payload: dict, description: str, doctype: str, name: str | None, status: str) -> None:
