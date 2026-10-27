@@ -272,6 +272,8 @@ ENDPOINTS = {
     "mpsa_suite.money_in.collect.collect_options": ("COLLECT_ROLES + read the order / invoice", ("roles:COLLECT_ROLES", "perm")),
     "mpsa_suite.money_in.collect.request_payment": (
         "COLLECT_ROLES + read the order / invoice + create Payment Request", ("roles:COLLECT_ROLES", "perm")),
+    "mpsa_suite.money_in.payment_request.prompts_being_booked": (
+        "COLLECT_ROLES + read the Payment Request", ("roles:COLLECT_ROLES", "perm")),
     # Finance: balances, status queries, statements, entries
     _A + "m_pesa_api.get_account_balance": ("FINANCE_ROLES", ("direct", "roles:FINANCE_ROLES")),
     _A + "m_pesa_api.pull_transactions": ("FINANCE_ROLES", ("direct", "roles:FINANCE_ROLES")),

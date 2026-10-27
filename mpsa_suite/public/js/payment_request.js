@@ -80,7 +80,8 @@ function sync_payment_fields(frm) {
 // Resend M-Pesa Prompt / Check M-Pesa Status on a submitted M-Pesa Payment Request, through the
 // prompt's own server functions: www.mpesa.stkpush.retry_stkpush sends the last prompt again (it
 // refuses a paid one, or one just sent); create_new_request makes a new one when the last was
-// paid and booked, or none was made (none while a paid prompt waits for its booking);
+// paid and booked, or none was made (none while a paid prompt waits for its booking:
+// money_in.payment_request.prompts_being_booked);
 // m_pesa_api.check_transaction_status asks Safaricom. COLLECT_ROLES only.
 function mpesa_prompt_actions(frm) {
   const doc = frm.doc;
@@ -104,26 +105,35 @@ function mpesa_prompt_actions(frm) {
       // A prompt the customer paid whose booking (its Payment Entry) is not made yet: the Payment
       // Request still owes that money until then, so a new prompt would ask the customer to pay
       // again. The server refuses one too (MpesaExpressRequest.validate_payment_request_amount).
-      const paid = (rows || []).find((r) => (r.status === "Completed" || r.transaction_id) && !cint(r.is_reconciled));
-      if (paid) {
-        frm.set_intro(
-          __("M-Pesa prompt {0} was paid{1} and is being booked: no new prompt is sent until it is.", [
-            paid.name,
-            paid.transaction_id ? ` (${paid.transaction_id})` : "",
-          ]),
-          "orange"
-        );
-        return;
-      }
-      // a prompt whose result is still being settled, or waits for a person, is left alone
-      const undecided = last && ["Pending", "Mismatch", "Unverified"].includes(last.verification_status);
-      if (
-        ["Requested", "Initiated", "Partially Paid"].includes(doc.status) &&
-        !undecided &&
-        frappe.model.can_create("Mpesa Express Request")
-      ) {
-        frm.add_custom_button(__("Resend M-Pesa Prompt"), () => mpesa_resend_prompt(frm, last), __("M-Pesa"));
-      }
+      // Which prompts those are is the server's rule (payment_request.unbooked_prompts: one booked
+      // through its C2B register, or whose money a reversal returned, is not), asked only when a
+      // prompt looks paid and not reconciled.
+      const maybe = (rows || []).some((r) => (r.status === "Completed" || r.transaction_id) && !cint(r.is_reconciled));
+      const booking = maybe
+        ? frappe.xcall("mpsa_suite.money_in.payment_request.prompts_being_booked", { payment_request: doc.name })
+        : Promise.resolve([]);
+      return booking.then((prompts) => {
+        const paid = (prompts || [])[0];
+        if (paid) {
+          frm.set_intro(
+            __("M-Pesa prompt {0} was paid{1} and is being booked: no new prompt is sent until it is.", [
+              paid.name,
+              paid.transaction_id ? ` (${paid.transaction_id})` : "",
+            ]),
+            "orange"
+          );
+          return;
+        }
+        // a prompt whose result is still being settled, or waits for a person, is left alone
+        const undecided = last && ["Pending", "Mismatch", "Unverified"].includes(last.verification_status);
+        if (
+          ["Requested", "Initiated", "Partially Paid"].includes(doc.status) &&
+          !undecided &&
+          frappe.model.can_create("Mpesa Express Request")
+        ) {
+          frm.add_custom_button(__("Resend M-Pesa Prompt"), () => mpesa_resend_prompt(frm, last), __("M-Pesa"));
+        }
+      });
     });
 }
 

@@ -14,8 +14,9 @@ A row's paybill is copied onto each payee account when it is entered; approved a
 number they were approved with. When a row's paybill changes (an admin, or a release), the
 approved accounts on it whose number is now different are blocked (``needs_reapproval``) until
 they are cancelled and amended, so a manager approves the new number: money never follows an
-edit by itself. Changing the paybill back unblocks them. Disabling a row only stops new accounts
-from picking it.
+edit by itself. Changing the paybill back unblocks them, unless the approval had no second named
+person (``party_accounts.unchecked_approval``): those stay blocked for that. Disabling a row only
+stops new accounts from picking it.
 
 Rows are public numbers, readable by the Accounts, HR and Purchase roles that enter payee
 accounts; only CONFIG_ROLES change them (the DocPerms, and ``validate_row`` in case a site adds
@@ -90,9 +91,11 @@ def flag_accounts(row, old_paybill: str = "") -> dict:
     """Block (needs_reapproval) each approved account on ``row`` whose number is no longer the row's
     paybill, unblock those whose number is the row's again. Returns {account DocType: blocked}."""
     blocked = {}
+    refuse_administrator = pa._refuses_administrator()
     for p in pa.PROFILES.values():
-        accounts = frappe.get_all(p.doctype, filters={"bank_paybill": row.name, "docstatus": 1},
-                                  fields=["name", "shortcode", "needs_reapproval", "reapproval_reason"])
+        fields = ["name", "shortcode", "needs_reapproval", "reapproval_reason", "owner", "approved_by"] + (
+            ["entered_by"] if frappe.db.has_column(p.doctype, "entered_by") else [])
+        accounts = frappe.get_all(p.doctype, filters={"bank_paybill": row.name, "docstatus": 1}, fields=fields)
         count = 0
         for acc in accounts:
             if cstr(acc.shortcode).strip() != cstr(row.paybill):
@@ -104,6 +107,13 @@ def flag_accounts(row, old_paybill: str = "") -> dict:
                 pa.note(p.doctype, acc.name, reason)
                 count += 1
             elif cint(acc.needs_reapproval) and _paybill_reason(acc, row):
+                # never had a second named person (migrate skipped it while the paybill blocked it): blocked for that
+                why = pa.unchecked_approval(acc, refuse_administrator)
+                if why:
+                    frappe.db.set_value(p.doctype, acc.name, {"needs_reapproval": 1, "reapproval_reason": why})
+                    pa.note(p.doctype, acc.name, f"Bank paybill {row.name} is {row.paybill} again, but the account "
+                                                 f"stays blocked: {why}")
+                    continue
                 frappe.db.set_value(p.doctype, acc.name, {"needs_reapproval": 0, "reapproval_reason": None})
                 pa.note(p.doctype, acc.name, f"Bank paybill {row.name} is {row.paybill} again, the number this "
                                              "account was approved with: it can be paid again.")

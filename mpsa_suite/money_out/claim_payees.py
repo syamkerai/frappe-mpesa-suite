@@ -1018,14 +1018,15 @@ def _sent_already(row) -> bool:
 
 
 def _capped_rows_total(parent) -> float:
-    """What the disbursement's rows send to payees that are not approved supplier accounts (as
-    found when the claim was approved)."""
+    """What the disbursement's rows send to payees that are not approved supplier accounts now
+    (approved_supplier_account, as each row's own check at the send; send_confirm says it first)."""
     rows = [r for r in parent.get("references") or [] if cstr(r.get("claim_payee")).strip() and not _sent_already(r)]
     if not rows:
         return 0.0
-    supplier = {r.name: r.supplier_account for r in frappe.get_all(
-        LINE, filters={"name": ["in", [r.claim_payee for r in rows]]}, fields=["name", "supplier_account"])}
-    return flt(sum(flt(r.allocated_amount) for r in rows if not supplier.get(r.claim_payee)), 2)
+    lines = {r.name: r for r in frappe.get_all(
+        LINE, filters={"name": ["in", [r.claim_payee for r in rows]]}, fields=list(LINE_FIELDS))}
+    return flt(sum(flt(r.allocated_amount) for r in rows
+                   if not (lines.get(r.claim_payee) and approved_supplier_account(lines[r.claim_payee]))), 2)
 
 
 def _check_not_settled(line, for_update: bool = False) -> None:

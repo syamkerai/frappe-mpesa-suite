@@ -610,6 +610,22 @@ class TestPayroll(_Base):
         self.assertTrue(frappe.db.get_value(B2B, request, "journal_entry"))  # booked: HRMS hides its button only
         self.assertRaisesRegex(frappe.ValidationError, f"M-Pesa pays salaries of {pe}", self._bank_entry, pe)
 
+    def test_a_reversal_of_a_b2b_salary_entry_saves(self):
+        """ERPNext's Reverse Journal Entry drops the B2B request's tag (no_copy) but credits the payroll
+        payable: it pays nobody, so the bank-entry guard lets it through. HRMS's bank entry is still refused."""
+        from erpnext.accounts.doctype.journal_entry.journal_entry import make_reverse_journal_entry
+
+        pe, _slips, request, _b2c = self._whole_payroll(employee_wise=0)
+        entry = frappe.db.get_value(B2B, request, "journal_entry")
+        reversal = make_reverse_journal_entry(entry)
+        payable = [r for r in reversal.accounts if r.reference_type == PAYROLL]
+        self.assertTrue(payable)
+        self.assertFalse(any(r.get("mpesa_b2b_payment_request") for r in reversal.accounts))  # no_copy
+        self.assertTrue(all(flt(r.credit_in_account_currency) > 0 for r in payable))
+        reversal.insert()
+        self.assertEqual((reversal.docstatus, reversal.reversal_of), (0, entry))
+        self.assertRaisesRegex(frappe.ValidationError, f"M-Pesa pays salaries of {pe}", self._bank_entry, pe)
+
     def test_who_may_not_see_salaries_cannot_plan_a_salary_on_a_schedule(self):
         """D4: an Accounts User without an HR role may make schedules, but not salary lines: refused before
         the slip or the employee's account is read, so the message names no amount and no destination."""

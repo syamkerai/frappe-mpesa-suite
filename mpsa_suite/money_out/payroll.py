@@ -340,11 +340,13 @@ def guard_bank_entry(doc, method=None) -> None:
     Payroll Entries). When Payroll Settings books payroll per employee, the entry's payable rows
     name each employee: only the rows of employees M-Pesa pays or paid are refused, so a bank entry
     made by hand for the others goes through. M-Pesa's own entries (a row tagged with its payout)
-    are left alone."""
-    if doc.get("voucher_type") not in BANK_VOUCHERS:
+    are left alone, and so is a reversal (ERPNext's Reverse Journal Entry, which drops the no_copy
+    tag of a B2B salary entry) and any row that credits the payable: it pays nobody."""
+    if doc.get("voucher_type") not in BANK_VOUCHERS or doc.get("reversal_of"):
         return
     accounts = doc.get("accounts") or []
-    rows = [r for r in accounts if r.get("reference_type") == PAYROLL_ENTRY and cstr(r.get("reference_name")).strip()]
+    rows = [r for r in accounts if r.get("reference_type") == PAYROLL_ENTRY and cstr(r.get("reference_name")).strip()
+            and flt(r.get("debit_in_account_currency")) > 0]
     if not rows or any(cstr(r.get(tag)).strip() for r in accounts for tag in MPESA_TAGS):
         return
     if not owed.hrms_installed():

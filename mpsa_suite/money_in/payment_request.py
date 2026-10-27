@@ -3,6 +3,7 @@
 import frappe
 from frappe.utils import add_days, cstr, flt, nowdate
 
+from ..permissions import COLLECT_ROLES, require
 from ..utils.phone import to_local
 from .common import EXPRESS, REGISTER, enabled, tolerance
 
@@ -54,6 +55,17 @@ def unbooked_prompts(payment_request: str, exclude: str | None = None) -> list:
         row.paid = flt(row.amount) if cstr(row.currency or "KES") == "KES" else flt(row.base_amount or row.amount)
         out.append(row)
     return out
+
+
+@frappe.whitelist()
+def prompts_being_booked(payment_request: str) -> list:
+    """The Payment Request form: the prompts unbooked_prompts finds (name and receipt), so the form
+    holds back Resend M-Pesa Prompt by the server's rule, not by is_reconciled alone (a prompt booked
+    through its C2B register, or whose money a reversal returned, is never reconciled).
+    COLLECT_ROLES and read on the Payment Request."""
+    require(COLLECT_ROLES)
+    frappe.has_permission("Payment Request", "read", doc=payment_request, throw=True)
+    return [{"name": p.name, "transaction_id": p.transaction_id} for p in unbooked_prompts(payment_request)]
 
 
 def being_booked(payment_request: str, prompts: list) -> str:

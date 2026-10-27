@@ -305,6 +305,7 @@ PR_DOC = {"docstatus": 1, "status": "Requested", "payment_gateway": "Mpesa-TILL"
           "company": "TC", "phone_number": "0712",
           "outstanding_amount": 800, "grand_total": 1000, "currency": "KES"}
 EXPRESS_CREATE = {"create": {"Mpesa Express Request": 1}}
+BOOKING = "mpsa_suite.money_in.payment_request.prompts_being_booked"
 
 
 def test_payment_request_prompt_buttons(tmp_path):
@@ -321,7 +322,10 @@ def test_payment_request_prompt_buttons(tmp_path):
     booked = dict(sent, status="Completed", transaction_id="SJK1", is_reconciled=1)
     assert buttons(last=booked) == ["M-Pesa > Resend M-Pesa Prompt"]
     # final review: paid, its booking not made yet: no new prompt (the customer would pay twice)
-    assert buttons(last=dict(booked, is_reconciled=0)) == []
+    being_booked = {BOOKING: [{"name": "EXP-1", "transaction_id": "SJK1"}]}
+    assert buttons(last=dict(booked, is_reconciled=0), replies=being_booked) == []
+    # verify pass: the server's rule decides (booked through its C2B register, or reversed: not being booked)
+    assert buttons(last=dict(booked, is_reconciled=0), replies={BOOKING: []}) == ["M-Pesa > Resend M-Pesa Prompt"]
     assert buttons(doc=dict(PR_DOC, status="Paid"), last=dict(sent, status="Completed")) == []
     assert buttons(mpsa={}) == []
     assert buttons(doc=dict(PR_DOC, payment_gateway="Stripe")) == []
@@ -358,7 +362,8 @@ frm.set_intro = (text, color) => intro.push([text, color]);
 handlers["Payment Request"].refresh(frm);
 await tick();
 const asked = calls.filter((c) => c[0] === "get_list" && c[1] === "Mpesa Express Request").map((c) => c[2]);
-return [frm.buttons, intro, asked];
+const booking = calls.filter((c) => c[0] === "xcall").map((c) => [c[1], c[2]]);
+return [frm.buttons, intro, asked, booking];
 """
 
 
@@ -368,15 +373,28 @@ def test_a_prompt_paid_but_not_booked_offers_no_new_prompt_and_says_why(tmp_path
     failed = {"name": "EXP-2", "status": "Failed", "checkout_request_id": "ws_CO_2", "is_reconciled": 0}
     paid = {"name": "EXP-1", "status": "Completed", "transaction_id": "SJK1", "is_reconciled": 0,
             "checkout_request_id": "ws_CO_1"}
-    shown, intro, asked = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT,
-                              perms=EXPRESS_CREATE, rows={"Mpesa Express Request": [failed, paid]})
+    shown, intro, asked, booking = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT,
+                                       perms=EXPRESS_CREATE, rows={"Mpesa Express Request": [failed, paid]},
+                                       replies={BOOKING: [{"name": "EXP-1", "transaction_id": "SJK1"}]})
     assert "M-Pesa > Resend M-Pesa Prompt" not in shown
     assert intro == [["M-Pesa prompt EXP-1 was paid (SJK1) and is being booked: no new prompt is sent until it is.",
                       "orange"]]
     assert "is_reconciled" in asked[0]["fields"] and asked[0]["limit"] > 1
-    shown, intro, _ = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT, perms=EXPRESS_CREATE,
-                          rows={"Mpesa Express Request": [failed, dict(paid, is_reconciled=1)]})
-    assert "M-Pesa > Resend M-Pesa Prompt" in shown and intro == []
+    assert booking == [[BOOKING, {"payment_request": "DOC-1"}]]
+    shown, intro, _, booking = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT,
+                                   perms=EXPRESS_CREATE, rows={"Mpesa Express Request": [failed, dict(paid, is_reconciled=1)]})
+    assert "M-Pesa > Resend M-Pesa Prompt" in shown and intro == [] and booking == []  # nothing looks paid: not asked
+
+
+def test_a_prompt_booked_through_c2b_or_reversed_offers_resend_again(tmp_path):
+    # verify pass: completed with a receipt, never reconciled, but the server holds nothing as being booked (its
+    # C2B register's Payment Entry carries the receipt, or a reversal returned the money)
+    paid = {"name": "EXP-1", "status": "Completed", "transaction_id": "RX1", "is_reconciled": 0,
+            "checkout_request_id": "ws_CO_1"}
+    shown, intro, _, booking = run(tmp_path, PR_FILES, BEING_BOOKED % json.dumps(PR_DOC), mpsa=COLLECT,
+                                   perms=EXPRESS_CREATE, rows={"Mpesa Express Request": [paid]}, replies={BOOKING: []})
+    assert shown == ["M-Pesa > Resend M-Pesa Prompt"] and intro == []
+    assert booking == [[BOOKING, {"payment_request": "DOC-1"}]]
 
 
 # ---------------------------------------------------------------- Purchase Invoice / Order, Supplier
