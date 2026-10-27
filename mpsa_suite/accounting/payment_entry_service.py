@@ -1,6 +1,7 @@
 import frappe
 from frappe.utils import nowdate
 
+from mpsa_suite.money_out.common import document_dimensions, payout_cost_center
 from mpsa_suite.mpsa_suite.api.payment_entry import (
     create_payment_entry,
 )
@@ -16,8 +17,6 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
         b2c_disbursement_ref: B2C Payment Disbursement Reference document
         submit: whether to submit the Payment Entry
     """
-    import erpnext
-
     current_user = frappe.session.user
     frappe.set_user("Administrator")
 
@@ -32,6 +31,9 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
         mode_of_payment = b2c_disbursement.mode_of_payment
         reference_date = b2c_disbursement_ref.reference_date
         reference_no = b2c_disbursement_ref.reference_no
+        dt, dn = b2c_disbursement_ref.reference_doctype, b2c_disbursement_ref.reference_name
+        request = getattr(b2c_disbursement_ref, "b2c_disbursement_request", None)
+        settings = request and frappe.db.get_value("B2C Disbursement Request", request, "mpesa_settings")
 
         references = [
             {
@@ -52,7 +54,9 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
             reference_date=reference_date,
             reference_no=reference_no,
             posting_date=nowdate(),
-            cost_center=erpnext.get_default_cost_center(company),
+            # the document's cost center and project, as the B2B entries (handover F5)
+            cost_center=payout_cost_center(settings, company, dt, dn),
+            dimensions=document_dimensions(dt, dn),
             submit=submit,
             references=references,
             party_account=party_account,

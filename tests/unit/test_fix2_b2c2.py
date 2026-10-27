@@ -365,6 +365,7 @@ def journal(frappe):
     frappe.new_doc = lambda doctype: JournalEntry(doctype=doctype)
     frappe.get_doc = lambda doctype, name=None, **kw: fake_frappe._dict(name=name)  # the Salary Slip
     disbursement = fake_frappe._dict(name="D-1", company="Astral", paid_from="MPESA", paid_to="PAYABLE")
+    frappe.db.table("Payroll Entry")["HR-PRUN-1"] = {"name": "HR-PRUN-1", "cost_center": "Payroll - A"}
 
     def ref(**values):
         return fake_frappe._dict(
@@ -384,6 +385,8 @@ def test_salary_bank_entry_carries_the_receipt_and_can_be_submitted(journal):
     assert (entry["voucher_type"], entry["cheque_no"], entry["cheque_date"]) == (
         "Bank Entry", "SKT1AAAAAA", datetime.date(2026, 10, 20)
     )
+    # both rows on the Payroll Entry's cost center (handover F5)
+    assert [row["cost_center"] for row in entry["accounts"]] == ["Payroll - A", "Payroll - A"]
 
 
 def test_salary_entry_reference_date_falls_back_to_the_posting_date(journal):

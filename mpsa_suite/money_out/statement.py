@@ -11,7 +11,9 @@ Lines and entries carry the keys Astral's feed scripts use (the receipt on the p
 line; "CHG-<receipt>" on the charge line and as its Journal Entry's Cheque No), so whichever
 side makes one first, the other finds it and never makes a second.
 
-The charge: a B2B result states it (DebitPartyCharges). A B2C result does not; it carries
+The charge: a B2B result states it (DebitPartyCharges); a till's (Buy Goods) does not, and then
+it is the fall in the Working balance since the balance before, until a Transaction Status
+query states it (money_out.b2b_status). A B2C result does not; it carries
 the wallet balances left after the payout. Daraja's docs put charges on the Charges Paid
 account, but on Astral's shortcode that stays 0 and the charge comes off the Utility
 balance, so the two are added. The charge booked is the B2C Charge Bands setting
@@ -239,7 +241,9 @@ def charge_for(p) -> float | None:
     """The payout's Safaricom charge when it is certain, else None (left for staff, or for the
     sweep while a B2C's balances cannot show it yet)."""
     if p.doctype == B2B:
-        return parse_charges(p.debit_party_charges)  # Safaricom states it
+        if cstr(p.debit_party_charges).strip():
+            return parse_charges(p.debit_party_charges)  # Safaricom states it (a stated 0 stays 0)
+        return unstated_b2b_charge(p)
     bands = charge_bands()
     tariff = band_charge(bands, p.amount) if bands else None
     seen = balance_charge(p)
@@ -314,6 +318,108 @@ def balance_charge(p) -> float | None:
     ):
         return None
     return seen_charge(pred, p)
+
+
+def unstated_b2b_charge(p) -> float | None:
+    """A B2B whose Result stated no charge (a till payment): what the Working balances show, else
+    None. Logged once in the Match Log ("charge not stated") when no status query can give it."""
+    seen = b2b_balance_charge(p)
+    if seen is not None:
+        return seen
+    from .b2b_status import still_asking
+
+    if not still_asking(p.name):
+        log_match(
+            "Ambiguous", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+            receipt=p.receipt, amount=p.amount,
+            details=f"Charge not stated: Safaricom did not state the charge on {p.receipt}, its status query did not "
+            "give it and the Working balance cannot show it. No charge was booked: take it from the M-Pesa "
+            "statement and book it by hand.",
+        )
+    return None
+
+
+def working_balance(text) -> float | None:
+    """The Working balance a B2B Result left ("Working Account|KES|<current>|..."), or None."""
+    from ..wallet.balances import parse_balances
+
+    return parse_balances(text).get(accounts.WORKING)
+
+
+def b2b_balance_charge(p) -> float | None:
+    """The charge the Working balances show for a B2B payout: the balance before it (the Paid B2B
+    just before, or a later Account Balance of Working), less the balance its Result left, less
+    the amount. None when that is unclear: no balance before it within BALANCE_WINDOW, another
+    B2B in flight or one without a balance in between, or a fall that is no payout's charge."""
+    this = working_balance(p.get("debit_account_balance"))
+    if this is None or not p.completed:
+        return None
+    shortcode = cstr(frappe.db.get_value("Mpesa Settings", p.mpesa_settings, "business_shortcode")).strip()
+    wallet = [
+        r.name
+        for r in frappe.get_all("Mpesa Settings", fields=["name", "business_shortcode"], order_by="creation asc")
+        if cstr(r.business_shortcode).strip() == shortcode
+    ] or [p.mpesa_settings]
+    since = p.completed - BALANCE_WINDOW
+    # A B2B still in flight may have moved the wallet before this one.
+    if frappe.get_all(
+        B2B,
+        filters=[
+            [B2B, "mpesa_settings", "in", wallet],
+            [B2B, "docstatus", "=", 1],
+            [B2B, "status", "in", ("Initiated", "Unknown")],
+            [B2B, "creation", ">=", since],
+            [B2B, "creation", "<=", p.completed],
+        ],
+        pluck="name",
+        limit=1,
+    ):
+        return None
+    rows = frappe.get_all(
+        B2B,
+        filters=[
+            [B2B, "mpesa_settings", "in", wallet],
+            [B2B, "docstatus", "in", [1, 2]],
+            [B2B, "status", "=", "Paid"],
+            [B2B, "name", "!=", p.name],
+            [B2B, "trans_completed_time", ">=", since],
+            [B2B, "trans_completed_time", "<=", p.completed],
+        ],
+        fields=["name", "trans_completed_time", "debit_account_balance"],
+        order_by="trans_completed_time asc",
+    )
+    for r in rows:
+        r.completed = get_datetime(r.trans_completed_time)
+        r.balance = working_balance(r.debit_account_balance)
+    # Results come in any order: the wallet moved in completion order, then (several in one
+    # second) by the balance they left, highest first.
+    def order(r):
+        return (r.completed, -r.balance)
+
+    pred = max((r for r in rows if r.balance is not None and order(r) < (p.completed, -this)), key=order, default=None)
+    snapshot = None
+    if shortcode and frappe.db.table_exists("Mpesa Balance Snapshot"):
+        snapshot = frappe.db.get_value(
+            "Mpesa Balance Snapshot",
+            {"shortcode": shortcode, "sub_account": accounts.WORKING, "source": "Account Balance",
+             "taken_at": ["between", [pred.completed if pred else since, p.completed]]},
+            ["taken_at", "balance"],
+            as_dict=True,
+            order_by="taken_at desc",
+        )
+    taken = get_datetime(snapshot.taken_at) if snapshot else None
+    if taken and taken < p.completed and (not pred or taken > pred.completed):
+        start, start_balance = taken, flt(snapshot.balance)  # a balance asked for after the B2B before
+    elif pred:
+        start, start_balance = pred.completed, pred.balance
+    else:
+        return None  # no balance before it within the window
+    if any(r.balance is None and start <= r.completed <= p.completed for r in rows):
+        return None  # a B2B in between left no balance: how far the wallet fell is hidden
+    charge = round(start_balance - this - flt(p.amount), 2)
+    if charge <= 0 or charge > MAX_SEEN_CHARGE or abs(charge - round(charge)) > 0.005:
+        return None  # a funding, a transfer or a sweep moved the wallet in between
+    return charge
 
 
 # ---------------------------------------------------------------- statement lines
@@ -460,7 +566,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         settings = frappe.db.get_value(
             "Mpesa Settings",
             p.mpesa_settings,
-            [f for f in ("charges_account", "cost_center", "submit_b2c_accounting_entries") if meta.has_field(f)],
+            [f for f in ("charges_account", "submit_b2c_accounting_entries") if meta.has_field(f)],
             as_dict=True,
         ) or frappe._dict()
         if not settings.get("charges_account"):
@@ -480,7 +586,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
                 f"of {bank_account}.",
             )
             return None
-        import erpnext
+        from .common import payout_cost_center
 
         je = frappe.new_doc(JE)
         je.voucher_type = "Bank Entry"
@@ -492,15 +598,13 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         if frappe.get_meta(JE).has_field("custom_remark"):  # v16 builds its own remark unless told
             je.custom_remark = 1
             je.remark = je.user_remark
+        # a charge follows the shortcode, never a document: both rows on one cost center (F5)
+        cost_center = payout_cost_center(p.mpesa_settings, bank.company)
         je.append(
             "accounts",
-            {
-                "account": settings.charges_account,
-                "debit_in_account_currency": amount,
-                "cost_center": settings.get("cost_center") or erpnext.get_default_cost_center(bank.company),
-            },
+            {"account": settings.charges_account, "debit_in_account_currency": amount, "cost_center": cost_center},
         )
-        je.append("accounts", {"account": bank.account, "credit_in_account_currency": amount})
+        je.append("accounts", {"account": bank.account, "credit_in_account_currency": amount, "cost_center": cost_center})
         je.flags.ignore_permissions = True
         je.insert()
         # reviewed like the payout's own entry (B2C and B2B both follow this switch)
@@ -607,8 +711,9 @@ def sweep_missing(limit: int = 200) -> None:
             limit=limit,
         )
         for row in rows:
-            if row.bank_transaction and doctype == B2B and not parse_charges(row.debit_party_charges):
-                continue  # nothing was charged
+            if (row.bank_transaction and doctype == B2B and cstr(row.debit_party_charges).strip()
+                    and not parse_charges(row.debit_party_charges)):
+                continue  # Safaricom says nothing was charged; a charge it did not state is looked for again
             frappe.db.savepoint("mpesa_payout_bt")
             try:
                 feed(doctype, row.name)

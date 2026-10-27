@@ -273,6 +273,7 @@ ENDPOINTS = {
     "mpsa_suite.utils.utils.get_mode_of_payment_account": ("Write B2C Payment Disbursement", ("perm",)),
     # Money out
     "mpsa_suite.money_out.api.check_b2c_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
+    "mpsa_suite.money_out.api.check_b2b_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
     "mpsa_suite.money_out.api.make_reversal": ("PAYOUT_ROLES or ADMIN_ROLES + read register", ("roles:PAYOUT_OR_ADMIN", "perm")),
     "mpsa_suite.money_out.schedule.prepare_payment": ("PAYOUT_ROLES + read the schedule", ("roles:PAYOUT_ROLES", "perm")),
     "mpsa_suite.money_out.schedule.confirm_payment": ("PAYOUT_ROLES, the user the summary was made for", ("roles:PAYOUT_ROLES",)),

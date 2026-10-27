@@ -47,9 +47,14 @@ def find_request(doctype: str, result: dict, ref: str | None):
 
     if not ref or not frappe.db.get_value(doctype, ref, "name", for_update=True):
         return None
-    doc = frappe.get_doc(doctype, ref)
+    # a locking read: the ack's IDs may have been committed while this result waited for the row
+    # (Safaricom answers a status query within a second of its ack), after this transaction's
+    # snapshot was taken by the lookup above
+    doc = frappe.get_doc(doctype, ref, for_update=True)
     known = {doc.get("conversation_id"), doc.get("originator_conversation_id")} - {None, ""}
     sent = {daraja_id(result.get(k)) for k in ("ConversationID", "OriginatorConversationID")} - {""}
+    if known & sent:
+        return doc  # matched by its IDs after all
     if known or not sent or not _sent_without_ack(doc):
         frappe.log_error(
             title="M-Pesa result mismatch",

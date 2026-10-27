@@ -53,6 +53,7 @@
   "result_desc",
   "transaction_id",
   "trans_completed_time",
+  "completed_time_estimated",
   "column_break_res",
   "receiver_public_name",
   "receiver_name_mismatch",
@@ -328,6 +329,17 @@
    "no_copy": 1
   },
   {
+   "fieldname": "completed_time_estimated",
+   "fieldtype": "Check",
+   "label": "Completed At Is Estimated",
+   "description": "Safaricom's Result gave no time (a till payment): Completed At is when the Result arrived, until a Transaction Status query gives Safaricom's own.",
+   "default": "0",
+   "depends_on": "completed_time_estimated",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
    "fieldname": "column_break_res",
    "fieldtype": "Column Break"
   },
@@ -475,7 +487,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-23 22:00:00.000000",
+ "modified": "2026-10-27 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2B Payment Request",

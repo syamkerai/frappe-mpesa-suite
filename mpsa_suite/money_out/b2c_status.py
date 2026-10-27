@@ -4,6 +4,9 @@ A payout whose Result never arrived (transport timeout, queue timeout, lost call
 must not be re-sent blindly: the money may already have moved. ``check_b2c_status``
 asks Safaricom; the result settles the payout only when it names a final state that
 matches our amount, and only while the payout is still unsettled.
+
+A query for a B2B payout (``b2b_request``) goes through the same doctype and endpoints;
+its result is handled by money_out.b2b_status.
 """
 
 import frappe
@@ -54,14 +57,31 @@ def start_query(b2c_request: str) -> str:
     if recent:
         frappe.throw(f"Status query {recent} is still waiting for Safaricom's answer")
 
-    settings = initiator_settings(b2c.mpesa_settings)
+    return send_query(
+        {"b2c_request": b2c_request},
+        b2c.mpesa_settings,
+        b2c.transaction_id,
+        b2c.originator_conversation_id,
+        remarks=f"Status {b2c_request}",
+        description="Mpesa B2C Transaction Status",
+    )
+
+
+def send_query(link: dict, mpesa_settings: str, receipt, originator_id, remarks: str, description: str) -> str:
+    """Create the query (``link``: the payout it asks about), send it and record the ack; returns
+    the query's name. Queried by receipt when there is one, else by OriginatorConversationID.
+
+    Committed before the call and again right after the ack: Safaricom has answered 0.4 s after
+    the ack, and its result finds the query by the ack's ConversationID (results.find_request).
+    """
+    settings = initiator_settings(mpesa_settings)
     query = frappe.get_doc(
         {
             "doctype": QUERY_DOCTYPE,
-            "b2c_request": b2c_request,
-            "mpesa_settings": b2c.mpesa_settings,
-            "query_by": "TransactionID" if b2c.transaction_id else "OriginalConversationID",
-            "query_value": b2c.transaction_id or b2c.originator_conversation_id,
+            **link,
+            "mpesa_settings": mpesa_settings,
+            "query_by": "TransactionID" if receipt else "OriginalConversationID",
+            "query_value": receipt or originator_id,
             "status": "Queued",
         }
     ).insert(ignore_permissions=True)
@@ -70,19 +90,20 @@ def start_query(b2c_request: str) -> str:
         initiator=settings.initiator_name,
         security_credential=settings.security_credential,
         party_a=apis.initiator_party_a(settings),
-        transaction_id=b2c.transaction_id or None,
-        original_conversation_id=None if b2c.transaction_id else b2c.originator_conversation_id,
+        transaction_id=receipt or None,
+        original_conversation_id=None if receipt else originator_id,
         result_url=callback_url("b2c_status_result", ref=query.name),
         queue_timeout_url=callback_url("status_queue_timeout", ref=query.name),
-        remarks=f"Status {b2c_request}",
+        remarks=remarks,
     )
+    frappe.db.commit()  # the query exists before Safaricom can answer it
     data, error = post(
         settings,
         daraja.TRANSACTION_STATUS_ENDPOINT,
         payload,
         doctype=QUERY_DOCTYPE,
         name=query.name,
-        description="Mpesa B2C Transaction Status",
+        description=description,
     )
     if error:
         query.db_set({"status": "Failed to Send", "outcome_reason": f"Transport error ({error})"})
@@ -104,6 +125,7 @@ def start_query(b2c_request: str) -> str:
                 ).strip()[:500],
             }
         )
+    frappe.db.commit()  # the ack's IDs, before the result looks for them
     return query.name
 
 
@@ -114,6 +136,11 @@ def handle_result(result: dict, ref: str | None) -> None:
         return
     if query.status == "Result Received":
         return  # re-sent result
+    if query.get("b2b_request"):
+        from . import b2b_status
+
+        b2b_status.handle_result(query, result)
+        return
 
     values = daraja.result_values(result)
     # Lock the payout before reading it, so a real B2C Result arriving now is serialised.

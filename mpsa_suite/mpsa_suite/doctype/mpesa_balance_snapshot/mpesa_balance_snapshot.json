@@ -8,6 +8,8 @@
   "shortcode",
   "sub_account",
   "balance",
+  "available",
+  "reserved",
   "taken_at",
   "source",
   "column_break_a",
@@ -15,10 +17,13 @@
   "expected_balance",
   "difference",
   "anchor",
+  "previous_snapshot",
+  "erp_movement",
   "checked_on",
   "reference_doctype",
   "reference_name",
-  "note"
+  "note",
+  "warning"
  ],
  "fields": [
   {
@@ -50,6 +55,22 @@
    "label": "Balance",
    "options": "KES",
    "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "available",
+   "fieldtype": "Currency",
+   "label": "Available",
+   "options": "KES",
+   "description": "What Safaricom says can be paid out now: the balance less what is reserved and uncleared.",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reserved",
+   "fieldtype": "Currency",
+   "label": "Reserved",
+   "options": "KES",
+   "description": "Held by Safaricom for a transaction still pending. With no ERP payout in flight, something is pending outside the ERP.",
    "read_only": 1
   },
   {
@@ -104,6 +125,22 @@
    "read_only": 1
   },
   {
+   "fieldname": "previous_snapshot",
+   "fieldtype": "Link",
+   "label": "Previous Balance",
+   "options": "Mpesa Balance Snapshot",
+   "description": "With no statement to check from: the sub-account's balance before this one, which the ERP's payouts and receipts since are counted from.",
+   "read_only": 1
+  },
+  {
+   "fieldname": "erp_movement",
+   "fieldtype": "Currency",
+   "label": "ERP Movement",
+   "options": "KES",
+   "description": "What the ERP's payouts (with their charges) and receipts moved this sub-account since the previous balance.",
+   "read_only": 1
+  },
+  {
    "fieldname": "checked_on",
    "fieldtype": "Datetime",
    "label": "Checked On",
@@ -128,10 +165,16 @@
    "fieldtype": "Small Text",
    "label": "Note",
    "read_only": 1
+  },
+  {
+   "fieldname": "warning",
+   "fieldtype": "Small Text",
+   "label": "Warning",
+   "read_only": 1
   }
  ],
  "links": [],
- "modified": "2026-10-22 21:30:00.000000",
+ "modified": "2026-10-27 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa Balance Snapshot",

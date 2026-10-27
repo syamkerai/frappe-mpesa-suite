@@ -18,7 +18,7 @@ import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from ..daraja import verify
-from .common import EXPRESS, REGISTER, enabled, log_match, parse_transtime, receipt_reversal, tolerance
+from .common import EXPRESS, REGISTER, as_user, enabled, log_match, parse_transtime, receipt_reversal, tolerance
 
 MAX_BOOKING_ATTEMPTS = 3
 GIVE_UP_AFTER_HOURS = 6  # STK Query answers for a while only; then a person decides
@@ -133,8 +133,13 @@ def book(request_name: str) -> bool:
 
     frappe.db.savepoint("mpesa_stk_booking")
     try:
-        req.validate_duplicate_c2b_records()  # the prompt wins over a C2B register for the receipt
-        req.book_completed_payment()
+        # As Administrator: this job runs as the callback's Integration User, and ERPNext's
+        # get_payment_entry and an invoice's submit check that user's permission on the order or
+        # invoice (a User Permission on Project, Cost Center or Company hides it). The prompt was
+        # verified with Safaricom above; staff reconciling by hand keep their own permissions.
+        with as_user("Administrator"):
+            req.validate_duplicate_c2b_records()  # the prompt wins over a C2B register for the receipt
+            req.book_completed_payment()
     except Exception:
         frappe.db.rollback(save_point="mpesa_stk_booking")
         frappe.log_error(frappe.get_traceback(), f"M-Pesa STK booking failed for {req.name}"[:140])
