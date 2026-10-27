@@ -265,10 +265,12 @@ def _approved_phone(employee, phone):
 
 def phone_lock_problem(employee, phone) -> str | None:
     """Why a B2C payout to ``employee`` may not go to ``phone`` while M-Pesa Suite Settings pays
-    employees only to approved phones (None when it may, or while the setting is off)."""
-    if not approved_phones_only():
-        return None
+    employees only to approved phones (None when it may). With the setting off, a number typed in
+    that is an approved account's is still paid only while that account can be paid (not on hold or
+    blocked); another number is not checked."""
     acc = _approved_phone(employee, phone)
+    if not approved_phones_only():
+        return party_accounts.usable_problem(acc, employee, EMPLOYEE_ACCOUNT) if acc else None
     if not acc:
         return (f"{cstr(phone).strip() or 'No number'} is not a phone approved for {employee}. M-Pesa Suite Settings pays "
                 "employees by B2C only to an approved phone: add it under Employee > M-Pesa Accounts and have a manager "
@@ -408,6 +410,37 @@ def check_b2c_request(doc) -> None:
                 from .b2b import NO_DOCUMENT
 
                 frappe.throw(NO_DOCUMENT, frappe.PermissionError)
+    problem = row_mismatch(doc)
+    if problem:
+        frappe.throw(problem)
+
+
+def row_mismatch(doc) -> str | None:
+    """Why a B2C request does not pay what the disbursement row it names says: a row of another
+    disbursement, or another party, number, amount or document. The disbursement's job copies them
+    from the row, so only a request made by hand differs, and the row's checks (approved phones,
+    claims, payees) would then not be its checks: one that leaves its party out, say, skips them."""
+    ref = cstr(getattr(doc, "b2c_payment_disbursement_reference", None)).strip()
+    row = ref and frappe.db.get_value(DISB_ROW, ref, ["parent", "party_type", "party", "partyb", "allocated_amount",
+                                                      "reference_doctype", "reference_name"], as_dict=True)
+    disbursement = cstr(getattr(doc, "b2c_payment_disbursement", None)).strip()
+    if not row or row.parent != disbursement:
+        return f"{ref or 'No row'} is not a row of {disbursement or 'its disbursement'}: a B2C request pays a row of its disbursement."
+    differs = [label for label, mine, its in (
+        ("party type", getattr(doc, "party_type", None), row.party_type),
+        ("party", getattr(doc, "party", None), row.party),
+        ("document", f"{getattr(doc, 'reference_doctype', None) or ''} {getattr(doc, 'reference_name', None) or ''}",
+         f"{row.reference_doctype or ''} {row.reference_name or ''}"),
+    ) if cstr(mine).strip() != cstr(its).strip()]
+    number = getattr(doc, "phone_number", None)
+    if (normalize_msisdn(number) or cstr(number).strip()) != (normalize_msisdn(row.partyb) or cstr(row.partyb).strip()):
+        differs.append("phone number")
+    if abs(flt(getattr(doc, "amount", None)) - flt(row.allocated_amount)) >= 0.01:
+        differs.append("amount")
+    if differs or not cstr(row.party).strip():
+        return (f"This B2C request's {', '.join(differs) or 'party'} is not that of {disbursement} row {ref}: a B2C "
+                "request pays exactly what its disbursement row says.")
+    return None
 
 
 def _row_claim_payee(doc) -> str | None:
@@ -460,6 +493,9 @@ def check_b2c_retry(doc) -> None:
         problem = _supplier_retry_problem(doc)
         if problem:
             frappe.throw(problem)
+    problem = row_mismatch(doc)  # a request made by hand before row_mismatch was checked at its save
+    if problem:
+        frappe.throw(problem)
     if party:
         employees.add(party)
         if not _row_claim_payee(doc):

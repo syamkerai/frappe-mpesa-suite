@@ -869,6 +869,10 @@ class TestB2BDocuments(IntegrationTestCase):
                   "b2c_payment_disbursement": doc.name, "b2c_payment_disbursement_reference": doc.references[0].name}
         self.assertRaisesRegex(frappe.ValidationError, "254733999888 is not a phone approved for",
                                frappe.get_doc(dict(values, phone_number="254733999888")).insert)
+        # leaving its party out does not skip the supplier's rule: a request pays exactly its row
+        self.assertRaisesRegex(frappe.ValidationError, "party type, party, phone number is not that of",
+                               frappe.get_doc(dict(values, party_type=None, party=None,
+                                                   phone_number="254733999888")).insert)
         request = frappe.get_doc(dict(values, phone_number=B2C_PHONE)).insert()
         frappe.db.set_value(B2C_REQ, request.name, {"docstatus": 1, "status": "Failed"})
         employee_documents.check_b2c_retry(frappe.get_doc(B2C_REQ, request.name))  # may be sent again
@@ -888,7 +892,9 @@ class TestB2BDocuments(IntegrationTestCase):
         frappe.set_user(self.approver)
         try:
             draft = frappe.get_doc(dict(values, purchase_invoice=pi.name))
+            frappe.flags.error_message = None
             self.assertRaises(frappe.PermissionError, draft.insert)
+            self.assertIn(f"No permission for Purchase Invoice {pi.name}", str(frappe.flags.error_message))
             self.assertFalse(draft.get("supplier"))
         finally:
             frappe.set_user("Administrator")
@@ -907,7 +913,9 @@ class TestB2BDocuments(IntegrationTestCase):
             doc.remarks = f"Checked {self.tag}"
             doc.save()
             doc.purchase_invoice = other.name
+            frappe.flags.error_message = None
             self.assertRaises(frappe.PermissionError, doc.save)
+            self.assertIn(f"No permission for Purchase Invoice {other.name}", str(frappe.flags.error_message))
         finally:
             frappe.set_user("Administrator")
         self.assertEqual(frappe.db.get_value(B2B, request.name, "purchase_invoice"), pi.name)

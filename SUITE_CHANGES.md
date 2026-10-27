@@ -458,6 +458,44 @@ sources of v15 and v16. Four findings were high, 19 medium and 19 low. What user
   Notify Role. With those states set, an advance under its own workflow is gated only by the listed
   states its workflow has.
 
+### Round 4 verification (15 findings, fixed in r4-verify-counting/reads/sends)
+
+The final pass was itself reviewed (six reviewers and a completeness critic, every finding checked by
+independent skeptics): 19 findings, 15 confirmed (6 medium, 9 low), 4 refuted. Notes per fix:
+docs/r4_notes/VERIFY_COUNTING.md, VERIFY_READS.md, VERIFY_SENDS.md. What users notice:
+
+- **Claims and advances:**
+  - A B2C claim or advance payout booked in part keeps its unallocated rest counted, as a B2B one
+    does. Cancelling the other (bank) entry no longer makes that money look owed again.
+  - **Settle Payee Outside M-Pesa** (named M-Pesa Manager, not on their own claim): a Draft or
+    Failed payee line of a submitted claim that was paid another way is Cancelled with the reason
+    and a comment. Its amount is the employee's again, and M-Pesa never pays it.
+  - A claim is not cancelled while a payee line's payout may have paid, a cancelled Unknown request
+    included. Cancel on a claim or advance no longer lists its M-Pesa payouts in Frappe's Cancel
+    All dialog, so one whose payouts all failed is cancelled from the form.
+- **Phones:** an employee with approved phones is paid by B2C only to the one that can be paid now,
+  also while "Pay Employees by B2C Only to Approved Phones" is off: a default on hold or blocked is
+  never passed over for the Cell Number, and that number typed in by hand is refused too.
+- **Suppliers:** a hand-made B2C request, and a Retry, pay a supplier with approved phones only to
+  one of them that can be paid now; a cancelled account (a stolen SIM) stops the retry. A
+  hand-made B2C request must pay exactly what its disbursement row says (party, number, amount,
+  document).
+- **Reads:**
+  - A B2B draft names an invoice, order, claim or advance only for who may read it, when the link
+    is new or changed; saving or amending a colleague's request is not refused.
+  - Get References on a B2C disbursement needs read on what it lists and lists only the documents
+    the user may read: an Expense Approver no longer sees every claim and advance with phones.
+  - Salary Slip rows are refused before the slip is read, so net pay cannot be probed.
+- **Accounts:** a bank paybill changed back no longer unblocks an account approved by its maker or
+  with Administrator.
+- **Payroll:** reversing M-Pesa's own B2B salary entry saves; a bank entry that pays the payroll is
+  still refused.
+- **Send via M-Pesa:** the payee day cap is counted the same way in the summary and at the send; a
+  hand-made B2C request to an employee gives an M-Pesa Payer no token (manager only), with the
+  reason.
+- **Payment Requests:** the form shows "being booked" only for prompts the server counts as paid and
+  not booked, so a reversed or C2B-booked prompt no longer hides Resend.
+
 **Known limits** (after the final review)
 - An Integration Request's raw data of a B2C or B2B result holds the amount and receiver name
   (salaries too), and System Manager reads Integration Requests. Error Logs likewise.

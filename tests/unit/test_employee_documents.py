@@ -44,6 +44,9 @@ def env(payroll_env, monkeypatch):  # noqa: F811
     monkeypatch.setitem(columns, ROW, columns[ROW] + ("payee_account_doctype", "payee_account", "claim_payee"))
     frappe.db.columns = frappe.db.columns | {(B2B, "expense_claim"), (B2B, "employee_advance")}
     env.ed = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    # a request made by hand pays exactly its disbursement row (row_mismatch: tests/unit/test_r4_residual.py)
+    env.row_mismatch = env.ed.row_mismatch
+    monkeypatch.setattr(env.ed, "row_mismatch", lambda doc: None)
     env.settings = fake_frappe._dict()
     monkeypatch.setattr(env.ed, "_settings", lambda: env.settings)
     # WP7's one payout cost-center rule and the document's dimensions (money_out.common)

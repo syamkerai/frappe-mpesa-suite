@@ -413,9 +413,9 @@ def can_read(dt: str, dn: str | None = None, throw: bool = False) -> bool:
 def _check_document_read(doc) -> None:
     """A draft saved by hand names an invoice, order, claim or advance only for who may read it
     (can_read): its save fills in the supplier or employee and answers with what is left to pay.
-    Only when the link is new or changed: a payer or manager saving a colleague's draft needs no
-    rights on the document beyond those of the send. Not for a payment schedule's request (Pay
-    Selected checked its preparer), nor at submit and send."""
+    Only when the link is new or changed: a payer or manager saving a colleague's draft, or amending
+    a cancelled request to resend it, needs no rights on the document beyond those of the send. Not
+    for a payment schedule's request (Pay Selected checked its preparer), nor at submit and send."""
     if (getattr(doc, "flags", None) or {}).get("mpesa_from_schedule") or cint(doc.get("docstatus")) != 0:
         return
     for dt, field in owed.B2B_DOC_FIELDS.items():
@@ -423,7 +423,13 @@ def _check_document_read(doc) -> None:
         if not dn:
             continue
         before = doc.get_doc_before_save()
-        if before is None or cstr(before.get(field)).strip() != dn:
+        if before is not None:
+            was = before.get(field)
+        elif doc.get("amended_from"):
+            was = frappe.db.get_value(doc.doctype, doc.amended_from, field)
+        else:
+            was = None
+        if cstr(was).strip() != dn:
             can_read(dt, dn, throw=True)
 
 

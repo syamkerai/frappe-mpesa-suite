@@ -149,6 +149,13 @@ Open after round 4 (known, not fixed yet):
   off the two payout DocTypes after Check Permissions.
 - Payment Entry's STK button is not hidden from users who are not collectors (the server checks
   submit on the Payment Entry).
+- Purchase Orders on a B2B draft and in Get References are allowed to whoever reads Purchase
+  Invoices (the Accounts roles pay order advances, and ERPNext lets only the Purchase and Stock
+  roles read orders). That check is by DocType: User Permissions and shares are not applied to
+  orders, as before round 4.
+- Get References for Employee Advances needs read on Employee Advance, which stock HRMS gives only
+  to Expense Approver (and to each employee for their own). HR Manager and HR User, and the Accounts
+  roles, are refused until the site gives that read.
 
 Checked and found sound (no change):
 
@@ -504,7 +511,7 @@ Error Log "M-Pesa Suite: this site's own permission rules differ from the suite'
 | HR Manager / HR User | An Employee M-Pesa Account as a draft; a B2C payroll disbursement as a draft; Pay employee (phone) and Pay employee (bank / paybill / till) on an approved claim (HR Manager and HR User); Pay Merchants and Payees on a claim; Make Default on an employee's account (HR Manager) | Approving an Employee M-Pesa Account; submitting (sending) a B2C disbursement; Create M-Pesa Payment Schedule on a Payroll Entry and Pay by M-Pesa on a Salary Slip without an Accounts role (an Accounts role prepares it) |
 | Expense Approver | Approving a claim with M-Pesa payees; seeing that claim's payouts; Pay Merchants and Payees and Pay employee (phone, or bank / paybill / till) on an approved claim; Pay by M-Pesa on an Employee Advance | Send via M-Pesa; salary payouts (employee B2C/B2B for a slip, payroll schedules) |
 | Accounts User (round 4) | Pay employee (bank / paybill / till) on a claim, once the site gives Accounts read on Expense Claim; Make Default on a supplier account; Request Payment on a submitted Sales Order or Invoice | Salary payouts; claim payouts while it reads no claims; Make Default on an employee's account |
-| M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; mark a Draft or Failed payee line of a submitted claim settled outside M-Pesa (with your own login); Check Permissions | Approving an account they entered themselves |
+| M-Pesa Manager | Credentials visible and editable; Regenerate Security Credential; approve a Supplier M-Pesa Account someone else entered; release a held C2B receipt; mark a Draft or Failed payee line of a submitted claim settled outside M-Pesa (with your own login); Check Permissions | Approving an account they entered themselves; settling a payee line of their own claim |
 | Portal / website user | nothing M-Pesa | `/api/v2/method/Mpesa Express Request/initiate_stk_push` and `/api/v2/method/Mpesa Settings/get_account_balance?name=<record>` answer 403 |
 | Guest (logged out) | the pay page `/pay/<token>`; Safaricom callbacks keep arriving | `/api/method/mpsa_suite.utils.utils.convert_amount_to_kes?currency=USD&amount=1` answers 403 |
 

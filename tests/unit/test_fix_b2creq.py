@@ -627,6 +627,9 @@ def retry(monkeypatch):
 
             env.failed = failed
             env.take_snapshot = take_snapshot
+            # a request made by hand pays exactly its disbursement row (row_mismatch: tests/unit/test_r4_residual.py)
+            monkeypatch.setattr(importlib.import_module("mpsa_suite.money_out.employee_documents"), "row_mismatch",
+                                lambda doc: None)
             yield env
     finally:
         fake_frappe.uninstall(saved)

@@ -1543,6 +1543,10 @@ def settle_line(claim: str, line: str, reason: str | None = None) -> dict:
     require(ADMIN_ROLES)
     doc = frappe.get_doc(CLAIM, claim)
     doc.check_permission("read")
+    from .employee_accounts import own_payment_problem
+
+    if own_payment_problem(doc.employee):  # its money would go back to the settler's own share
+        frappe.throw(f"{claim} is your own claim: another M-Pesa Manager settles its payees.", frappe.PermissionError)
     reason = cstr(reason).strip()
     if not reason:
         frappe.throw("Say how the payee was paid outside M-Pesa (the bank Payment Entry, say).")

@@ -481,6 +481,9 @@ def owed(frappe, monkeypatch):
             return Request("B2C-1")
 
         env.update(mod=mod, post=post, failed=failed)
+        # a request made by hand pays exactly its disbursement row (row_mismatch: tests/unit/test_r4_residual.py)
+        monkeypatch.setattr(importlib.import_module("mpsa_suite.money_out.employee_documents"), "row_mismatch",
+                            lambda doc: None)
         yield env
 
 
