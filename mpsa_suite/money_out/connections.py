@@ -54,8 +54,9 @@ EMPLOYEE_ACCOUNT = "Employee M-Pesa Account"
 NOTHING = "name"
 
 # The M-Pesa records these documents list all pay an employee: salary data (salary_access.DOCTYPES)
-# that who may not see salaries gets no count of.
-EMPLOYEE_DOCUMENTS = ("Employee", "Payroll Entry", "Salary Slip", "Expense Claim", "Employee Advance")
+# that who may not see salaries gets no count of. Employee M-Pesa Account: its own dashboard file.
+EMPLOYEE_DOCUMENTS = ("Employee", "Payroll Entry", "Salary Slip", "Expense Claim", "Employee Advance",
+                      EMPLOYEE_ACCOUNT)
 
 # DocType -> add_group arguments. ``links``: {source: its field, or a field of one of its child
 # tables}; ``dynamic``: {that field: the source's DocType field}; ``internal``: {source: the

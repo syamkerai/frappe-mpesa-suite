@@ -558,6 +558,26 @@ def test_payee_accounts_list_schedule_lines_by_their_dynamic_payee_link(env):
         assert counted(env.schema, data, B2B, 15)[1] == {data["fieldname"]: "DOC-1"}
 
 
+def test_an_employee_m_pesa_account_counts_no_salary_payouts_for_who_may_not_see_them(env):
+    """Its B2B requests and schedule lines pay an employee (salary_access.DOCTYPES): the Employee
+    form's rule. Frappe counts with get_all, so a static dashboard told System Manager (read on the
+    account, no salaries) how often the employee was paid."""
+    path = DOCTYPES / "employee_m_pesa_account" / "employee_m_pesa_account_dashboard.py"
+    _counting(env, salaries=False)
+    data = _suite_data(path)
+    assert data["non_standard_fieldnames"] == {B2B: "name", SCHEDULE: "name"}
+    for version in (15, 16):
+        for source in (B2B, SCHEDULE):
+            assert counted(env.schema, data, source, version)[1] == {"name": "DOC-1"}  # matches no record
+    _counting(env, salaries=True)
+    data = _suite_data(path)
+    assert data["non_standard_fieldnames"] == {B2B: "employee_mpesa_account", SCHEDULE: "payee_account"}
+    # the form's Connections, built once for everyone (not counting), keep every link
+    env.monkeypatch.setattr(env.connections, "counting", lambda: False)
+    env.monkeypatch.setattr(env.salary_access, "can_see_salaries", lambda user=None: False)
+    assert _suite_data(path)["non_standard_fieldnames"][B2B] == "employee_mpesa_account"
+
+
 def test_the_intent_lists_its_prompts_by_reference_and_type(env):
     data = _suite_data(DOCTYPES / "mpesa_payment_intent" / "mpesa_payment_intent_dashboard.py")
     assert counted(env.schema, data, EXPRESS, 16)[1] == {"reference_doctype": INTENT, "reference_name": "DOC-1"}

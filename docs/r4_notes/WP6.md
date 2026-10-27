@@ -43,7 +43,7 @@ has on its way and can be added to a payment schedule. Buttons show only to who 
   Account) for the amount and submits it, which prompts the phone through Mpesa Settings.
   `request_for_payment`: no new STK route. The server checks COLLECT_ROLES, read on the order or
   invoice, create on Payment Request, a submitted KES document (not a return, not POS, an order not
-  Closed / On Hold / Completed / fully billed), at most what is owed less what open Payment
+  Closed / On Hold / Completed / invoiced, even in part), at most what is owed less what open Payment
   Requests still ask for, at most the shortcode's Transaction Limit (250,000 at most), a Kenyan
   mobile number, at most 5 prompts a minute per user, and no new prompt while the document's last
   one is under 90 seconds old and unanswered. A draft Payment Request of the document must be
@@ -75,6 +75,33 @@ has on its way and can be added to a payment schedule. Buttons show only to who 
   and never sent "Less Than Amount" (a key written twice); `sales_invoice.js` lost the dead
   `insert_payment_entry` (it hard-coded "Cash") and its Fetch Mpesa Payments list shows only the
   invoice company's draft receipts of the customer or of no customer yet.
+
+## Review fixes (r4-fix-wp6)
+- **Partly invoiced Sales Orders**: Request Payment refuses an order with any `per_billed` ("is
+  partly invoiced: request payment on its invoices") and `sales_order.js` hides the button.
+  ERPNext's due on an order (`get_amount`) is its total less `advance_paid`, and payments against
+  its invoices never lower `advance_paid`: a 60% invoiced order was still asked for its whole total.
+- **Two Sends at once**: `request_payment` checks and prompts under a per-document lock
+  (`common.named_lock("collect:<doctype>:<name>")`, held until the request commits), so a second
+  Send for the same order or invoice waits for the first. Its plain reads (and ERPNext's own amount
+  check) still see the snapshot taken before the first committed, so a locking read of the
+  document's Payment Requests (`_check_sent_meanwhile`; `reference_name` is indexed) refuses it
+  when one appeared meanwhile ("A prompt was just sent for ..."). A second Send still waiting after
+  10 seconds is told another prompt is being sent.
+- **Prepare buttons** on Purchase Invoice / Order (*Pay via M-Pesa (B2B)*, *Pay Advance via M-Pesa
+  (B2B)*, *Add to M-Pesa Payment Schedule*) also need `frappe.boot.mpsa.can_prepare`
+  (PREPARE_ROLES): System Manager may create both DocTypes but prepares no payout (decision 1). An
+  M-Pesa Payer without a preparing role no longer sees the B2B buttons there either. The server
+  side (PREPARE_ROLES on B2B drafts and schedule lines, or no System Manager create on those
+  DocTypes) is WP1's.
+- **Employee M-Pesa Account Connections** are built through `connections.add_group` and the
+  DocType is in `connections.EMPLOYEE_DOCUMENTS`: while Frappe counts, who may not see salaries
+  (System Manager has read on the account) gets no count of the B2B requests and schedule lines
+  that paid the employee. Dropping System Manager read from the account is WP2's.
+- **Bench test** `test_every_hooked_form_builds_its_mpesa_group_from_fields_the_site_has` checks
+  `frappe.get_hooks("override_doctype_dashboards", app_name="mpsa_suite")` only: the merged hooks
+  include HRMS's Holiday List, Task, Project and Timesheet (hrms/hooks.py, v15 and v16), which have
+  no M-Pesa group, and the loop stopped there before reaching the suite's own forms.
 
 ## How Connections are counted, verified on both versions
 Read on the benches (`frappe/desk/notifications.py`, `frappe/model/meta.py`,
@@ -134,4 +161,10 @@ None.
   payout rows, schedule lines and B2C requests by party type; Sales Invoice receipts, prompts and
   matches; every hooked form's fields exist; salary masking while counting; suite forms) and
   `mpsa_suite/money_in/test_collect.py` (Payment Request made and submitted for an order and an
-  invoice, owed, limit, recent prompt, roles, rate limit), as named users.
+  invoice, owed, limit, recent prompt, roles, rate limit, a partly invoiced order refused), as
+  named users.
+- Review fixes, unit: the partly invoiced order, the per-document lock and the locking read of
+  Payment Requests committed meanwhile (`test_r4_collect.py`), the Employee M-Pesa Account's
+  masked counts (`test_r4_connections.py`), the prepare buttons for who may prepare and the
+  Sales Order button once invoiced (`test_r4_buttons_js.py`). Bench: the hooked-form test reads
+  this app's hooks only; the Employee M-Pesa Account masking is checked with the Employee's.

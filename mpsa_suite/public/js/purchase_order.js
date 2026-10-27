@@ -8,6 +8,8 @@ frappe.ui.form.on("Purchase Order", {
 			!flt(doc.per_billed) &&
 			!["On Hold", "Closed", "Completed"].includes(doc.status) &&
 			(doc.currency || "KES") === "KES" &&
+			// who may prepare a payout (boot.py can_prepare: not System Manager), not just create one
+			frappe.boot.mpsa?.can_prepare &&
 			frappe.model.can_create("Mpesa B2B Payment Request")
 		) {
 			frm.add_custom_button(
@@ -30,7 +32,9 @@ frappe.ui.form.on("Purchase Order", {
 			(doc.currency || "KES") === "KES"
 		) {
 			if (frappe.model.can_read("Mpesa B2B Payment Request")) mpsa_payables.show_left(frm);
-			if (frappe.model.can_create("M-Pesa Payment Schedule")) mpsa_payables.add_schedule_button(frm);
+			if (frappe.boot.mpsa?.can_prepare && frappe.model.can_create("M-Pesa Payment Schedule")) {
+				mpsa_payables.add_schedule_button(frm);
+			}
 		}
 	},
 });

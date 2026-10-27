@@ -234,7 +234,9 @@ def test_a_sales_order_offers_request_payment_while_it_owes(tmp_path):
     so = {"docstatus": 1, "status": "To Deliver and Bill", "per_billed": 0, "currency": "KES", "grand_total": 1000,
           "rounded_total": 1000, "advance_paid": 200}
     assert _buttons(tmp_path, SO_FILES, "Sales Order", so, mpsa=COLLECT, perms=PR_CREATE)[0] == ["M-Pesa > Request Payment"]
-    for change in ({"advance_paid": 1000}, {"status": "Closed"}, {"per_billed": 100}, {"currency": "USD"}, {"docstatus": 0}):
+    # partly invoiced too: payment is then requested on its invoices (money_in.collect refuses the order)
+    for change in ({"advance_paid": 1000}, {"status": "Closed"}, {"per_billed": 100}, {"per_billed": 40},
+                   {"currency": "USD"}, {"docstatus": 0}):
         assert _buttons(tmp_path, SO_FILES, "Sales Order", dict(so, **change), mpsa=COLLECT, perms=PR_CREATE)[0] == [], change
     assert _buttons(tmp_path, SO_FILES, "Sales Order", so, mpsa={}, perms=PR_CREATE)[0] == []
 
@@ -351,19 +353,39 @@ SUBMITTED_PI = {"docstatus": 1, "outstanding_amount": 900, "currency": "KES", "o
 LEFT = "mpsa_suite.money_out.b2b.amount_left"
 
 
+PREPARE = {"can_prepare": True}
+
+
 def test_purchase_invoice_schedule_button_and_left_to_pay_headline(tmp_path):
     files = [JS / "utils.js", JS / "purchase_invoice.js"]
     reply = {LEFT: {"summary": {"in_progress": 300, "planned": 100, "left": 500}}}
     perms = {"create": {"M-Pesa Payment Schedule": 1}, "read": {"Mpesa B2B Payment Request": 1}}
-    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, perms=perms, replies=reply)[0]
+    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, mpsa=PREPARE, perms=perms, replies=reply)[0]
     assert "M-Pesa > Add to M-Pesa Payment Schedule" in got
     assert ("headline: M-Pesa: KES 300 on its way, KES 100 planned on a payment schedule. Left to pay: KES 500."
             in got)
-    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, perms={}, replies=reply)[0]
+    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, mpsa=PREPARE, perms={}, replies=reply)[0]
     assert got == []
     quiet = {LEFT: {"summary": {"in_progress": 0, "planned": 0, "left": 900}}}
-    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, perms=perms, replies=quiet)[0]
+    got = _buttons(tmp_path, files, "Purchase Invoice", SUBMITTED_PI, mpsa=PREPARE, perms=perms, replies=quiet)[0]
     assert got == ["M-Pesa > Add to M-Pesa Payment Schedule"]
+
+
+@pytest.mark.parametrize("doctype, doc, b2b", [
+    ("Purchase Invoice", SUBMITTED_PI, "M-Pesa > Pay via M-Pesa (B2B)"),
+    ("Purchase Order", {"docstatus": 1, "per_billed": 0, "status": "To Receive and Bill", "currency": "KES"},
+     "M-Pesa > Pay Advance via M-Pesa (B2B)"),
+])
+def test_payout_buttons_are_for_who_may_prepare_payouts(tmp_path, doctype, doc, b2b):
+    """System Manager may create both DocTypes but prepares no payout (decision 1): boot can_prepare."""
+    files = [JS / "utils.js", JS / f"{doctype.lower().replace(' ', '_')}.js"]
+    perms = {"create": {"M-Pesa Payment Schedule": 1, "Mpesa B2B Payment Request": 1}}
+    quiet = {LEFT: {"summary": {"in_progress": 0, "planned": 0, "left": 900}}}
+    got = _buttons(tmp_path, files, doctype, doc, mpsa=PREPARE, perms=perms, replies=quiet)[0]
+    assert got == [b2b, "M-Pesa > Add to M-Pesa Payment Schedule"]
+    system_manager = {"can_prepare": False, "can_configure": True}
+    assert _buttons(tmp_path, files, doctype, doc, mpsa=system_manager, perms=perms, replies=quiet)[0] == []
+    assert _buttons(tmp_path, files, doctype, doc, mpsa=PREPARE, perms={}, replies=quiet)[0] == []
 
 
 def test_add_to_schedule_opens_the_schedule_with_the_line(tmp_path):
@@ -380,7 +402,7 @@ frappe.model.get_new_doc = (dt) => (schedule = { doctype: dt, name: "new-1", lin
 last_dialog.opts.primary_action({ planned_date: "2026-10-28", amount: 700 });
 await tick();
 return [schedule, calls.filter((c) => c[0] === "route")];
-""", perms={"create": {"M-Pesa Payment Schedule": 1}}, replies=reply)
+""", mpsa=PREPARE, perms={"create": {"M-Pesa Payment Schedule": 1}}, replies=reply)
     schedule, route = got
     assert schedule["company"] == "TC" and schedule["b2b_settings"] == "B2B-1" and schedule["__unsaved"] == 1
     assert schedule["lines"] == [{"doctype": "M-Pesa Payment Schedule Line", "planned_date": "2026-10-28",
