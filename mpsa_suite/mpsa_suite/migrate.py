@@ -28,6 +28,50 @@ def after_migrate():
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
+        create_claim_payee_fields()
+
+
+def create_claim_payee_fields():
+    """Merchants and casual payees paid straight from an Expense Claim (money_out.claim_payees):
+    the claim's table of them and the Expense Claim Type's switch. The section stays hidden until
+    the claim's form finds the Suite switch on (public/js/expense_claim_payees.js)."""
+    create_fields({
+        "Expense Claim": [
+            {
+                "fieldname": "mpesa_payees_section",
+                "fieldtype": "Section Break",
+                "label": "Pay Merchants and Payees by M-Pesa",
+                "insert_after": "expenses",
+                "hidden": 1,
+            },
+            {
+                "fieldname": "mpesa_payees_summary",
+                "fieldtype": "HTML",
+                "label": "M-Pesa Payees",
+                "insert_after": "mpesa_payees_section",
+            },
+            {
+                "fieldname": "mpesa_payees",
+                "fieldtype": "Table",
+                "label": "M-Pesa Payees",
+                "options": "M-Pesa Claim Payee",
+                "insert_after": "mpesa_payees_summary",
+                "description": "Merchants (till, paybill, bank account) and casual payees (phones) this claim pays directly "
+                "by M-Pesa, instead of reimbursing the employee who paid them. Approved with the claim; whatever the "
+                "lines leave of what the claim owes is reimbursed to the employee as usual.",
+            },
+        ],
+        "Expense Claim Type": [
+            {
+                "fieldname": "allow_mpesa_payees",
+                "fieldtype": "Check",
+                "label": "Paid to Merchants or Casual Payees by M-Pesa",
+                "insert_after": "deferred_expense_account",
+                "description": "Expense lines of this type may be paid straight to a merchant's till, paybill or bank "
+                "account, or to casual payees' phones, from the Expense Claim (M-Pesa Suite Settings must allow it).",
+            },
+        ],
+    })
 
 
 def backfill_b2b_entry_status():

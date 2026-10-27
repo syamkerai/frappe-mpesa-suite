@@ -77,6 +77,10 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
 
         sync_b2c_line_later(ref_name)  # the payment schedule's line shows the result and its entry
 
+    from mpsa_suite.money_out import claim_payees
+
+    claim_payees.on_payout_result(B2C_REQUEST_DOCTYPE, req.name)  # an Expense Claim's payee line follows it
+
 
 def _schedule_line(ref_name: str | None) -> str | None:
     """The M-Pesa Payment Schedule line a disbursement row pays, or None."""

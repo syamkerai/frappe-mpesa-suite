@@ -64,6 +64,13 @@ class B2CPaymentDisbursementReference(Document):
 
             check_b2c_row(self)
 
+        if getattr(self, "claim_payee", None):
+            # a casual payee line of an Expense Claim: the line's phone and amount, approved with the
+            # claim (money_out.claim_payees)
+            from ....money_out import claim_payees
+
+            claim_payees.check_b2c_row(getattr(self, "parent_doc", None), self)
+
 
 def b2c_amount_problem(amount) -> str | None:
     """Why Daraja B2C would refuse ``amount`` (whole shillings from 10 to 250,000), or None.

@@ -215,6 +215,12 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
+| `money_out.claim_payees.claim_state` | Read the Expense Claim | perm |
+| `money_out.claim_payees.parse_payees` | Write the Expense Claim (create one, before its first save) | perm |
+| `money_out.claim_payees.pay_claims` | PREPARE_ROLES + read each Expense Claim | roles:PREPARE_ROLES, perm |
+| `money_out.claim_payees.pay_payees` | PREPARE_ROLES + read the Expense Claim | roles:PREPARE_ROLES, perm |
+| `money_out.claim_payees.repair_reimbursed` | ADMIN_ROLES + read the Expense Claim | roles:ADMIN_ROLES, perm |
+| `money_out.claim_payees.retry_payees` | PREPARE_ROLES + read the Expense Claim | roles:PREPARE_ROLES, perm |
 | `money_out.payroll.from_payroll_entry` | FINANCE_ROLES + read the Payroll Entry + create a schedule | roles:FINANCE_ROLES, perm |
 | `money_out.payroll.payroll_status` | Read the Payroll Entry | perm |
 | `money_out.schedule.close_schedule` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
