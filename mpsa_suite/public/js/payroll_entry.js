@@ -95,3 +95,34 @@ const mpsa_payroll = {
 		d.show();
 	},
 };
+
+// Round 4: what M-Pesa paid of this payroll's salary slips, has in flight and has planned, and what
+// is left, for who may see salaries (money_out.payroll.payroll_salary_totals checks again). Its own
+// refresh handler, so it shows for HR, who may not read the payment schedule.
+frappe.ui.form.on("Payroll Entry", {
+	refresh(frm) {
+		if (frm.doc.docstatus !== 1 || !(frappe.boot.mpsa || {}).can_see_salaries) return;
+		frappe
+			.xcall("mpsa_suite.money_out.payroll.payroll_salary_totals", { payroll_entry: frm.doc.name })
+			.then((r) => {
+				// HRMS's own headline (slips that failed) comes first
+				if (!r || !r.slips || frm.doc.status === "Failed") return;
+				const kes = (value) => format_currency(value || 0, "KES");
+				const parts = [
+					__("paid {0}", [kes(r.paid)]),
+					__("in flight {0}", [kes(r.in_flight)]),
+					__("planned {0}", [kes(r.planned)]),
+					__("left {0} ({1} of {2} slips)", [kes(r.left), r.slips_left, r.slips]),
+				];
+				if (flt(r.other_paid) > 0) parts.push(__("paid outside M-Pesa {0}", [kes(r.other_paid)]));
+				// every schedule naming its slips: the payroll's own, one-off salaries, selected slips
+				const links = (r.schedules || []).map(
+					(name) =>
+						`<a href="/app/m-pesa-payment-schedule/${encodeURIComponent(name)}">${frappe.utils.escape_html(name)}</a>`
+				);
+				let html = `${__("M-Pesa")}: ${parts.join(" · ")}`;
+				if (links.length) html += `<br>${__("Schedules: {0}", [links.join(", ")])}`;
+				frm.dashboard.set_headline(html, flt(r.left) > 0 ? "blue" : "green");
+			});
+	},
+});

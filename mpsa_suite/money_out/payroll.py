@@ -18,16 +18,25 @@ cancels every Journal Entry referencing it and deletes its salary slips. Nor can
 Salary Slips: an amended slip would show its whole net pay as unpaid again (what was paid is
 found by the slip's name).
 
+Salary Slips (round 4): "Pay by M-Pesa" on a submitted slip builds a one-line schedule (a one-off
+or off-cycle salary) to any of the employee's approved accounts, and the list's "Pay Selected
+Slips by M-Pesa" one schedule for the ticked slips, each to its employee's default account. Both
+are purpose Payroll (only who may see salaries sees them) and are paid like the Payroll Entry's
+schedule. Who prepares them: PREPARE_ROLES who may see salaries (money_out.salary_access), read
+the slip and may make a payment schedule (its DocPerms: Accounts and M-Pesa Manager).
+
 HRMS is a required app (hooks.required_apps).
 """
+
+import contextlib
 
 import frappe
 from frappe.utils import cint, cstr, flt, getdate, nowdate
 
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..permissions import FINANCE_ROLES, require
-from . import owed, party_accounts
+from ..permissions import FINANCE_ROLES, PREPARE_ROLES, require
+from . import owed, party_accounts, salary_access
 
 PAYROLL_ENTRY = "Payroll Entry"
 SCHEDULE = "M-Pesa Payment Schedule"
@@ -84,6 +93,7 @@ def from_payroll_entry(payroll_entry, b2b_settings=None, b2c_settings=None, plan
     """Build the Payroll Entry's M-Pesa Payment Schedule. Accounts (FINANCE_ROLES) prepare it, so
     they are its lines' preparer: someone else pays them (maker-checker)."""
     require(FINANCE_ROLES)
+    require_salary_reader()  # the schedule shows every salary of the payroll (D4)
     if not owed.hrms_installed():
         frappe.throw("Paying a payroll needs HRMS.")
     frappe.has_permission(PAYROLL_ENTRY, "read", doc=payroll_entry, throw=True)
@@ -143,8 +153,9 @@ def _period(payroll) -> str:
     return cstr(payroll.name)
 
 
-def _line_for(header, payroll, slip, day) -> tuple:
-    """(line, None), or (None, why this salary is not on the schedule)."""
+def _line_for(header, payroll, slip, day, account=None) -> tuple:
+    """(line, None), or (None, why this salary is not on the schedule). ``account``: the approved
+    Employee M-Pesa Account to pay (a one-off salary), else the employee's default."""
     from . import schedule
 
     if slip.get("status") == "Withheld":
@@ -162,7 +173,7 @@ def _line_for(header, payroll, slip, day) -> tuple:
     amount = whole_shillings(owed.slip_left_to_pay(slip.name).left)
     if amount < 1:
         return None, "nothing is left to pay"
-    account = party_accounts.default_account(EMPLOYEE_ACCOUNT, slip.employee)
+    account = account or party_accounts.default_account(EMPLOYEE_ACCOUNT, slip.employee)
     if not account:
         if party_accounts.accounts_of(EMPLOYEE_ACCOUNT, slip.employee):
             return None, "several approved M-Pesa accounts and none is the default: press Make Default on one"
@@ -325,3 +336,423 @@ def payroll_status(payroll_entry: str) -> dict:
     frappe.has_permission(PAYROLL_ENTRY, "read", doc=payroll_entry, throw=True)
     return {"schedule": live_schedule(payroll_entry), "bank_entries": bank_entries(payroll_entry),
             "schedules": _schedules(payroll_entry)}
+
+
+# ---------------------------------------------------------------- Salary Slips: one-off and selected
+# Round 4. Who may prepare: require_salary_preparer. Who may read the figures: require_salary_reader.
+SALARIES_HIDDEN = ("Not permitted: salaries are shown only to who may read Salary Slips (HR User, HR Manager) and "
+                   "to who pays them (M-Pesa Payer, M-Pesa Manager).")
+NO_SCHEDULE = ("Not permitted: preparing a salary payment makes an M-Pesa Payment Schedule, which needs create on it "
+               "(Accounts Manager, Accounts User or M-Pesa Manager).")
+NOTHING_LEFT = "nothing is left to pay"  # _line_for's reason, explained by _nothing_left
+MAX_SLIPS = 500  # per Pay Selected Slips
+
+
+def require_salary_reader() -> None:
+    """Salary data (decision D4): only for who money_out.salary_access lets see salaries (not an
+    Accounts role alone, nor System Manager once round 4's role sets apply)."""
+    if not salary_access.can_see_salaries():
+        frappe.throw(SALARIES_HIDDEN, frappe.PermissionError)
+
+
+def require_salary_preparer() -> None:
+    """Who may prepare a salary payment from Salary Slips: PREPARE_ROLES (so not the M-Pesa Payer
+    who pays it, nor System Manager) who may see salaries and make a payment schedule (its
+    DocPerms: Accounts Manager, Accounts User, M-Pesa Manager; an HR-only user is refused here,
+    unless a site gives HR create on the schedule). The caller checks read on each slip."""
+    require(PREPARE_ROLES)
+    require_salary_reader()
+    if not owed.hrms_installed():
+        frappe.throw("Paying a salary needs HRMS.")
+    if not frappe.has_permission(SCHEDULE, "create"):
+        frappe.throw(NO_SCHEDULE, frappe.PermissionError)
+
+
+def _may_prepare() -> bool:
+    """require_salary_preparer, without throwing: whether the form offers Pay by M-Pesa."""
+    user = frappe.session.user
+    return ((user == "Administrator" or not set(PREPARE_ROLES).isdisjoint(frappe.get_roles()))
+            and salary_access.can_see_salaries() and owed.hrms_installed()
+            and bool(frappe.has_permission(SCHEDULE, "create")))
+
+
+def _pay_on(planned_date):
+    day = getdate(planned_date) if planned_date else getdate(nowdate())
+    if day < getdate(nowdate()):
+        frappe.throw("Pay On cannot be before today.")
+    return day
+
+
+def _who(slip) -> str:
+    return f"{slip.employee} {slip.get('employee_name') or ''} ({slip.name})".replace("  ", " ")
+
+
+def _payroll_of(slip, payrolls: dict) -> tuple:
+    """(the slip's submitted Payroll Entry, None), or (None, why not). ``payrolls`` caches them."""
+    name = cstr(slip.get("payroll_entry")).strip()
+    if not name:
+        return None, ("it is not part of a Payroll Entry, so it has no payroll payable to clear (for an off-cycle "
+                      "salary, run a Payroll Entry for this employee)")
+    if name not in payrolls:
+        payrolls[name] = frappe.db.get_value(PAYROLL_ENTRY, name, ["name", "docstatus", "company", "start_date",
+                                                                   "end_date"], as_dict=True)
+    payroll = payrolls[name]
+    if not payroll:
+        return None, f"its Payroll Entry {name} was not found"
+    if cint(payroll.docstatus) != 1:
+        return None, f"its Payroll Entry {name} is not submitted"
+    return payroll, None
+
+
+def _slip_line(header, slip, day, payrolls: dict, account=None) -> tuple:
+    """(line, None), or (None, why not), for a Salary Slip paid from its own schedule: submitted,
+    in a submitted Payroll Entry, then the Payroll Entry builder's rules (_line_for) with
+    ``account`` or the employee's default; "nothing is left" names what took it."""
+    if cint(slip.docstatus) != 1:
+        return None, "it is cancelled" if cint(slip.docstatus) == 2 else "it is not submitted"
+    payroll, reason = _payroll_of(slip, payrolls)
+    if reason:
+        return None, reason
+    line, reason = _line_for(header, payroll, slip, day, account)
+    if reason == NOTHING_LEFT:
+        reason = _nothing_left(slip.name)
+    return line, reason
+
+
+def _nothing_left(slip: str) -> str:
+    """Why a slip has nothing left to pay, naming the schedule or payout that took it."""
+    result = owed.slip_left_to_pay(slip)
+    planned = sorted({p.name for p in result.parts if p.kind == "planned"})
+    if planned:
+        return f"already planned on M-Pesa Payment Schedule {', '.join(planned)}: {owed.explain(slip, result)}"
+    return f"{NOTHING_LEFT}: {owed.explain(slip, result)}"
+
+
+def _left_now(line) -> str | None:
+    """The line's amount against what the slip has left now, by a locking read under its lock: a
+    schedule or payout another worker committed since this request began is counted too."""
+    slip = line["reference_name"]
+    result = owed.slip_left_to_pay(slip, for_update=True)
+    if flt(line["amount"]) > result.left + 0.001:
+        return f"KES {_money(line['amount'])} is more than is left to pay now. {owed.explain(slip, result)}"
+    return None
+
+
+@contextlib.contextmanager
+def _locks(payroll_entries, slips):
+    """The payroll's schedule lock (from_payroll_entry takes it too), then each slip's own lock
+    (the one its payouts take: R4), in name order; held until commit."""
+    with contextlib.ExitStack() as stack:
+        for name in sorted(set(payroll_entries) - {None, ""}):
+            stack.enter_context(money_in_common.named_lock(
+                f"payroll-schedule:{name}", busy=f"A schedule for {name} is being made. Try again in a minute."))
+        for name in sorted(set(slips)):
+            stack.enter_context(owed.slip_lock(name))
+        yield
+
+
+def _insert_schedule(title, company, b2b_settings, b2c_settings, lines, excluded, payroll_entry=None):
+    """A purpose Payroll schedule of ``lines`` (only who may see salaries sees it), naming the
+    Payroll Entry only when it is that payroll's own schedule."""
+    doc = frappe.new_doc(SCHEDULE)
+    doc.update({
+        "title": title[:140],
+        "company": company,
+        "b2b_settings": b2b_settings or None,
+        "b2c_settings": b2c_settings or None,
+        "purpose": "Payroll",
+        "payroll_doctype": PAYROLL_ENTRY if payroll_entry else None,
+        "payroll_entry": payroll_entry or None,
+        "excluded": "\n".join(excluded) or None,
+    })
+    for line in lines:
+        doc.append("lines", line)
+    doc.flags.mpesa_from_payroll = True  # keeps purpose, payroll and Not Included (schedule._keep_payroll_fields)
+    doc.insert()
+    return doc
+
+
+@frappe.whitelist(methods=["POST"])
+def from_salary_slip(slip, payee_account=None, b2b_settings=None, b2c_settings=None, planned_date=None) -> dict:
+    """Salary Slip, Pay by M-Pesa: a one-off or off-cycle salary as a ONE-line payment schedule to
+    ``payee_account``, any of the employee's approved accounts (the default when none is given): a
+    phone by B2C from ``b2c_settings``, a bank account, paybill or till by B2B from
+    ``b2b_settings``, for what the slip has left in whole shillings.
+
+    Double pay: a line planned elsewhere (the Payroll Entry's schedule) leaves nothing, so this is
+    refused with that schedule's name; the Payroll Entry's builder leaves the slip out in turn
+    ("nothing is left to pay") and its cancel is refused while this line exists (_schedules). The
+    schedule names no Payroll Entry, so it never takes the payroll's one live schedule. Sending
+    stays Pay Selected in M-Pesa Payments Due, by someone else (maker-checker)."""
+    require_salary_preparer()
+    slip = cstr(slip).strip()
+    values = owed.read_slip(slip) if slip else None
+    if not values:
+        frappe.throw(f"Salary Slip {slip} not found")
+    frappe.has_permission(owed.SLIP, "read", doc=slip, throw=True)
+    day = _pay_on(planned_date)
+    payee_account = cstr(payee_account).strip() or None
+    if payee_account:
+        acc = party_accounts.get_account(EMPLOYEE_ACCOUNT, payee_account)
+        if not acc or cint(acc.docstatus) != 1 or acc.get("employee") != values.employee:
+            frappe.throw(f"{payee_account} is not an approved M-Pesa account of {values.employee}.")
+    header = frappe._dict(name=None, company=values.company, b2b_settings=b2b_settings, b2c_settings=b2c_settings)
+    payrolls = {}
+    with _locks([values.get("payroll_entry")], [slip]):
+        line, reason = _slip_line(header, values, day, payrolls, payee_account)
+        reason = reason or _left_now(line)
+        if reason:
+            frappe.throw(f"{slip} cannot be paid by M-Pesa: {reason}")
+        payroll = payrolls[values.payroll_entry]
+        title = f"Salary {slip} {values.get('employee_name') or values.employee} ({_period(payroll)})"
+        doc = _insert_schedule(title, values.company, b2b_settings, b2c_settings, [line], [])
+    row = doc.lines[0]
+    return {"name": doc.name, "amount": flt(row.amount, 2), "route": row.route, "destination": row.destination,
+            "payee_account": row.payee_account, "planned_date": cstr(day)}
+
+
+@frappe.whitelist(methods=["POST"])
+def from_salary_slips(slips, b2b_settings=None, b2c_settings=None, planned_date=None) -> dict:
+    """Salary Slip list, Pay Selected Slips by M-Pesa: ONE payment schedule with a line per slip,
+    each to its employee's default approved account of any type (a phone by B2C, a bank account,
+    paybill or till by B2B), for what the slip has left in whole shillings. A slip that cannot be
+    paid (not readable, not submitted, withheld, no approved default account, nothing left, already
+    on another live schedule...) is listed with the reason, in the answer and under the schedule's
+    Not Included, never dropped. The same guards as the Payroll Entry's schedule.
+
+    The schedule names the Payroll Entry only when the slips are all the submitted slips of one
+    Payroll Entry that has no live schedule: it is then that payroll's own schedule, as its button
+    would make it. Otherwise it names none, so a few slips never take a payroll's one live
+    schedule; its cancel is refused either way while lines name its slips (_schedules)."""
+    from . import schedule
+
+    require_salary_preparer()
+    names = schedule._names(slips)
+    if not names:
+        frappe.throw("Tick the salary slips to pay.")
+    if len(names) > MAX_SLIPS:
+        frappe.throw(f"Pick at most {MAX_SLIPS} salary slips at a time.")
+    day = _pay_on(planned_date)
+    found, excluded = [], []
+    for name in names:
+        values = owed.read_slip(name)
+        if not values:
+            excluded.append(f"{name}: not found")
+        elif not frappe.has_permission(owed.SLIP, "read", doc=name):
+            excluded.append(f"{name}: you may not read it")
+        else:
+            found.append(values)
+    companies = sorted({cstr(v.company) for v in found})
+    if len(companies) > 1:
+        frappe.throw(f"These salary slips are of {', '.join(companies)}: pick the slips of one company.")
+    if not found:
+        frappe.throw("None of these salary slips can be paid by M-Pesa. " + "; ".join(excluded))
+    company = companies[0]
+    found.sort(key=lambda v: (cstr(v.employee), v.name))
+    payroll_entries = {v.get("payroll_entry") for v in found} - {None, ""}
+    header = frappe._dict(name=None, company=company, b2b_settings=b2b_settings, b2c_settings=b2c_settings)
+    payrolls, lines = {}, []
+    with _locks(payroll_entries, [v.name for v in found]):
+        for values in found:
+            line, reason = _slip_line(header, values, day, payrolls)
+            reason = reason or _left_now(line)
+            if reason:
+                excluded.append(f"{_who(values)}: {reason}")
+            else:
+                lines.append(line)
+        if not lines:
+            frappe.throw("None of these salary slips can be paid by M-Pesa. " + "; ".join(excluded))
+        own = _whole_payroll(names, payroll_entries)
+        if own:
+            title = f"Salaries {own} ({_period(payrolls[own])})"
+        else:
+            count = f"{len(lines)} salar{'ies' if len(lines) != 1 else 'y'}"
+            title = f"Salaries: {count} of {', '.join(sorted(payroll_entries))}"
+        doc = _insert_schedule(title, company, b2b_settings, b2c_settings, lines, excluded, payroll_entry=own)
+    return {"name": doc.name, "lines": len(lines), "total": flt(sum(flt(line["amount"]) for line in lines), 2),
+            "excluded": excluded, "payroll_entry": own}
+
+
+def _whole_payroll(names, payroll_entries) -> str | None:
+    """The Payroll Entry, when the slips picked are all its submitted slips and it has no live
+    schedule."""
+    if len(payroll_entries) != 1:
+        return None
+    (payroll_entry,) = payroll_entries
+    if live_schedule(payroll_entry):
+        return None
+    submitted = set(frappe.get_all(owed.SLIP, filters={"payroll_entry": payroll_entry, "docstatus": 1}, pluck="name"))
+    return payroll_entry if submitted and submitted <= set(names) else None
+
+
+# ---------------------------------------------------------------- the forms' M-Pesa headlines
+def _shortcodes(company, api: str) -> list:
+    """The shortcodes that pay by ``api`` (use_b2b / use_b2c) for the company, with an initiator."""
+    filters = {api: 1}
+    if frappe.get_meta("Mpesa Settings").has_field("company"):
+        filters["company"] = company
+    return [s.name for s in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "initiator_name"],
+                                           order_by="creation asc") if s.initiator_name]
+
+
+def _pay_choices(slip) -> dict:
+    """Pay by M-Pesa's choices: the employee's approved accounts of every type (the default
+    first), whether each can be paid now, and the shortcodes for each route."""
+    accounts = []
+    for acc in party_accounts.accounts_of(EMPLOYEE_ACCOUNT, slip.employee):
+        route, destination = party_accounts.destination(acc)
+        accounts.append({"name": acc.name, "account_type": acc.account_type, "route": route,
+                         "destination": destination, "is_default": cint(acc.is_default),
+                         "expected_name": acc.get("expected_name"),
+                         "problem": party_accounts.usable_problem(acc, slip.employee, EMPLOYEE_ACCOUNT)})
+    return {"accounts": accounts, "default_account": party_accounts.default_account(EMPLOYEE_ACCOUNT, slip.employee),
+            "b2b_settings": _shortcodes(slip.company, "use_b2b"), "b2c_settings": _shortcodes(slip.company, "use_b2c")}
+
+
+@frappe.whitelist()
+def salary_slip_status(salary_slip: str) -> dict:
+    """The Salary Slip form's headline: what M-Pesa paid of it, what is on its way and planned, and
+    what is left (owed.slip_left_to_pay); for who may prepare a salary payment, Pay by M-Pesa's
+    choices too. Salary data: for who may see salaries only."""
+    from ..mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement import salary_slip_paid
+
+    require_salary_reader()
+    frappe.has_permission(owed.SLIP, "read", doc=salary_slip, throw=True)
+    values = owed.read_slip(salary_slip)
+    if not values:
+        frappe.throw(f"Salary Slip {salary_slip} not found")
+    result = owed.slip_left_to_pay(salary_slip)
+
+    def total(*kinds):
+        return flt(sum(flt(p.amount) for p in result.parts if p.kind in kinds), 2)
+
+    net = flt(values.get("rounded_total")) or flt(values.get("net_pay"))
+    paid = flt(salary_slip_paid(salary_slip), 2)  # no employee given: M-Pesa payouts only, not bank entries
+    # what the slip's owed leaves out besides M-Pesa: bank or cash entries (a slip not submitted owes nothing)
+    other = max(0.0, flt(net - result.owed - paid, 2)) if cint(values.docstatus) == 1 else 0.0
+    answer = {
+        "net_pay": net, "paid": paid, "other_paid": other,
+        "in_flight": total("b2b", "b2c"), "planned": total("planned"), "left": result.left,
+        "payable": whole_shillings(result.left), "parts": [p.label for p in result.parts],
+        "schedules": sorted({p.name for p in result.parts if p.kind == "planned"}),
+        "problems": owed.slip_problems(values), "can_prepare": _may_prepare(),
+        "accounts": [], "default_account": None, "b2b_settings": [], "b2c_settings": [],
+    }
+    if answer["can_prepare"]:
+        answer.update(_pay_choices(values))
+    return answer
+
+
+def slip_figures(slips) -> dict:
+    """{slip: _dict(net_pay, paid, other_paid, in_flight, planned, left)} for Salary Slip rows
+    (name, employee, payroll_entry, rounded_total, net_pay), in a few grouped queries whatever the
+    number of slips. Slip by slip the reading of owed.slip_left_to_pay: what M-Pesa paid (Paid B2C
+    and B2B payouts, also cancelled ones), bank or cash entries for the Payroll Entry not made by
+    M-Pesa, payouts on their way and lines planned on a schedule."""
+    slips = [s for s in slips or [] if s.get("name")]
+    if not slips:
+        return {}
+    names = tuple(s.name for s in slips)
+    paid, on_way, planned = {}, {}, {}
+
+    def add(target, rows):
+        for key, amount in rows:
+            target[key] = flt(flt(target.get(key)) + flt(amount), 2)
+
+    add(paid, frappe.db.sql(
+        f"""
+        SELECT reference_name, SUM(amount) FROM `tab{B2C_REQUEST}`
+        WHERE reference_doctype = 'Salary Slip' AND reference_name IN %(slips)s
+          AND docstatus IN (1, 2) AND status = 'Paid'
+        GROUP BY reference_name
+        """,
+        {"slips": names},
+    ))
+    if frappe.db.has_column(B2B, "salary_slip"):  # a site with HRMS
+        rows = frappe.db.sql(
+            f"""
+            SELECT salary_slip,
+                   SUM(CASE WHEN docstatus IN (1, 2) AND status = 'Paid' THEN amount ELSE 0 END),
+                   SUM(CASE WHEN docstatus < 2 AND COALESCE(status, '') IN %(open)s THEN amount ELSE 0 END)
+            FROM `tab{B2B}` WHERE salary_slip IN %(slips)s
+            GROUP BY salary_slip
+            """,
+            {"slips": names, "open": ("", *owed.OPEN)},
+        )
+        add(paid, [(r[0], r[1]) for r in rows])
+        add(on_way, [(r[0], r[2]) for r in rows])
+    # B2C payouts on their way: open_payouts' rows that are not Paid (owed.b2c_slip_open)
+    add(on_way, frappe.db.sql(
+        f"""
+        SELECT ref.reference_name, SUM(ref.allocated_amount)
+        FROM `tab{B2C_ROW}` ref
+        JOIN `tabB2C Payment Disbursement` d ON d.name = ref.parent
+        LEFT JOIN `tab{B2C_REQUEST}` req ON req.name = ref.b2c_disbursement_request
+        WHERE ref.reference_doctype = 'Salary Slip' AND ref.reference_name IN %(slips)s
+          AND (d.docstatus = 1 OR (req.name IS NOT NULL AND req.docstatus = 1))
+          AND COALESCE(req.status, ref.payment_status, '') != 'Failed' AND COALESCE(req.status, '') != 'Paid'
+        GROUP BY ref.reference_name
+        """,
+        {"slips": names},
+    ))
+    add(planned, frappe.db.sql(
+        f"""
+        SELECT reference_name, SUM(amount) FROM `tab{LINE}`
+        WHERE reference_doctype = 'Salary Slip' AND reference_name IN %(slips)s AND parenttype = %(schedule)s
+          AND status = 'Planned' AND COALESCE(request, '') = '' AND COALESCE(b2c_disbursement, '') = ''
+        GROUP BY reference_name
+        """,
+        {"slips": names, "schedule": SCHEDULE},
+    ))
+    bank = _bank_paid({s.get("payroll_entry") for s in slips} - {None, ""})
+    found = {}
+    for s in slips:
+        net = flt(s.get("rounded_total")) or flt(s.get("net_pay"))
+        other = flt(bank.get((s.get("payroll_entry"), s.get("employee")))) if s.get("employee") else 0.0
+        owes = max(0.0, flt(net - flt(paid.get(s.name)) - other, 2))
+        left = max(0.0, flt(owes - flt(on_way.get(s.name)) - flt(planned.get(s.name)), 2))
+        found[s.name] = frappe._dict(net_pay=net, paid=flt(paid.get(s.name)), other_paid=other,
+                                     in_flight=flt(on_way.get(s.name)), planned=flt(planned.get(s.name)), left=left)
+    return found
+
+
+def _bank_paid(payroll_entries) -> dict:
+    """{(Payroll Entry, employee): what submitted bank or cash entries not made by M-Pesa paid the
+    employee against the Payroll Entry} (salary_slip_paid's reading, for many slips at once)."""
+    if not payroll_entries:
+        return {}
+    meta = frappe.get_meta("Journal Entry Account")
+    not_mpesa = " ".join(f"AND COALESCE(jea.{field}, '') = ''"
+                         for field in ("b2c_payment_disbursement", "mpesa_b2b_payment_request") if meta.has_field(field))
+    rows = frappe.db.sql(
+        f"""
+        SELECT jea.reference_name, jea.party, SUM(jea.debit_in_account_currency)
+        FROM `tabJournal Entry Account` jea
+        JOIN `tabJournal Entry` je ON je.name = jea.parent
+        WHERE je.docstatus = 1 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
+          AND jea.reference_type = 'Payroll Entry' AND jea.reference_name IN %(payrolls)s
+          AND jea.party_type = 'Employee' AND jea.debit_in_account_currency > 0
+          {not_mpesa}
+        GROUP BY jea.reference_name, jea.party
+        """,
+        {"payrolls": tuple(sorted(payroll_entries))},
+    )
+    return {(r[0], r[1]): flt(r[2], 2) for r in rows}
+
+
+@frappe.whitelist()
+def payroll_salary_totals(payroll_entry: str) -> dict:
+    """The Payroll Entry form's headline: what M-Pesa paid of its submitted salary slips, what is
+    on its way and planned, and what is left (slip_figures), and the schedules naming its slips.
+    Salary data: for who may see salaries only."""
+    require_salary_reader()
+    frappe.has_permission(PAYROLL_ENTRY, "read", doc=payroll_entry, throw=True)
+    slips = _slips(payroll_entry)
+    figures = list(slip_figures(slips).values())
+
+    def total(key):
+        return flt(sum(flt(f[key]) for f in figures), 2)
+
+    return {"slips": len(slips), "net_pay": total("net_pay"), "paid": total("paid"), "other_paid": total("other_paid"),
+            "in_flight": total("in_flight"), "planned": total("planned"), "left": total("left"),
+            "slips_left": sum(1 for f in figures if f.left >= 1), "schedules": _schedules(payroll_entry)}
