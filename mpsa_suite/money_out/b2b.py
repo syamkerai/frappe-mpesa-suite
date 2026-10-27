@@ -10,9 +10,10 @@ and again right before sending: the approved destination, the shortcode, the sup
 the document, and what is left to pay with B2B, B2C, draft entries and order advances counted
 (money_out.owed). The entry is booked when M-Pesa confirms, or later (money_out.b2b_entries).
 
-A request may instead pay an employee, never both: to the employee's approved bank paybill
-account (Employee M-Pesa Account), optionally for a Salary Slip (HRMS), which it may not pay past
-what the slip has left (B2B, B2C and planned lines counted, under the slip's lock). A salary is
+A request may instead pay an employee, never both: to the employee's approved bank account,
+paybill or till (Employee M-Pesa Account), never a phone, optionally for a Salary Slip (HRMS),
+which it may not pay past what the slip has left (B2B, B2C and planned lines counted, under the
+slip's lock). A salary is
 booked with a salary Journal Entry that clears the Payroll Entry's payroll payable
 (money_out.salary_entries); a payment to an employee with no slip waits for Make Entry, and only
 a manager sends it (nothing caps its amount). Nobody sends a payment to themselves.
@@ -283,7 +284,7 @@ def validate_request(doc, at_submit: bool = False) -> None:
 
 
 def _validate_employee_request(doc, at_submit: bool) -> None:
-    """A payment to an employee's approved bank paybill account, optionally for a Salary Slip."""
+    """A payment to an employee's approved bank, paybill or till account, optionally for a Salary Slip."""
     if cstr(doc.get("supplier")).strip() or doc.get("supplier_mpesa_account"):
         frappe.throw("Pay a supplier or an employee, not both.")
     if cstr(doc.get("purchase_invoice")).strip() or cstr(doc.get("purchase_order")).strip():
@@ -502,7 +503,7 @@ def salary_left(salary_slip: str, request: str | None = None) -> dict:
         "parts": [p.label for p in result.parts],
         "problems": owed.slip_problems(values),
         "employee_mpesa_account": employee_accounts.pa.pick_account(
-            employee_accounts.ACCOUNT_DOCTYPE, values.employee, (employee_accounts.BANK,)),
+            employee_accounts.ACCOUNT_DOCTYPE, values.employee, employee_accounts.B2B_TYPES),
     }
 
 
@@ -538,7 +539,8 @@ def amount_left(doctype: str, name: str, request: str | None = None) -> dict:
         "problems": owed.document_problems(doctype, values),
         "supplier_hold": owed.supplier_hold(values.supplier),
         "earlier_payouts": [e.label for e in earlier],
-        "supplier_mpesa_account": supplier_accounts.pick_account(values.supplier) if values.supplier else None,
+        "supplier_mpesa_account": (supplier_accounts.pick_account(values.supplier, supplier_accounts.B2B_TYPES)
+                                   if values.supplier else None),
     }
 
 

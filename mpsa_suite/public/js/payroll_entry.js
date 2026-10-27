@@ -1,6 +1,6 @@
 // Payroll Entry (HRMS): pay the salaries by M-Pesa through one M-Pesa Payment Schedule. Each
-// employee's default approved Employee M-Pesa Account decides the route: a bank paybill by B2B,
-// a phone by B2C. Accounts prepare it; an M-Pesa Payer pays it on its day with Pay Selected.
+// employee's default approved Employee M-Pesa Account decides the route: a bank account, paybill or
+// till by B2B, a phone by B2C. Accounts prepare it; an M-Pesa Payer pays it on its day with Pay Selected.
 frappe.ui.form.on("Payroll Entry", {
 	refresh(frm) {
 		if (frm.doc.docstatus !== 1 || !frappe.model.can_read("M-Pesa Payment Schedule")) return;
@@ -43,7 +43,7 @@ const mpsa_payroll = {
 					fieldname: "intro",
 					options:
 						`<p>${__(
-							"One line per submitted salary slip, for what it still has to pay in whole shillings, to the employee's default approved M-Pesa account: a bank paybill by B2B, a phone by B2C. Employees who cannot be paid that way are listed on the schedule with the reason."
+							"One line per submitted salary slip, for what it still has to pay in whole shillings, to the employee's default approved M-Pesa account: a bank account, paybill or till by B2B, a phone by B2C. Employees who cannot be paid that way are listed on the schedule with the reason."
 						)}</p>` +
 						((status.bank_entries || []).length
 							? `<p style="color: var(--red-600)">${__("This payroll already has a bank entry: {0}", [
@@ -57,7 +57,7 @@ const mpsa_payroll = {
 					fieldname: "b2b_settings",
 					label: __("Pay From (B2B)"),
 					options: "Mpesa Settings",
-					description: __("For employees paid to a bank paybill."),
+					description: __("For employees paid to a bank account, paybill or till."),
 					get_query: () => ({ filters: { use_b2b: 1, company: frm.doc.company } }),
 				},
 				{

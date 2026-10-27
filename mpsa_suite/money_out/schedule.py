@@ -7,8 +7,9 @@ payee and per shortcode with the balances; confirm_payment pays only with the to
 at least 5 seconds later, once, for the same user (the browser keeps Confirm disabled for those
 5 seconds too). Nothing is ever paid automatically.
 
-Suppliers are paid by B2B (paybill or till). Employees are paid to their approved Employee M-Pesa
-Account: a bank paybill by B2B, like a supplier; a phone by B2C, through one B2C Payment
+Suppliers are paid by B2B (paybill, till or bank account; a supplier's phone is not paid from a
+schedule yet). Employees are paid to their approved Employee M-Pesa Account: a bank account,
+paybill or till by B2B, like a supplier; a phone by B2C, through one B2C Payment
 Disbursement per schedule, B2C shortcode, party type, document type and Payroll Entry, whose
 rows carry their line and the approved phone (the row refuses any other number). B2C's own
 guard and jobs send those. A Payroll Entry's "Create M-Pesa Payment Schedule" builds one
@@ -66,6 +67,9 @@ IN_PROGRESS = (SENDING, SENT, UNKNOWN)
 AUTO, LATER = "Book automatically", "Make the entry later"
 # The approved-account DocType of each party type.
 PARTY_ACCOUNT = {"Supplier": supplier_accounts.ACCOUNT_DOCTYPE, "Employee": employee_accounts.ACCOUNT_DOCTYPE}
+# The account types a line may pay, per party type (any for an employee: a phone by B2C, the rest by B2B)
+LINE_TYPES = {"Supplier": party_accounts.B2B_TYPES}
+SUPPLIER_PHONE = "is a phone account: pay a supplier's phone with a B2C Payment Disbursement."
 B2B_PAYBILL, B2B_TILL, B2C_PHONE = party_accounts.B2B_PAYBILL, party_accounts.B2B_TILL, party_accounts.B2C_PHONE
 ROUTE_FOR = party_accounts.ROUTE_FOR
 B2C_ROUTES = (B2C_PHONE,)
@@ -379,14 +383,17 @@ def _check_party(row) -> str | None:
     if not frappe.db.exists(row.party_type, row.party):
         frappe.throw(f"Row {row.idx}: {row.party_type} {row.party} not found.")
     profile = party_accounts.profile(account_doctype)
+    types = LINE_TYPES.get(row.party_type)
     row.payee_account_doctype = account_doctype
-    row.payee_account = row.payee_account or party_accounts.default_account(account_doctype, row.party)
+    row.payee_account = row.payee_account or party_accounts.default_account(account_doctype, row.party, types)
     if not row.payee_account:
         hint = profile.add_hint
         frappe.throw(f"Row {row.idx}: {row.party} has no approved M-Pesa account. {hint[0].upper()}{hint[1:]}")
     acc = party_accounts.get_account(account_doctype, row.payee_account)
     if not acc or acc.docstatus != 1 or party_accounts.party_of(acc, account_doctype) != row.party:
         frappe.throw(f"Row {row.idx}: {row.payee_account} is not an approved M-Pesa account of {row.party}.")
+    if types and acc.account_type not in types:
+        frappe.throw(f"Row {row.idx}: {acc.name} {SUPPLIER_PHONE}")
     row.route, row.destination = destination_of(acc)
     row.payee_name = frappe.db.get_value(row.party_type, row.party, profile.name_field) or row.party
     for field in ("one_off_type", "one_off_shortcode", "one_off_account"):
@@ -619,6 +626,11 @@ def _send_problem(line, schedule, payer) -> str | None:
         problem = party_accounts.usable_problem(acc, line.party, account_doctype)
         if problem:
             return problem
+        types = LINE_TYPES.get(line.party_type)
+        if types and acc.account_type not in types:
+            return f"{acc.name} {SUPPLIER_PHONE}"
+        if ROUTE_FOR.get(acc.account_type) != line.route:
+            return f"{acc.name} is a {acc.account_type} account, not paid by {line.route or 'this route'}."
         if destination_of(acc) != (line.route, line.destination):
             return f"Its approved account changed since the line was saved: open {line.parent} and save it again."
     else:
@@ -1161,6 +1173,7 @@ def _pay_b2c_group(members, batch, payer) -> str:
     if not paid_to:
         raise _Refused(f"Payroll Entry {payroll} has no Payroll Payable Account.")
     has_payroll_column = frappe.get_meta(B2C_ROW).has_field("payroll_entry")
+    has_payee_columns = frappe.get_meta(B2C_ROW).has_field("payee_account")
     doc = frappe.new_doc(B2C_DOCTYPE)
     doc.update({
         "naming_series": "MPESA-B2C-.YYYY.-",
@@ -1185,6 +1198,8 @@ def _pay_b2c_group(members, batch, payer) -> str:
                "currency": "KES", "exchange_rate": 1, "mpesa_schedule_line": line.name}
         if has_payroll_column:
             row["payroll_entry"] = payroll
+        if has_payee_columns:  # the approved phone account the row pays (its own lock checks it)
+            row.update(payee_account_doctype=line.payee_account_doctype, payee_account=line.payee_account)
         doc.append("references", row)
     doc.flags.ignore_permissions = True
     doc.flags.mpesa_from_schedule = True

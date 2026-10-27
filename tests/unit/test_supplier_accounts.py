@@ -38,6 +38,7 @@ def account(env, name="MSA-1", **kw):
            "active_from": NOW - datetime.timedelta(hours=1), "is_default": 0, "owner": "clerk@example.com",
            "proof": "/private/files/letter.pdf", "creation": "2026-10-01"}
     row.update(kw)
+    row["destination_key"] = env.sa.pa.destination_key(row)
     env.frappe.db.table(ACC)[name] = row
     return row
 

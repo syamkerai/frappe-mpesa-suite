@@ -1,0 +1,253 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:code",
+ "creation": "2026-10-27 12:00:00.000000",
+ "description": "A bank's, microfinance bank's or Sacco's M-Pesa paybill. A payee's Bank Account (via Bank Paybill) is paid by B2B to this paybill, with the payee's account number as the reference. M-Pesa Suite ships the top Kenyan institutions; a release updates only the fields you have not changed.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "code",
+  "institution_name",
+  "institution_type",
+  "bank",
+  "column_break_main",
+  "paybill",
+  "enabled",
+  "account_number_section",
+  "account_number_label",
+  "account_number_pattern",
+  "column_break_acc",
+  "account_number_rule",
+  "name_section",
+  "receiver_name",
+  "column_break_name",
+  "observed_receiver_name",
+  "source_section",
+  "source",
+  "column_break_src",
+  "verified_on",
+  "is_shipped",
+  "shipped_values"
+ ],
+ "fields": [
+  {
+   "fieldname": "code",
+   "fieldtype": "Data",
+   "label": "Code",
+   "reqd": 1,
+   "unique": 1,
+   "set_only_once": 1,
+   "description": "A short name, e.g. KCB. Letters, digits and dashes."
+  },
+  {
+   "fieldname": "institution_name",
+   "fieldtype": "Data",
+   "label": "Institution",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "institution_type",
+   "fieldtype": "Select",
+   "label": "Institution Type",
+   "options": "Bank\nMicrofinance Bank\nSacco\nOther",
+   "default": "Bank",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "bank",
+   "fieldtype": "Link",
+   "label": "ERPNext Bank",
+   "options": "Bank",
+   "description": "Optional: this site's Bank record for the institution. Copied onto payee accounts."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "paybill",
+   "fieldtype": "Data",
+   "label": "Paybill",
+   "reqd": 1,
+   "unique": 1,
+   "in_list_view": 1,
+   "description": "The institution's M-Pesa paybill for deposits to an account. Digits only. Approved accounts keep the number they were approved with: changing it here blocks them until they are approved again."
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Off: new payee accounts cannot pick it. Accounts approved on it are not affected."
+  },
+  {
+   "fieldname": "account_number_section",
+   "fieldtype": "Section Break",
+   "label": "Account Number"
+  },
+  {
+   "fieldname": "account_number_label",
+   "fieldtype": "Data",
+   "label": "Account Number Label",
+   "description": "What the payee account form calls the account number, e.g. Account Number at KCB."
+  },
+  {
+   "fieldname": "account_number_pattern",
+   "fieldtype": "Data",
+   "label": "Account Number Pattern",
+   "description": "Optional. A regular expression every account number at this institution must match (spaces and dashes removed first), e.g. \\d{13} for 13 digits. Leave empty when the format is not certain."
+  },
+  {
+   "fieldname": "column_break_acc",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "account_number_rule",
+   "fieldtype": "Small Text",
+   "label": "Account Number Rule",
+   "description": "How the institution wants the account number, shown on the payee account form."
+  },
+  {
+   "fieldname": "name_section",
+   "fieldtype": "Section Break",
+   "label": "Name M-Pesa Shows"
+  },
+  {
+   "fieldname": "receiver_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Shows",
+   "description": "Exactly as Safaricom shows it after a payment to this paybill, without the number in front, e.g. KCB Paybill AC. Every payment to an account here is checked against it. While empty, only the number is checked."
+  },
+  {
+   "fieldname": "column_break_name",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "observed_receiver_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Showed Last",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Kept from a payment while Name M-Pesa Shows is empty. Copy it there once you are sure it is the institution."
+  },
+  {
+   "fieldname": "source_section",
+   "fieldtype": "Section Break",
+   "label": "Source",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Small Text",
+   "label": "Source",
+   "description": "Where the paybill and the rules come from."
+  },
+  {
+   "fieldname": "column_break_src",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "verified_on",
+   "fieldtype": "Date",
+   "label": "Verified On"
+  },
+  {
+   "fieldname": "is_shipped",
+   "fieldtype": "Check",
+   "label": "Shipped With M-Pesa Suite",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "shipped_values",
+   "fieldtype": "JSON",
+   "label": "Shipped Values",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-27 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "M-Pesa Bank Paybill",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Manager",
+   "write": 1
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts User"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "HR Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "HR User"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Purchase Manager"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Payer"
+  },
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Viewer"
+  }
+ ],
+ "search_fields": "institution_name,paybill",
+ "show_title_field_in_link": 1,
+ "sort_field": "institution_name",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "institution_name",
+ "track_changes": 1
+}

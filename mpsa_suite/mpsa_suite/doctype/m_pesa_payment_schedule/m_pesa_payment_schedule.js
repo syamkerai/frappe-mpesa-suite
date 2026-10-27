@@ -5,6 +5,9 @@ const MPSA_SCHEDULE_API = "mpsa_suite.money_out.schedule";
 const MPSA_SCHEDULE_ORDER_CLOSED = ["On Hold", "Closed", "Completed"];
 // the approved-account DocType of each party type
 const MPSA_PARTY_ACCOUNT = { Supplier: "Supplier M-Pesa Account", Employee: "Employee M-Pesa Account" };
+// The account types a line may pay, per party type (any for an employee: a phone by B2C, the rest
+// by B2B). A supplier's phone is paid by a B2C Payment Disbursement, not from a schedule.
+const MPSA_LINE_TYPES = { Supplier: ["Paybill", "Till (Buy Goods)", "Bank Account (via Bank Paybill)"] };
 const MPSA_ACCOUNTS_FOR = {
 	Supplier: ["mpsa_suite.mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier", "supplier"],
 	Employee: ["mpsa_suite.mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee", "employee"],
@@ -21,7 +24,14 @@ frappe.ui.form.on("M-Pesa Payment Schedule", {
 		frm.set_query("payee_account", "lines", (doc, cdt, cdn) => {
 			const row = locals[cdt][cdn];
 			const field = row.party_type === "Employee" ? "employee" : "supplier";
-			return { filters: { docstatus: 1, ...(row.party ? { [field]: row.party } : {}) } };
+			const types = MPSA_LINE_TYPES[row.party_type];
+			return {
+				filters: {
+					docstatus: 1,
+					...(row.party ? { [field]: row.party } : {}),
+					...(types ? { account_type: ["in", types] } : {}),
+				},
+			};
 		});
 		frm.set_query("reference_name", "lines", (doc, cdt, cdn) => {
 			const row = locals[cdt][cdn];
@@ -99,11 +109,23 @@ frappe.ui.form.on("M-Pesa Payment Schedule Line", {
 		const how = MPSA_ACCOUNTS_FOR[row.party_type];
 		if (!row.party || !how) return;
 		frappe.model.set_value(cdt, cdn, "payee_account_doctype", MPSA_PARTY_ACCOUNT[row.party_type]);
-		// the default approved account, or the only one (the server checks again on save)
+		// the default approved account, or the only one, of the types a line pays (the server
+		// checks again on save)
+		const types = MPSA_LINE_TYPES[row.party_type];
 		const accounts = await frappe.xcall(how[0], { [how[1]]: row.party });
-		const approved = (accounts || []).filter((a) => a.docstatus === 1);
+		const approved = (accounts || []).filter((a) => a.docstatus === 1 && (!types || types.includes(a.account_type)));
 		const pick = approved.find((a) => a.is_default) || (approved.length === 1 ? approved[0] : null);
-		if (pick) frappe.model.set_value(cdt, cdn, "payee_account", pick.name);
+		if (pick) {
+			frappe.model.set_value(cdt, cdn, "payee_account", pick.name);
+		} else if (approved.length > 1) {
+			frappe.show_alert({
+				message: __("{0} has {1} approved M-Pesa accounts and none is the default: pick one in Payee Account.", [
+					frappe.utils.escape_html(row.party),
+					approved.length,
+				]),
+				indicator: "orange",
+			});
+		}
 	},
 
 	reference_doctype(frm, cdt, cdn) {

@@ -1,13 +1,15 @@
 """Employee M-Pesa Accounts (money_out.party_accounts, employee_accounts): an employee is paid only
-to a phone or bank paybill account a second person approved.
+to a phone, bank account, paybill or till account a second person approved.
 
-Covers: the phone and bank paybill details, repeats refused (one phone or bank account is one
+Covers: the phone and bank account details, repeats refused (one phone or bank account is one
 employee's), maker-checker approval with proof and the employee hold period (not who created the
 account, not who entered or changed its details, also in the submit itself, and never the
 employee), nobody paying themselves, the B2B request taking
-its destination from an approved bank paybill account (never a phone, never typed), the checks
-again before sending, the B2C phone check, and the receiver-name check that blocks an account
-until a manager confirms it. The supplier wrappers keep their behaviour (test_supplier_accounts).
+its destination from an approved bank, paybill or till account (never a phone, never typed), the
+checks again before sending, the B2C phone check, and the receiver-name check that blocks an
+account until a manager confirms it. The supplier wrappers keep their behaviour
+(test_supplier_accounts); the four types on both DocTypes, uniqueness and defaults:
+test_payee_accounts.
 """
 
 import datetime
@@ -21,6 +23,8 @@ NOW = datetime.datetime(2026, 10, 18, 12, 0, 0)
 SUITE = "M-Pesa Suite Settings"
 ACC = "Employee M-Pesa Account"
 B2B = "Mpesa B2B Payment Request"
+BANK = "Bank Account (via Bank Paybill)"
+BANKS = "M-Pesa Bank Paybill"
 
 
 @pytest.fixture
@@ -32,11 +36,15 @@ def env():
         frappe.db.table("Mpesa Settings")["Astral 600999"] = {
             "name": "Astral 600999", "business_shortcode": "600999", "till_number": "5123456",
         }
+        frappe.db.table(BANKS)["EQUITY-BANK"] = {
+            "name": "EQUITY-BANK", "code": "EQUITY-BANK", "institution_name": "Equity Bank Kenya Limited",
+            "paybill": "247247", "enabled": 1, "bank": "Equity", "receiver_name": None, "account_number_pattern": None}
+        frappe.db.table("Employee")["EMP-1"] = {"name": "EMP-1", "employee_name": "Jane Wanjiru"}
         pa = importlib.import_module("mpsa_suite.money_out.party_accounts")
         ea = importlib.import_module("mpsa_suite.money_out.employee_accounts")
         alerts = []
         pa_alert = pa.alert
-        pa.alert = lambda message, doc: alerts.append((doc.name, message))
+        pa.alert = lambda message, doc, roles=None: alerts.append((doc.name, message))
         yield fake_frappe._dict(frappe=frappe, pa=pa, ea=ea, alerts=alerts)
         pa.alert = pa_alert
     finally:
@@ -44,11 +52,13 @@ def env():
 
 
 def account(env, name="MEA-1", **kw):
-    row = {"name": name, "docstatus": 1, "employee": "EMP-1", "account_type": "Bank Paybill (B2B)", "phone": None,
-           "shortcode": "247247", "account_number": "0123456789", "bank": "Equity", "expected_name": "Equity Bank",
+    row = {"name": name, "docstatus": 1, "employee": "EMP-1", "account_type": BANK, "phone": None,
+           "shortcode": "247247", "account_number": "0123456789", "bank_paybill": "EQUITY-BANK", "bank": "Equity",
+           "account_holder_name": "Jane Wanjiru", "expected_name": "Equity Bank",
            "active_from": NOW - datetime.timedelta(hours=1), "is_default": 0, "owner": "hr@example.com",
            "proof": "/private/files/bank-letter.pdf", "creation": "2026-10-01"}
     row.update(kw)
+    row["destination_key"] = kw.get("destination_key") or env.pa.destination_key(row)
     env.frappe.db.table(ACC)[name] = row
     return row
 
@@ -88,28 +98,39 @@ def test_a_phone_that_is_not_a_kenyan_mobile_is_refused(env, value):
 
 
 @pytest.mark.parametrize("kw, msg", [
-    ({"shortcode": "24A247"}, "Bank Paybill Number must be 5 to 7 digits"),
-    ({"account_number": ""}, "needs the employee's bank account number"),
-    ({"shortcode": "600999"}, "own M-Pesa numbers"),
+    ({"bank_paybill": None}, "Pick the bank the account is at"),
+    ({"bank_paybill": "NOPE"}, "M-Pesa Bank Paybill NOPE not found"),
+    ({"account_number": ""}, "needs the employee's account number at Equity Bank Kenya Limited"),
+    ({"account_number": "0123/45"}, "letters and digits only"),
     ({"account_number": "1" * 21}, "longer than M-Pesa allows"),
 ])
-def test_bad_bank_paybill_details_are_refused(env, kw, msg):
-    values = {"account_type": "Bank Paybill (B2B)", "phone": None, "shortcode": " 247247 ", "account_number": "0123",
-              **kw}
+def test_bad_bank_account_details_are_refused(env, kw, msg):
+    values = {"account_type": BANK, "phone": None, "bank_paybill": "EQUITY-BANK", "account_number": "0123", **kw}
     with pytest.raises(env.frappe.ValidationError, match=msg):
         env.pa.validate_account(new_account(env, **values))
 
 
-def test_a_bank_paybill_is_cleaned_and_drops_the_phone(env):
-    doc = new_account(env, account_type="Bank Paybill (B2B)", phone="0722000111", shortcode=" 247247 ",
-                      account_number=" 0123 ")
+def test_a_bank_account_takes_the_banks_paybill_and_drops_the_phone(env):
+    doc = new_account(env, account_type=BANK, phone="0722000111", shortcode=" 999999 ", bank_paybill="EQUITY-BANK",
+                      account_number=" 0123-456 789 ", expected_name="Typed")
     env.pa.validate_account(doc)
-    assert (doc.shortcode, doc.account_number, doc.phone) == ("247247", "0123", None)
+    assert (doc.shortcode, doc.account_number, doc.phone, doc.bank) == ("247247", "0123456789", None, "Equity")
+    # Safaricom names the bank: the bank row's name, the employee as the holder by default
+    assert (doc.expected_name, doc.account_holder_name) == ("Equity Bank Kenya Limited", "Jane Wanjiru")
+    assert doc.destination_key == "PB:247247:0123456789"
 
 
-def test_a_supplier_account_type_is_not_an_employee_one(env):
-    with pytest.raises(env.frappe.ValidationError, match="Account Type must be Phone \\(B2C\\) or Bank Paybill \\(B2B\\)"):
-        env.pa.validate_account(new_account(env, account_type="Paybill"))
+def test_an_old_bank_paybill_draft_takes_the_new_type(env):
+    doc = new_account(env, account_type="Bank Paybill (B2B)", phone=None, bank_paybill="EQUITY-BANK",
+                      account_number="0123")
+    env.pa.validate_account(doc)
+    assert doc.account_type == BANK
+
+
+def test_an_unknown_account_type_is_refused(env):
+    with pytest.raises(env.frappe.ValidationError, match="Account Type must be Phone \\(B2C\\), Paybill, Till "
+                                                         "\\(Buy Goods\\) or Bank Account \\(via Bank Paybill\\)"):
+        env.pa.validate_account(new_account(env, account_type="Cheque"))
 
 
 def test_the_same_details_for_the_employee_or_for_another_are_refused(env):
@@ -121,10 +142,12 @@ def test_the_same_details_for_the_employee_or_for_another_are_refused(env):
         env.pa.validate_account(new_account(env, employee="EMP-2"))
     account(env)
     with pytest.raises(env.frappe.ValidationError, match="The same bank account is already approved for EMP-1"):
-        env.pa.validate_account(new_account(env, employee="EMP-2", account_type="Bank Paybill (B2B)", phone=None,
-                                            shortcode="247247", account_number="0123456789"))
-    env.pa.validate_account(new_account(env, employee="EMP-2", account_type="Bank Paybill (B2B)", phone=None,
-                                        shortcode="247247", account_number="0999"))  # same bank, another account
+        env.pa.validate_account(new_account(env, employee="EMP-2", account_type=BANK, phone=None,
+                                            bank_paybill="EQUITY-BANK", account_number="0123 456 789",
+                                            account_holder_name="Otieno Ouma"))
+    env.pa.validate_account(new_account(env, employee="EMP-2", account_type=BANK, phone=None,
+                                        bank_paybill="EQUITY-BANK", account_number="0999",
+                                        account_holder_name="Otieno Ouma"))  # same bank, another account
 
 
 # ---------------------------------------------------------------- approval
@@ -198,7 +221,10 @@ def test_nobody_pays_themselves(env):
     assert env.ea.own_payment_problem("EMP-1", "payer@example.com") == "You are EMP-1: another person must pay you."
     assert env.ea.own_payment_problem("EMP-1", "other@example.com") is None
     assert env.ea.own_payment_problem("EMP-2", "payer@example.com") is None
-    assert env.ea.own_payment_problem("EMP-1", "Administrator") is None
+    assert env.ea.own_payment_problem("EMP-1", "Administrator") is None  # not EMP-1's user
+    env.frappe.db.table("Employee")["EMP-2"]["user_id"] = "Administrator"
+    # no exemption for the shared login any more: it is EMP-2's user here
+    assert env.ea.own_payment_problem("EMP-2", "Administrator") == "You are EMP-2: another person must pay you."
 
 
 def test_an_hr_user_cannot_approve(env):
@@ -231,14 +257,14 @@ def test_default_is_one_per_employee(env):
 
 
 # ---------------------------------------------------------------- B2B requests to an employee
-def test_a_b2b_request_takes_its_destination_from_the_bank_paybill_account(env):
+def test_a_b2b_request_takes_its_destination_from_the_bank_account(env):
     account(env)
     doc = request(env, employee_mpesa_account="MEA-1")
     env.ea.apply_destination(doc)
     assert (doc.command_id, doc.receiver_shortcode, doc.account_reference) == ("BusinessPayBill", "247247", "0123456789")
 
 
-def test_a_b2b_request_picks_the_bank_paybill_not_the_phone(env):
+def test_a_b2b_request_picks_the_bank_account_not_the_phone(env):
     phone(env, is_default=1)
     account(env)
     doc = request(env)
@@ -248,11 +274,11 @@ def test_a_b2b_request_picks_the_bank_paybill_not_the_phone(env):
 
 def test_a_phone_account_is_never_paid_by_b2b(env):
     phone(env)
-    with pytest.raises(env.frappe.ValidationError, match="is a phone account: B2B pays bank paybills only"):
+    with pytest.raises(env.frappe.ValidationError, match="is a phone account: B2B pays a bank, paybill or till account"):
         env.ea.apply_destination(request(env, employee_mpesa_account="MEA-2"))
 
 
-def test_an_employee_without_an_approved_bank_paybill_is_refused_even_with_one_offs_on(env):
+def test_an_employee_without_an_approved_b2b_account_is_refused_even_with_one_offs_on(env):
     phone(env)
     with pytest.raises(env.frappe.ValidationError, match="has none that can be paid by B2B"):
         env.ea.apply_destination(request(env))
@@ -283,7 +309,7 @@ def test_before_sending_the_account_and_destination_are_checked_again(env):
     env.frappe.db.table(ACC)["MEA-1"]["docstatus"] = 2
     with pytest.raises(env.frappe.ValidationError, match="cancelled"):
         env.ea.check_before_send(doc)
-    with pytest.raises(env.frappe.ValidationError, match="Pick the employee's approved bank paybill"):
+    with pytest.raises(env.frappe.ValidationError, match="Pick the employee's approved bank, paybill or till"):
         env.ea.check_before_send(request(env, employee_mpesa_account=None))
 
 
@@ -293,7 +319,7 @@ def test_a_b2c_payout_goes_only_to_the_approved_phone(env):
     account(env)
     assert env.ea.phone_problem("MEA-2", "EMP-1", "254722000111") is None
     assert "does not match" in env.ea.phone_problem("MEA-2", "EMP-1", "254733000000")
-    assert "is a bank paybill account" in env.ea.phone_problem("MEA-1", "EMP-1", "254722000111")
+    assert "is a bank, paybill or till account" in env.ea.phone_problem("MEA-1", "EMP-1", "254722000111")
     assert "belongs to EMP-1" in env.ea.phone_problem("MEA-2", "EMP-2", "254722000111")
 
 
@@ -334,7 +360,7 @@ def test_a_name_mismatch_blocks_the_account_and_alerts(env):
 
 
 def test_a_b2b_mismatch_flags_the_request_too(env):
-    account(env)
+    account(env, bank_paybill=None)  # saved before the bank paybill list: its own expected name is checked
     doc = request(env, employee_mpesa_account="MEA-1", docstatus=1)
     env.ea.record_receiver_name(doc, "MEA-1", "247247 - KCB BANK")
     assert env.frappe.db.table(B2B)["MB2B-1"]["receiver_name_mismatch"] == 1
@@ -344,3 +370,4 @@ def test_supplier_wrappers_keep_the_supplier_wording(env):
     sa = importlib.import_module("mpsa_suite.money_out.supplier_accounts")
     assert sa.usable_problem(None) == "Supplier M-Pesa Account not found"
     assert sa.ACCOUNT_DOCTYPE == "Supplier M-Pesa Account" and set(sa.COMMAND_FOR) == {"Paybill", "Till (Buy Goods)"}
+    assert sa.B2B_TYPES == ("Paybill", "Till (Buy Goods)", BANK)

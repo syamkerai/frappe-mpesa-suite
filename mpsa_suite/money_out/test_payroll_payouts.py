@@ -38,8 +38,8 @@ PHONE = "254722000999"
 SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, payout_lines_from=None, allow_one_off_b2b=0,
                     entry_reminder_days=3, schedule_maker_checker=1, send_interval_seconds=0,
                     employee_account_hold_hours=0)
-EMPLOYEES = (("_T Pay Bank", "Bank Paybill (B2B)"), ("_T Pay Phone", "Phone (B2C)"), ("_T Pay None", None),
-             ("_T Pay Left", "Bank Paybill (B2B)"))
+EMPLOYEES = (("_T Pay Bank", "Bank Account (via Bank Paybill)"), ("_T Pay Phone", "Phone (B2C)"), ("_T Pay None", None),
+             ("_T Pay Left", "Bank Account (via Bank Paybill)"))
 
 
 def hrms() -> bool:
@@ -217,7 +217,7 @@ class TestEmployeePayouts(_Base):
             req = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
                                   "remarks": "x", "employee": self.employees["_T Pay Phone"],
                                   "employee_mpesa_account": self.accounts["_T Pay Phone"]})
-            self.assertRaisesRegex(frappe.ValidationError, "B2B pays bank paybills only", req.insert)
+            self.assertRaisesRegex(frappe.ValidationError, "B2B pays a bank, paybill or till account", req.insert)
 
     def test_an_employee_line_is_not_paid_before_its_day(self):
         with _as(PREPARER):

@@ -8,7 +8,11 @@ from ....money_out import supplier_accounts
 
 
 class SupplierMPesaAccount(Document):
-    """A supplier's paybill / till. Submitting is the approval; edits need cancel + amend."""
+    """A supplier's paybill, till, bank account or phone. Submitting is the approval; edits need
+    cancel + amend; the default changes with Make Default."""
+
+    def onload(self):
+        self.set_onload("mpsa", supplier_accounts.form_state(self))
 
     def validate(self):
         if self.docstatus == 0:
@@ -23,29 +27,28 @@ class SupplierMPesaAccount(Document):
     def on_submit(self):
         supplier_accounts.after_approve(self)
 
-    def on_update_after_submit(self):
-        if self.is_default and self.has_value_changed("is_default"):
-            supplier_accounts.set_default(self)
+    def before_update_after_submit(self):
+        supplier_accounts.refuse_default_edit(self)
 
     def before_cancel(self):
         self.is_default = 0
+
+    def on_cancel(self):
+        supplier_accounts.after_cancel(self)
 
     @frappe.whitelist()
     def confirm_receiver_name(self, adopt_name: int = 0):
         """Unblock after a name mismatch, once a manager has checked with the supplier."""
         supplier_accounts.confirm_receiver_name(self, bool(int(adopt_name or 0)))
 
+    @frappe.whitelist()
+    def make_default(self):
+        """Make this approved account the supplier's default (where payments that name no account go)."""
+        supplier_accounts.make_default(self)
+
 
 @frappe.whitelist()
 def accounts_for_supplier(supplier: str) -> list:
-    """Approved accounts for the Supplier form, with whether each can be paid now."""
-    frappe.has_permission("Supplier M-Pesa Account", "read", throw=True)
-    rows = frappe.get_list(
-        "Supplier M-Pesa Account",
-        filters={"supplier": supplier, "docstatus": ["<", 2]},
-        fields=supplier_accounts.ACCOUNT_FIELDS + ["name_mismatch"],
-        order_by="is_default desc, creation asc",
-    )
-    for row in rows:
-        row.problem = supplier_accounts.usable_problem(row, supplier)
-    return rows
+    """Approved and draft accounts for the Supplier form and the payment schedule, with whether
+    each can be paid now."""
+    return supplier_accounts.accounts_for(supplier)
