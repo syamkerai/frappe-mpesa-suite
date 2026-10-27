@@ -708,7 +708,9 @@ def test_retry_of_another_document_does_not_ask_about_order_advances(retry):
     request = retry.failed(doctype="Expense Claim", reference="EC-1")
     request.retry_failed_payment()
     assert len(retry.sends) == 1
-    assert not [c for c in retry.frappe.calls if c[0] in ("b2b_open", "order_advances")]
+    assert not [c for c in retry.frappe.calls if c[0] == "order_advances"]
+    # round 4: a B2B request may pay an Expense Claim too (money_out.employee_documents)
+    assert [c[:3] for c in retry.frappe.calls if c[0] == "b2b_open"] == [("b2b_open", "Expense Claim", "EC-1")]
 
 
 def test_retry_reads_the_status_a_concurrent_retry_committed(retry):

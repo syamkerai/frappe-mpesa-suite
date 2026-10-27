@@ -17,6 +17,12 @@ booked with a salary Journal Entry that clears the Payroll Entry's payroll payab
 (money_out.salary_entries); a payment to an employee with no slip waits for Make Entry, and only
 a manager sends it (nothing caps its amount). Nobody sends a payment to themselves.
 
+An employee request may pay an Expense Claim or an Employee Advance (HRMS) instead of a slip, one
+of the three only: never past what the document has left (every payout of it counted, under its
+lock: owed.employee_doc_left_to_pay), only while it may be paid (employee_documents.
+payable_problem), and a Payer may send it (the document caps it). Its Payment Entry is booked when
+M-Pesa confirms (b2b_entries).
+
 A request made by the payment schedule (money_out.schedule) is submitted by Pay Selected but not
 sent then: send_deferred sends it from a job, after committing its send_started_on marker, and
 never before its line's planned day.
@@ -38,6 +44,9 @@ from .results import find_request
 
 B2B_DOCTYPE = "Mpesa B2B Payment Request"
 FINAL = ("Paid", "Failed")
+# A payment to an employee that no document caps is sent by a manager only
+NO_DOCUMENT = ("A payment to an employee with no Salary Slip, Expense Claim or Employee Advance is paid by an M-Pesa "
+               "Manager.")
 # When Paid: book the Payment Entry at once, or wait for Make Entry (b2b_entries).
 AUTO, LATER = "Book automatically", "Make the entry later"
 # A Result that meets a deadlock or a row lock held past MariaDB's lock wait is recorded again
@@ -118,10 +127,13 @@ def lock_document(name: str) -> tuple:
     fields = ["purchase_invoice", "purchase_order"]
     if frappe.get_meta(B2B_DOCTYPE).has_field("salary_slip"):
         fields.append("salary_slip")
+    fields += [f for f in owed.EMPLOYEE_DOC_FIELDS.values() if frappe.get_meta(B2B_DOCTYPE).has_field(f)]
     values = frappe.db.get_value(B2B_DOCTYPE, name, fields, as_dict=True) or frappe._dict()
     dt, dn = owed.document_of(values)
     if not dt and cstr(values.get("salary_slip")).strip():
         return owed.SLIP, values.salary_slip
+    if not dt:
+        dt, dn = owed.employee_document_of(values)  # an Expense Claim or Employee Advance
     return dt, dn
 
 
@@ -252,11 +264,14 @@ def salary_slip(doc) -> str | None:
 def validate_request(doc, at_submit: bool = False) -> None:
     """Every check a request must pass: on save, again at submit (under the document's lock) and,
     through check_ready_to_send, again right before the money leaves."""
+    _employee_of_document(doc)
     if is_employee(doc):
         _validate_employee_request(doc, at_submit)
         return
     if salary_slip(doc):
         frappe.throw("A Salary Slip is paid to its employee: pick the Employee.")
+    if owed.employee_document_of(doc)[0]:
+        frappe.throw("An Expense Claim or Employee Advance is paid to its employee: pick the Employee.")
     if doc.get("employee_mpesa_account"):
         frappe.throw("An Employee M-Pesa Account is paid to its employee: pick the Employee.")
     dt, dn = owed.linked_document(doc)
@@ -292,10 +307,12 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
     slip = salary_slip(doc)
     if slip:
         _take_from_slip(doc, slip)
-    employee_accounts.apply_destination(doc)
+    dt, dn = _take_from_employee_document(doc, slip)
+    if not doc.get("claim_payee"):  # a payee of the claim is checked by money_out.claim_payees, not an account
+        employee_accounts.apply_destination(doc)
     _check_fields(doc)
     _check_settings(doc, fill=True)
-    if not slip:
+    if not slip and not dt:
         doc.entry_mode = LATER  # nothing says what it paid for until someone makes the entry
     elif not doc.get("entry_mode"):
         doc.entry_mode = AUTO
@@ -305,16 +322,66 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
                 _check_slip(doc, slip, for_update=True)
         else:
             _check_slip(doc, slip)
+    if dt:
+        if at_submit:
+            with owed.doc_lock(dt, dn):
+                _check_employee_document(doc, dt, dn, for_update=True)
+        else:
+            _check_employee_document(doc, dt, dn)
 
 
 def _check_payer(doc, sending: bool) -> None:
-    """Nobody pays themselves; and a payment with no Salary Slip, which nothing caps, is submitted
-    and sent by a manager (ADMIN_ROLES) only."""
+    """Nobody pays themselves; and a payment with no Salary Slip, Expense Claim or Employee
+    Advance, which nothing caps, is submitted and sent by a manager (ADMIN_ROLES) only."""
     problem = employee_accounts.own_payment_problem(doc.employee)
     if problem:
         frappe.throw(problem, frappe.PermissionError)
-    if sending and not salary_slip(doc) and not employee_accounts.is_manager():
-        frappe.throw(employee_accounts.NO_SLIP, frappe.PermissionError)
+    if (sending and not salary_slip(doc) and not owed.employee_document_of(doc)[0]
+            and not employee_accounts.is_manager()):
+        frappe.throw(NO_DOCUMENT, frappe.PermissionError)
+
+
+# ---------------------------------------------------------------- Expense Claims and Employee Advances
+def _employee_of_document(doc) -> None:
+    """A request for an Expense Claim or Employee Advance pays its employee: filled in when blank
+    (a different one typed is refused by the document check)."""
+    dt, dn = owed.employee_document_of(doc)
+    if dt and not is_employee(doc) and not cstr(doc.get("supplier")).strip():
+        doc.employee = frappe.db.get_value(dt, dn, "employee")
+
+
+def _take_from_employee_document(doc, slip) -> tuple:
+    """(doctype, name) of the Expense Claim or Employee Advance the request pays, or (None, None):
+    one of the slip, the claim and the advance. Its company is the request's."""
+    dt, dn = owed.linked_employee_document(doc)
+    if not dt:
+        return None, None
+    if slip:
+        frappe.throw("Pay a Salary Slip, an Expense Claim or an Employee Advance: one of them, not two.")
+    company = frappe.db.get_value(dt, dn, "company")
+    if company is None and not frappe.db.exists(dt, dn):
+        frappe.throw(f"{dt} {dn} not found")
+    doc.company = company or doc.company
+    return dt, dn
+
+
+def _check_employee_document(doc, dt: str, dn: str, for_update: bool = False) -> None:
+    """The claim or advance may be paid now and has at least this amount left, every payout of it
+    counted, whoever it pays (under its lock at submit and send: payouts first, R4)."""
+    from . import employee_documents
+
+    result = owed.employee_doc_left_to_pay(dt, dn, exclude_request=doc.name,
+                                           exclude_line=doc.get("schedule_line") or None, for_update=for_update)
+    values = employee_documents.read_document(dt, dn, for_update=for_update)
+    problem = employee_documents.payable_problem(values, dt)
+    if problem:
+        frappe.throw(problem)
+    if values.employee != doc.employee:
+        frappe.throw(f"{dn} belongs to {values.employee}, not {doc.employee}.")
+    if values.get("company") and doc.company != values.company:
+        frappe.throw(f"{dn} belongs to {values.company}, not {doc.company or 'no company'}.")
+    if flt(doc.amount) > result.left + 0.001:
+        frappe.throw(f"KES {owed.money(doc.amount)} is more than is left to pay. {owed.explain(dn, result)}")
 
 
 def _take_from_slip(doc, slip: str) -> None:
@@ -474,7 +541,8 @@ def _check_employee_ready(doc) -> None:
     if cstr(doc.get("supplier")).strip() or owed.document_of(doc) != (None, None):
         frappe.throw("Pay a supplier or an employee, not both.")
     _check_payer(doc, sending=True)
-    employee_accounts.check_before_send(doc)
+    if not doc.get("claim_payee"):  # a payee of the claim is checked by money_out.claim_payees
+        employee_accounts.check_before_send(doc)
     if not doc.mpesa_settings:
         frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")
     _check_settings(doc, fill=False)
@@ -482,6 +550,10 @@ def _check_employee_ready(doc) -> None:
     if slip:
         with owed.slip_lock(slip):
             _check_slip(doc, slip, for_update=True)
+    dt, dn = owed.linked_employee_document(doc)
+    if dt:
+        with owed.doc_lock(dt, dn):
+            _check_employee_document(doc, dt, dn, for_update=True)
 
 
 @frappe.whitelist()

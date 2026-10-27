@@ -12,6 +12,11 @@ Viewer, an Accounts User or Manager without an HR role) sees the supplier paymen
 - ``report_condition`` / ``visible`` for the reports that read these tables directly (M-Pesa
   Payments Due, B2C Disbursement Summary).
 Employee M-Pesa Account is closed to the other roles by its DocPerms.
+
+A payout of an Expense Claim or Employee Advance is not a salary (plan C.8): a B2C row or request,
+a B2B request or a schedule line that pays an employee for one of them is shown by the DocType's
+own rights, to the Accounts roles who pay claims. Salary Slips, payroll schedules and payments to
+an employee that name no document stay hidden.
 """
 
 import frappe
@@ -29,8 +34,16 @@ STATUS = "Mpesa B2C Status Query"
 SLIP = "Salary Slip"
 DOCTYPES = (SCHEDULE, B2C, B2C_REQUEST, B2B, STATUS)
 NOT_READERS = ("Employee", "Employee Self Service", "All", "Guest", "Desk User")
-# A line or row that names a salary: an employee paid, or a Salary Slip
-SALARY_LINE_SQL = "(COALESCE({t}party_type, '') = 'Employee' OR COALESCE({t}reference_doctype, '') = 'Salary Slip')"
+# What an employee is paid for that is not a salary (they reimburse and advance)
+EMPLOYEE_DOCUMENTS = ("Expense Claim", "Employee Advance")
+_DOCUMENTS_SQL = ", ".join(f"'{dt}'" for dt in EMPLOYEE_DOCUMENTS)
+# A line or row that names a salary: a Salary Slip, or an employee paid for no claim or advance
+SALARY_LINE_SQL = (
+    "(COALESCE({t}reference_doctype, '') = 'Salary Slip' OR (COALESCE({t}party_type, '') = 'Employee' "
+    f"AND COALESCE({{t}}reference_doctype, '') NOT IN ({_DOCUMENTS_SQL})))"
+)
+# The B2B request's links to a claim or advance (HRMS custom fields, migrate)
+B2B_DOCUMENT_FIELDS = ("expense_claim", "employee_advance")
 
 # DocType -> SQL true for a row that is NOT salary data
 _NOT_SALARY = {
@@ -40,17 +53,30 @@ _NOT_SALARY = {
         f"AND sal_line.parenttype = '{SCHEDULE}' AND {SALARY_LINE_SQL.format(t='sal_line.')}))"
     ),
     B2C: (
-        f"(COALESCE(`tab{B2C}`.party_type, '') != 'Employee' AND NOT EXISTS (SELECT 1 FROM `tab{B2C_ROW}` sal_row "
+        f"((COALESCE(`tab{B2C}`.party_type, '') != 'Employee' "
+        f"OR COALESCE(`tab{B2C}`.transaction_to_pay_against, '') IN ({_DOCUMENTS_SQL})) "
+        f"AND NOT EXISTS (SELECT 1 FROM `tab{B2C_ROW}` sal_row "
         f"WHERE sal_row.parent = `tab{B2C}`.name AND sal_row.parenttype = '{B2C}' "
         f"AND {SALARY_LINE_SQL.format(t='sal_row.')}))"
     ),
     B2C_REQUEST: f"NOT {SALARY_LINE_SQL.format(t=f'`tab{B2C_REQUEST}`.')}",
-    B2B: f"COALESCE(`tab{B2B}`.employee, '') = ''",
+    B2B: f"COALESCE(`tab{B2B}`.employee, '') = ''",  # and the claims and advances (_not_salary)
     STATUS: (
         f"NOT EXISTS (SELECT 1 FROM `tab{B2C_REQUEST}` sal_req WHERE sal_req.name = `tab{STATUS}`.b2c_request "
         f"AND {SALARY_LINE_SQL.format(t='sal_req.')})"
     ),
 }
+
+
+def _not_salary(doctype: str) -> str:
+    """SQL true for a row of ``doctype`` that is not salary data: a B2B request for a claim or
+    advance too, where the site has those links."""
+    condition = _NOT_SALARY[doctype]
+    if doctype == B2B:
+        links = [f"COALESCE(`tab{B2B}`.{f}, '') != ''" for f in B2B_DOCUMENT_FIELDS if frappe.db.has_column(B2B, f)]
+        if links:
+            condition = f"({condition} OR {' OR '.join(links)})"
+    return condition
 
 
 def can_see_salaries(user: str | None = None) -> bool:
@@ -75,13 +101,16 @@ def _reads_salary_slips(user: str) -> bool:
 
 
 def is_salary_line(line) -> bool:
-    return line.get("party_type") == "Employee" or line.get("reference_doctype") == SLIP
+    if line.get("reference_doctype") == SLIP:
+        return True
+    return line.get("party_type") == "Employee" and line.get("reference_doctype") not in EMPLOYEE_DOCUMENTS
 
 
 def has_salaries(doc) -> bool:
     """Whether ``doc`` (one of ``DOCTYPES``) pays a salary, as on the form or as saved."""
     if doc.get("doctype") == B2B or (not doc.get("doctype") and "employee" in doc):
-        return bool(cstr(doc.get("employee")).strip())
+        return bool(cstr(doc.get("employee")).strip()) and not any(
+            cstr(doc.get(f)).strip() for f in B2B_DOCUMENT_FIELDS)
     if doc.get("doctype") == B2C_REQUEST:
         return is_salary_line(doc)
     if doc.get("doctype") == STATUS:
@@ -90,7 +119,8 @@ def has_salaries(doc) -> bool:
             if request else None
         return bool(values) and is_salary_line(values)
     if doc.get("doctype") == B2C:
-        return doc.get("party_type") == "Employee" or any(is_salary_line(r) for r in doc.get("references") or [])
+        header = doc.get("party_type") == "Employee" and doc.get("transaction_to_pay_against") not in EMPLOYEE_DOCUMENTS
+        return header or any(is_salary_line(r) for r in doc.get("references") or [])
     # a payment schedule: made from a Payroll Entry, or with an employee or Salary Slip line
     if doc.get("purpose") == "Payroll" or cstr(doc.get("payroll_entry")).strip():
         return True
@@ -123,7 +153,7 @@ def query_conditions(user=None, doctype=None) -> str:
     user = user or frappe.session.user
     if doctype not in _NOT_SALARY or can_see_salaries(user):
         return ""
-    return f"({_NOT_SALARY[doctype]} OR `tab{doctype}`.owner = {frappe.db.escape(user)})"
+    return f"({_not_salary(doctype)} OR `tab{doctype}`.owner = {frappe.db.escape(user)})"
 
 
 # The Phase 3 names of the two hooks it started with (kept for its tests and callers)

@@ -1,0 +1,347 @@
+"""Expense Claims and Employee Advances paid by M-Pesa (round 4, WP3) against the real database
+(ERPNext and HRMS v15 and v16).
+
+Named users only, each with the roles a site gives that job: an HR Manager prepares a phone
+payout (reads claims, makes B2C payouts), an Accounts User who is also an HR User prepares a bank
+one (reads claims, makes B2B requests), an Expense Approver who is also an Accounts User prepares
+an advance's (HRMS lets only the Employee and the Expense Approver read advances), an Accounts
+User alone sees claim payouts but no salary, and an M-Pesa Payer sends with Send via M-Pesa
+(send_confirm.send_for_test). Claims and advances are real HRMS documents (inserted and submitted
+as test data), paid from the shortcode TESTB2BDOCS. Nothing reaches Safaricom: B2B post() and the
+B2C connector are replaced and Results are written as the callbacks write them; commits made by
+the code under test are replaced, so each test rolls back. Unit coverage:
+tests/unit/test_employee_documents.py.
+"""
+
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import frappe
+from frappe.utils import add_days, flt, now_datetime, nowdate
+
+from mpsa_suite.compat import IntegrationTestCase
+from mpsa_suite.money_in import testing as t
+from mpsa_suite.money_out import b2b, employee_documents, party_accounts, salary_access, send_confirm
+from mpsa_suite.money_out.test_b2b_documents import _settings
+from mpsa_suite.money_out.test_payroll_payouts import _employee
+
+SETTINGS = "TESTB2BDOCS"
+EC, EA = "Expense Claim", "Employee Advance"
+B2B, PE = b2b.B2B_DOCTYPE, "Payment Entry"
+DISB, ROW, REQ = "B2C Payment Disbursement", "B2C Payment Disbursement Reference", "B2C Disbursement Request"
+EMPACC = party_accounts.EMPLOYEE_ACCOUNT
+SUITE = "M-Pesa Suite Settings"
+HR, ACCOUNTS, APPROVER = "_t_claims_hr@example.com", "_t_claims_accounts@example.com", "_t_claims_approver@example.com"
+CLERK, PAYER = "_t_claims_clerk@example.com", "_t_claims_payer@example.com"
+PHONE = "254722000777"
+CLAIM_TYPE = "_T Claims Travel"
+SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, payout_lines_from=None, allow_one_off_b2b=0,
+                    entry_reminder_days=3, schedule_maker_checker=1, send_interval_seconds=0,
+                    employee_account_hold_hours=0)
+
+
+def hrms() -> bool:
+    return "hrms" in frappe.get_installed_apps()
+
+
+def _named(email: str, *roles) -> str:
+    """A System User ``email`` holding ``roles`` (never Administrator, never System Manager)."""
+    if not frappe.db.exists("User", email):
+        frappe.get_doc({"doctype": "User", "email": email, "first_name": email.split("@")[0].strip("_"),
+                        "send_welcome_email": 0, "user_type": "System User"}).insert(ignore_permissions=True)
+    user = frappe.get_doc("User", email)
+    missing = [r for r in roles if r not in {row.role for row in user.roles} and frappe.db.exists("Role", r)]
+    if missing:
+        user.flags.ignore_permissions = True
+        user.add_roles(*missing)
+    return email
+
+
+def _account(name: str, root_type: str, report_type: str, account_type: str | None = None) -> str:
+    existing = frappe.db.get_value("Account", {"account_name": name, "company": t.COMPANY}, "name")
+    if existing:
+        return existing
+    parent = frappe.db.get_value("Account", {"company": t.COMPANY, "root_type": root_type, "is_group": 1}, "name",
+                                 order_by="lft desc")
+    return frappe.get_doc({"doctype": "Account", "account_name": name, "company": t.COMPANY, "parent_account": parent,
+                           "root_type": root_type, "report_type": report_type, "account_type": account_type,
+                           "account_currency": "KES", "is_group": 0}).insert().name
+
+
+def _approved(employee: str, account_type: str, name: str) -> str:
+    """An Employee M-Pesa Account written as approved (the approval has its own tests)."""
+    if frappe.db.exists(EMPACC, name):
+        return name
+    values = ({"phone": PHONE, "expected_name": "Test Claimant"} if account_type == party_accounts.PHONE else
+              {"shortcode": "247247", "account_number": f"C{name[-4:]}", "expected_name": "Equity Bank"})
+    doc = frappe.get_doc({
+        "doctype": EMPACC, "employee": employee, "account_type": account_type, "is_default": 1, "docstatus": 1,
+        "proof": "/private/files/_t_claims_proof.pdf", "approved_by": "Administrator", "approved_on": now_datetime(),
+        "active_from": add_days(now_datetime(), -1), "creation": now_datetime(), "modified": now_datetime(),
+        "owner": "Administrator", **values})
+    doc.name = name
+    doc.db_insert()
+    return name
+
+
+@contextmanager
+def _as(user):
+    frappe.set_user(user)
+    try:
+        yield
+    finally:
+        frappe.set_user("Administrator")
+
+
+class TestEmployeeDocuments(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not hrms():
+            return
+        t.bootstrap()
+        t.enable_money_in(**SUITE_VALUES)
+        cls.bank_account, cls.gl = _settings()
+        _named(HR, "HR Manager")
+        _named(ACCOUNTS, "Accounts User", "HR User")
+        _named(APPROVER, "Accounts User", "Expense Approver")
+        _named(CLERK, "Accounts User")
+        _named(PAYER, "M-Pesa Payer")
+        cls.payable = _account("_T Claims Payable", "Liability", "Balance Sheet", "Payable")
+        cls.advances = _account("_T Claims Advances", "Asset", "Balance Sheet", "Receivable")
+        cls.expense = _account("_T Claims Travel Expense", "Expense", "Profit and Loss")
+        cls.cost_center = frappe.db.get_value("Company", t.COMPANY, "cost_center")
+        if not frappe.db.exists("Expense Claim Type", CLAIM_TYPE):
+            frappe.get_doc({"doctype": "Expense Claim Type", "expense_type": CLAIM_TYPE,
+                            "accounts": [{"company": t.COMPANY, "default_account": cls.expense}]}).insert()
+        if not frappe.db.exists("Project", {"project_name": "_T Claims Site"}):
+            frappe.get_doc({"doctype": "Project", "project_name": "_T Claims Site", "company": t.COMPANY}).insert()
+        cls.project = frappe.db.get_value("Project", {"project_name": "_T Claims Site"}, "name")
+        cls.phone_employee = _employee("_T Claims Phone")
+        cls.bank_employee = _employee("_T Claims Bank")
+        cls.phone_account = _approved(cls.phone_employee, party_accounts.PHONE, "_T-MEA-CLAIM-1")
+        cls.bank_account_of_employee = _approved(cls.bank_employee, party_accounts.BANK, "_T-MEA-CLAIM-2")
+        frappe.db.commit()  # fixtures stay; each test rolls back to here
+
+    def setUp(self):
+        if not hrms():
+            self.skipTest("HRMS is not installed")
+        frappe.set_user("Administrator")
+        frappe.local.mpesa_suite_bank_accounts = None
+        self._patches = [patch.object(frappe.db, "commit")]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        frappe.set_user("Administrator")
+        frappe.db.rollback()
+        frappe.local.mpesa_suite_bank_accounts = None
+        frappe.clear_document_cache(SUITE, SUITE)
+        frappe.clear_cache(doctype=PE)
+
+    # ------------------------------------------------------------ test data, as HRMS leaves it
+    def _claim(self, employee, amount, project=None) -> str:
+        """A submitted, approved Expense Claim (test data: inserted as Administrator)."""
+        values = {"doctype": EC, "employee": employee, "company": t.COMPANY, "posting_date": nowdate(),
+                  "approval_status": "Approved", "payable_account": self.payable, "cost_center": self.cost_center,
+                  "project": project,
+                  "expenses": [{"expense_type": CLAIM_TYPE, "default_account": self.expense, "expense_date": nowdate(),
+                                "amount": amount, "sanctioned_amount": amount, "cost_center": self.cost_center}]}
+        meta = frappe.get_meta(EC)
+        if meta.has_field("currency"):  # v16
+            values.update(currency="KES", exchange_rate=1)
+        doc = frappe.get_doc(values)
+        doc.flags.ignore_permissions = True
+        doc.insert()
+        doc.submit()
+        return doc.name
+
+    def _advance(self, employee, amount) -> str:
+        doc = frappe.get_doc({"doctype": EA, "employee": employee, "company": t.COMPANY, "posting_date": nowdate(),
+                              "purpose": "Site visit", "advance_amount": amount, "currency": "KES", "exchange_rate": 1,
+                              "advance_account": self.advances})
+        doc.flags.ignore_permissions = True
+        doc.insert()
+        doc.submit()
+        return doc.name
+
+    # ------------------------------------------------------------ M-Pesa, replaced
+    def _ack(self, settings, endpoint, payload, **kw):
+        name = kw["name"]
+        return {"ResponseCode": "0", "ResponseDescription": "Accepted", "ConversationID": f"AG_{name}",
+                "OriginatorConversationID": f"OC_{name}"}, None
+
+    def _send(self, doctype, name, user=PAYER):
+        """Send via M-Pesa and Confirm as ``user``; the jobs it queues are kept, not run."""
+        with _as(user), patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack), \
+                patch("frappe.enqueue") as enqueue:
+            send_confirm.send_for_test(frappe.get_doc(doctype, name))
+        return list(enqueue.call_args_list)
+
+    def _b2b_paid(self, name, public="247247 - Equity Bank Limited") -> str:
+        receipt = "T" + frappe.generate_hash(length=9).upper()
+        result = {
+            "ResultType": 0, "ResultCode": 0, "ResultDesc": "The service request is processed successfully.",
+            "ConversationID": f"AG_{name}", "OriginatorConversationID": f"OC_{name}", "TransactionID": receipt,
+            "ResultParameters": {"ResultParameter": [
+                {"Key": "DebitAccountBalance", "Value": "Working Account|KES|500000.00|500000.00|0.00|0.00"},
+                {"Key": "TransCompletedTime", "Value": now_datetime().strftime("%Y%m%d%H%M%S")},
+                {"Key": "DebitPartyCharges", "Value": "Business Pay Bill Charge|KES|2.00"},
+                {"Key": "ReceiverPartyPublicName", "Value": public}]},
+        }
+        with patch("frappe.enqueue"):
+            b2b.handle_result(result, name)
+            b2b.book_payment_entry(name)
+        return receipt
+
+    def _b2c_paid(self, jobs, user=PAYER) -> list:
+        """The create_b2c_request jobs the send queued, with Daraja's ack replaced, then each
+        payout's Result written as the B2C callback writes it, and its job run."""
+        from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import b2c_payment_disbursement as disb
+        from mpsa_suite.services import b2c_response_service
+
+        def ack(doc, callback_url):
+            frappe.db.set_value(REQ, doc.name, {"status": "Initiated", "conversation_id": f"AG_{doc.name}"})
+            return {"ResponseCode": "0"}
+
+        connector = type("Connector", (), {"send_b2c_request": staticmethod(ack)})()
+        requests = []
+        with _as(user), patch("mpsa_suite.services.b2c_request_service.get_b2c_connector", return_value=connector), \
+                patch("frappe.enqueue"):
+            for job in [c for c in jobs if c.args and c.args[0].endswith("create_b2c_request")]:
+                disb.create_b2c_request(job.kwargs["ref"], job.kwargs["settings"], job.kwargs["b2c_disbursement"])
+                requests.append(frappe.db.get_value(ROW, job.kwargs["ref"].name, "b2c_disbursement_request"))
+        for name in requests:
+            frappe.db.set_value(REQ, name, {
+                "status": "Paid", "result_code": "0", "result_desc": "ok",
+                "transaction_id": "T" + frappe.generate_hash(length=9).upper(),
+                "transaction_completed_datetime": now_datetime(), "receiver_public_name": f"{PHONE} - TEST CLAIMANT",
+                "utility_acct_avlbl_funds": 400000})
+            with patch("frappe.enqueue"):
+                b2c_response_service.update_b2c_reference_status(name, enqueue_next=True)
+        return requests
+
+    def _entry_on(self, doctype, name) -> frappe._dict:
+        """The submitted Payment Entry referencing the document."""
+        parent = frappe.db.get_value("Payment Entry Reference", {"reference_doctype": doctype, "reference_name": name,
+                                                                  "docstatus": 1}, "parent")
+        self.assertTrue(parent, f"no submitted Payment Entry on {name}")
+        return frappe.get_doc(PE, parent)
+
+    # ------------------------------------------------------------ B2C to the approved phone
+    def test_a_claim_is_paid_to_the_approved_phone_and_hrms_marks_it_paid(self):
+        claim = self._claim(self.phone_employee, 3000)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+        disbursement = frappe.get_doc(DISB, out["name"])
+        row = disbursement.references[0]
+        self.assertEqual((disbursement.docstatus, disbursement.owner, row.partyb, row.payee_account, row.allocated_amount),
+                         (0, HR, PHONE, self.phone_account, 3000))
+        jobs = self._send(DISB, out["name"])
+        self.assertEqual(len(self._b2c_paid(jobs)), 1)
+        entry = self._entry_on(EC, claim)
+        self.assertEqual((entry.party_type, entry.party, entry.paid_to), ("Employee", self.phone_employee, self.payable))
+        self.assertNotEqual(entry.paid_to, frappe.db.get_value("Company", t.COMPANY, "default_payable_account"))
+        claim_doc = frappe.get_doc(EC, claim)
+        self.assertEqual((flt(claim_doc.total_amount_reimbursed), claim_doc.status), (3000, "Paid"))
+        self.assertEqual(frappe.db.get_value(EMPACC, self.phone_account, "last_receiver_name"),
+                         f"{PHONE} - TEST CLAIMANT")  # the name check ran on the row's approved account
+        with _as(HR):
+            self.assertEqual(employee_documents.document_status(EC, claim)["left"], 0)
+            self.assertRaisesRegex(frappe.ValidationError, "has nothing left to pay", employee_documents.prepare_b2c,
+                                   EC, claim)
+
+    def test_with_the_phone_lock_on_an_unapproved_number_is_refused_and_nobody_pays_themselves(self):
+        frappe.db.set_single_value(SUITE, "b2c_approved_phones_only", 1)
+        frappe.clear_document_cache(SUITE, SUITE)
+        claim = self._claim(self.phone_employee, 2000)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+            doc = frappe.get_doc(DISB, out["name"])
+            doc.references[0].partyb = "0733000111"
+            self.assertRaisesRegex(frappe.ValidationError, "is not a phone approved", doc.save)
+        frappe.db.set_value("Employee", self.phone_employee, "user_id", PAYER)
+        self.assertRaisesRegex((frappe.PermissionError, frappe.ValidationError), "You are", self._send, DISB, out["name"])
+        self.assertEqual(frappe.db.get_value(DISB, out["name"], "docstatus"), 0)
+
+    # ------------------------------------------------------------ B2B to the approved bank account
+    def test_a_claim_is_paid_to_the_approved_bank_account_with_its_project(self):
+        from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+        # a site whose Payment Entries need a project (Trident's claims do)
+        make_property_setter(PE, "project", "reqd", 1, "Check", validate_fields_for_doctype=False)
+        claim = self._claim(self.bank_employee, 5000, project=self.project)
+        with _as(ACCOUNTS):
+            out = employee_documents.prepare_b2b(EC, claim)
+        request = frappe.get_doc(B2B, out["name"])
+        self.assertEqual((request.docstatus, request.employee, request.employee_mpesa_account, request.expense_claim,
+                          request.amount, request.receiver_shortcode), (
+            0, self.bank_employee, self.bank_account_of_employee, claim, 5000, "247247"))
+        self._send(B2B, out["name"])  # a Payer sends what its claim caps (no manager needed)
+        self.assertEqual(frappe.db.get_value(B2B, out["name"], "status"), "Initiated")
+        receipt = self._b2b_paid(out["name"])
+        entry = self._entry_on(EC, claim)
+        self.assertEqual((entry.docstatus, entry.party_type, entry.party, entry.paid_from, entry.paid_to,
+                          entry.reference_no, entry.project), (
+            1, "Employee", self.bank_employee, self.gl, self.payable, receipt, self.project))
+        self.assertEqual([(r.reference_doctype, r.reference_name, flt(r.allocated_amount)) for r in entry.references],
+                         [(EC, claim, 5000)])
+        self.assertEqual(frappe.db.get_value(EC, claim, ["total_amount_reimbursed", "status"]), (5000, "Paid"))
+        self.assertEqual(frappe.db.get_value(B2B, out["name"], "entry_status"), "Entry Made")
+
+    def test_an_advance_is_paid_by_b2b_and_hrms_counts_it_paid(self):
+        advance = self._advance(self.bank_employee, 8000)
+        with _as(APPROVER):
+            out = employee_documents.prepare_b2b(EA, advance)
+        self._send(B2B, out["name"])
+        self._b2b_paid(out["name"])
+        entry = self._entry_on(EA, advance)
+        self.assertEqual((entry.party, entry.paid_to), (self.bank_employee, self.advances))
+        self.assertEqual(frappe.db.get_value(EA, advance, ["paid_amount", "status"]), (8000, "Paid"))
+
+    def test_a_request_with_no_document_is_still_for_a_manager(self):
+        with _as(ACCOUNTS):
+            req = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
+                                  "remarks": "Allowance", "employee": self.bank_employee}).insert()
+        self.assertRaisesRegex((frappe.PermissionError, frappe.ValidationError), "paid by an M-Pesa Manager",
+                               self._send, B2B, req.name)
+
+    # ------------------------------------------------------------ the list, the cancel, who sees it
+    def test_pay_by_mpesa_on_the_list_prepares_one_b2c_batch_and_a_b2b_request(self):
+        _named(HR, "Accounts User")  # makes both kinds
+        phone_claim = self._claim(self.phone_employee, 1200)
+        bank_claim = self._claim(self.bank_employee, 2500)
+        with _as(HR):
+            out = employee_documents.prepare_bulk(EC, [phone_claim, bank_claim])
+        self.assertEqual(out["skipped"], [])
+        rows = frappe.get_all(ROW, filters={"parent": out["b2c"]}, fields=["reference_name", "allocated_amount"])
+        self.assertEqual([(r.reference_name, flt(r.allocated_amount)) for r in rows], [(phone_claim, 1200)])
+        self.assertEqual(frappe.db.get_value(B2B, out["b2b"][0], ["expense_claim", "docstatus"]), (bank_claim, 0))
+
+    def test_a_claim_is_not_cancelled_while_a_payout_of_it_is_paid_or_on_its_way(self):
+        claim = self._claim(self.bank_employee, 1800)
+        with _as(ACCOUNTS):
+            out = employee_documents.prepare_b2b(EC, claim)
+        self._send(B2B, out["name"])
+        with _as(HR):
+            self.assertRaisesRegex(frappe.ValidationError, f"cannot be cancelled while M-Pesa payouts of it are paid or "
+                                                           f"on their way: {out['name']}", frappe.get_doc(EC, claim).cancel)
+        # paid after its request was cancelled: Frappe's link check no longer holds the claim; this does
+        frappe.db.set_value(B2B, out["name"], {"docstatus": 2, "status": "Paid"})
+        with _as(HR):
+            self.assertRaisesRegex(frappe.ValidationError, out["name"], frappe.get_doc(EC, claim).cancel)
+
+    def test_claim_payouts_are_shown_to_accounts_but_salaries_are_not(self):
+        claim = self._claim(self.bank_employee, 900)
+        with _as(ACCOUNTS):
+            out = employee_documents.prepare_b2b(EC, claim)
+            salary = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 700,
+                                     "remarks": "Allowance", "employee": self.bank_employee}).insert()
+        with _as(CLERK):
+            self.assertFalse(salary_access.can_see_salaries())
+            self.assertTrue(frappe.has_permission(B2B, "read", doc=out["name"]))
+            self.assertFalse(frappe.has_permission(B2B, "read", doc=salary.name))
+            listed = frappe.get_list(B2B, filters={"name": ["in", [out["name"], salary.name]]}, pluck="name")
+            self.assertEqual(listed, [out["name"]])

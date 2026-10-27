@@ -265,6 +265,14 @@ ENDPOINTS = {
     "mpsa_suite.money_out.b2b.amount_left": ("Read the invoice / order", ("perm",)),
     "mpsa_suite.money_out.b2b.order_advances": ("Read the order", ("perm",)),
     "mpsa_suite.money_out.b2b.salary_left": ("Read the Salary Slip", ("perm",)),
+    # Expense Claims and Employee Advances (round 4): drafts only, sent with Send via M-Pesa
+    "mpsa_suite.money_out.employee_documents.document_status": ("Read the claim / advance", ("perm",)),
+    "mpsa_suite.money_out.employee_documents.prepare_b2c": (
+        "PREPARE_ROLES + read the claim / advance + create the disbursement", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.employee_documents.prepare_b2b": (
+        "PREPARE_ROLES + read the claim / advance + create the request", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.employee_documents.prepare_bulk": (
+        "PREPARE_ROLES + read each claim / advance + create the payouts", ("roles:PREPARE_ROLES", "perm")),
     "mpsa_suite.money_out.payroll.payroll_status": ("Read the Payroll Entry", ("perm",)),
     "mpsa_suite.money_out.payroll.from_payroll_entry": (
         "FINANCE_ROLES + read the Payroll Entry + create a schedule", ("roles:FINANCE_ROLES", "perm")),
@@ -384,7 +392,8 @@ def render_markdown(role_sets: dict) -> str:
                  "rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` "
                  "(`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in "
                  "hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on "
-                 "every site.")
+                 "every site. A payout of an Expense Claim or Employee Advance is not a salary (round 4): it is "
+                 "shown by the DocType rights above, to the Accounts roles who pay claims.")
     lines += ["", "### Report roles", ""]
     lines.append("| Report | Roles |")
     lines.append("|---|---|")

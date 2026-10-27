@@ -113,3 +113,14 @@ def after_install() -> None:
     from mpsa_suite.mpsa_suite.migrate import after_migrate
 
     after_migrate()  # also creates roles and M-Pesa Suite Settings
+    approved_phones_only_on_new_sites()
+
+
+def approved_phones_only_on_new_sites() -> None:
+    """A new site pays employees by B2C only to phones approved on their Employee M-Pesa Accounts.
+    An upgraded site keeps its setting (off until its employees' phones are approved): install-app
+    runs this, migrate does not."""
+    if frappe.db.exists("DocType", "M-Pesa Suite Settings") and frappe.get_meta("M-Pesa Suite Settings").has_field(
+        "b2c_approved_phones_only"
+    ):
+        frappe.db.set_single_value("M-Pesa Suite Settings", "b2c_approved_phones_only", 1)

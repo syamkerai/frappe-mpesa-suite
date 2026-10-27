@@ -38,6 +38,10 @@ class B2CDisbursementRequest(Document):
         from ....money_out.schedule import check_b2c_request
 
         check_b2c_request(self)  # a scheduled payout only from the job that makes it
+        from ....money_out import employee_documents
+
+        # made by hand: a claim or advance that may be paid, an employee only to an approved phone
+        employee_documents.check_b2c_request(self)
 
     def before_submit(self) -> None:
         require(PAYOUT_ROLES)  # submitting sends the money
@@ -177,6 +181,7 @@ class B2CDisbursementRequest(Document):
         """
         from ....money_out.owed import (
             DOC_FIELDS,
+            EMPLOYEE_DOC_FIELDS,
             SLIP,
             b2b_open,
             b2b_slip_open,
@@ -202,8 +207,8 @@ class B2CDisbursementRequest(Document):
                 paid = paid_without_entry(dt, dn)
                 elsewhere |= {o.parent for o in paid if mine not in (o.parents or [o.parent])}
                 others += paid
-            if dt in DOC_FIELDS or dt == SLIP:  # B2B requests for the document (same lock, locking read)
-                b2b = b2b_open(dt, dn, for_update=True) if dt in DOC_FIELDS else b2b_slip_open(dn, for_update=True)
+            if dt in DOC_FIELDS or dt in EMPLOYEE_DOC_FIELDS or dt == SLIP:  # B2B for it (same lock, locking read)
+                b2b = b2b_slip_open(dn, for_update=True) if dt == SLIP else b2b_open(dt, dn, for_update=True)
                 elsewhere |= {o.parent for o in b2b}
                 others += b2b
             if dt == SLIP:

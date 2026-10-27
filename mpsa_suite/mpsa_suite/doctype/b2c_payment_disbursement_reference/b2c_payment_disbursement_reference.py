@@ -64,6 +64,13 @@ class B2CPaymentDisbursementReference(Document):
 
             check_b2c_row(self)
 
+        from ....money_out import employee_documents
+
+        if not getattr(self, "claim_payee", None):  # a payee of the claim: money_out.claim_payees checks it
+            # a claim or advance that may be paid, of the row's employee; an employee only to an
+            # approved phone (M-Pesa Suite Settings)
+            employee_documents.check_b2c_row(self)
+
 
 def b2c_amount_problem(amount) -> str | None:
     """Why Daraja B2C would refuse ``amount`` (whole shillings from 10 to 250,000), or None.

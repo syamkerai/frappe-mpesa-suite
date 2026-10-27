@@ -26,6 +26,15 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
         party_type = b2c_disbursement_ref.party_type
         party_account = b2c_disbursement.paid_to
         party = frappe.db.get_value(party_type, b2c_disbursement_ref.party, "name")
+        # An Expense Claim or Employee Advance: its own employee and Payable (or Advance) Account,
+        # which ERPNext and HRMS check against the reference, whoever M-Pesa paid
+        from mpsa_suite.money_out.employee_documents import booking_party
+
+        booking = booking_party(
+            b2c_disbursement_ref.reference_doctype, b2c_disbursement_ref.reference_name
+        )
+        if booking:
+            party_type, party, party_account = "Employee", booking.employee, booking.account
         amount = b2c_disbursement_ref.allocated_amount
         company = b2c_disbursement.company
         currency = frappe.db.get_value("Company", company, "default_currency")

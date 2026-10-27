@@ -26,7 +26,7 @@ PAID = {
     ),
     "B2C Payment Disbursement": (
         ("mode_of_payment",),
-        ("references", ("party", "partyb", "allocated_amount", "reference_doctype", "reference_name")),
+        ("references", ("party", "partyb", "allocated_amount", "reference_doctype", "reference_name", "payee_account")),
     ),
     "B2C Disbursement Request": (
         ("amount", "phone_number", "mpesa_settings", "reference_doctype", "reference_name", "party_type", "party"),
