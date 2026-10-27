@@ -234,6 +234,10 @@ class B2CPaymentDisbursement(Document):
                     bank = slip_bank_problem(name)
                     if bank:
                         frappe.throw(bank, title=_("Paid by Bank?"))
+                from ....money_out.claim_payees import others_taken_off
+
+                # an Expense Claim paying its payees has several payouts at once: taken off what it owes
+                others, paying = others_taken_off(doctype, name, others)
                 if others:
                     frappe.throw(
                         _("{0} {1} already has a payout in progress or awaiting accounting: {2}").format(
@@ -247,6 +251,7 @@ class B2CPaymentDisbursement(Document):
                 # planned on a payment schedule and not sent yet (a line Pay Selected is paying now
                 # is no longer planned): taken off, as owed.left_to_pay does
                 advances += planned_lines(doctype, name, for_update=True)
+                advances += paying  # money_out.claim_payees.others_taken_off
                 owed = current_outstanding(doctype, name, for_update=True)  # the document row last (R4)
                 # an invoice made from the order may be paid already (B2B, bank): its advance_paid
                 # does not show that

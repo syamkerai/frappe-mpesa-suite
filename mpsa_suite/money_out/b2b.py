@@ -308,6 +308,9 @@ def validate_request(doc, at_submit: bool = False) -> None:
     if is_employee(doc):
         _validate_employee_request(doc, at_submit)
         return
+    from . import claim_payees
+
+    claim_payees.check_supplier_request(doc)  # an Expense Claim's payee is paid on the claim, never here
     if salary_slip(doc):
         frappe.throw("A Salary Slip is paid to its employee: pick the Employee.")
     if owed.employee_document_of(doc)[0]:
@@ -568,6 +571,9 @@ def check_ready_to_send(doc) -> None:
     if is_employee(doc):
         _check_employee_ready(doc)
         return
+    from . import claim_payees
+
+    claim_payees.check_supplier_request(doc)  # an Expense Claim's payee is paid on the claim, never here
     supplier_accounts.check_before_send(doc)
     if not doc.mpesa_settings:
         frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")
