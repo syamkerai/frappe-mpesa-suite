@@ -83,6 +83,17 @@
   "schedule_maker_checker",
   "column_break_schedule",
   "send_interval_seconds",
+  "payout_safety_section",
+  "refuse_administrator_payouts",
+  "column_break_payout_safety",
+  "b2c_approved_phones_only",
+  "claim_payees_section",
+  "claim_payable_workflow_states",
+  "allow_claim_payees",
+  "column_break_claim_payees",
+  "claim_payee_max_amount",
+  "claim_payee_daily_cap",
+  "suggest_supplier_after",
   "accounts_tab",
   "accounts_intro",
   "statement_import_section",
@@ -615,11 +626,78 @@
    "label": "Seconds Between Scheduled Payments",
    "default": "2",
    "description": "After Confirm, the payments are sent to M-Pesa one at a time, this many seconds apart."
+  },
+  {
+   "fieldname": "payout_safety_section",
+   "fieldtype": "Section Break",
+   "label": "Payout Safety"
+  },
+  {
+   "fieldname": "refuse_administrator_payouts",
+   "fieldtype": "Check",
+   "label": "Administrator May Not Send Payouts or Approve Accounts",
+   "default": "1",
+   "description": "On: sending a payout (a direct payout, Pay Selected, a retry) and approving a supplier or employee M-Pesa account need a person's own login, so every payout and approval names who did it. The shared Administrator login is refused. Installing, migrating and patches are not affected. Turn off only on a test site."
+  },
+  {
+   "fieldname": "column_break_payout_safety",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "b2c_approved_phones_only",
+   "fieldtype": "Check",
+   "label": "Pay Employees by B2C Only to Approved Phones",
+   "default": "0",
+   "description": "On: a B2C payout to an employee goes only to a phone approved on one of the employee's Employee M-Pesa Accounts, never to a number typed on the payout or taken from the Employee record. Turn on once your employees' phones are approved."
+  },
+  {
+   "fieldname": "claim_payees_section",
+   "fieldtype": "Section Break",
+   "label": "Expense Claim Payees"
+  },
+  {
+   "fieldname": "claim_payable_workflow_states",
+   "fieldtype": "Small Text",
+   "label": "Expense Claim Workflow States That May Be Paid",
+   "description": "One per line; blank = any submitted, approved claim. Only for sites that run a Workflow on Expense Claim: a claim is paid by M-Pesa only while it is in one of these states."
+  },
+  {
+   "fieldname": "allow_claim_payees",
+   "fieldtype": "Check",
+   "label": "Allow Paying Merchants and Casual Payees from Expense Claims",
+   "default": "0",
+   "description": "On: an approved Expense Claim can pay merchants (till, paybill, bank account) and casual payees (phones) directly, instead of reimbursing the employee who paid them. These destinations are not approved M-Pesa accounts, so the limits beside this apply."
+  },
+  {
+   "fieldname": "column_break_claim_payees",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "claim_payee_max_amount",
+   "fieldtype": "Currency",
+   "label": "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap)",
+   "default": "0",
+   "depends_on": "allow_claim_payees"
+  },
+  {
+   "fieldname": "claim_payee_daily_cap",
+   "fieldtype": "Currency",
+   "label": "Most per Day to Such Payees, per Company (0 = no cap)",
+   "default": "0",
+   "depends_on": "allow_claim_payees"
+  },
+  {
+   "fieldname": "suggest_supplier_after",
+   "fieldtype": "Int",
+   "label": "Suggest an Approved Supplier Account After This Many Payments to the Same Till/Paybill",
+   "default": "3",
+   "depends_on": "allow_claim_payees",
+   "description": "A till or paybill paid this often from Expense Claims is suggested to Accounts as a Supplier M-Pesa Account, approved once and then paid like any supplier. 0 = never suggest."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-23 22:00:00.000000",
+ "modified": "2026-10-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

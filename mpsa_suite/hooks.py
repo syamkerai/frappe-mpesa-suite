@@ -38,7 +38,8 @@ add_to_apps_screen = [
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
-app_include_js = "/assets/mpsa_suite/js/utils.js"
+# mpsa_send.js: the "Send via M-Pesa" / "Approve" confirmation every payout and payee account form uses
+app_include_js = ["/assets/mpsa_suite/js/utils.js", "/assets/mpsa_suite/js/mpsa_send.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
@@ -69,8 +70,20 @@ doctype_js = {
     # HRMS only: a form that does not exist on the site never loads its script
     "Payroll Entry": "public/js/payroll_entry.js",
     "Employee": "public/js/employee.js",
+    "Expense Claim": "public/js/expense_claim.js",
+    "Employee Advance": "public/js/employee_advance.js",
+    "Salary Slip": "public/js/salary_slip.js",
+    "Sales Order": "public/js/sales_order.js",
+    "Customer": "public/js/customer.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+# Loaded after the DocType's own list script (HRMS's, where it has one): each extends
+# frappe.listview_settings[doctype], never replaces it.
+doctype_list_js = {
+    "Expense Claim": "public/js/expense_claim_list.js",
+    "Employee Advance": "public/js/employee_advance_list.js",
+    "Salary Slip": "public/js/salary_slip_list.js",
+}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
@@ -78,6 +91,9 @@ doctype_js = {
 # ------------------
 # include app icons in desk
 # app_include_icons = "mpsa_suite/public/icons.svg"
+
+# What the desk may offer this user (bootinfo.mpsa): buttons show only to who the server accepts
+boot_session = "mpsa_suite.boot.boot_session"
 
 # Prepare ERPNext test data the version-appropriate way (v15 setup wizard / v16 bootstrap)
 before_tests = "mpsa_suite.money_in.testing.before_tests"
@@ -213,6 +229,13 @@ doc_events = {
     "Salary Slip": {
         "before_cancel": "mpsa_suite.money_out.payroll.slip_before_cancel",
     },
+    # HRMS: no cancel while an M-Pesa payout of the claim or advance is paid or on its way
+    "Expense Claim": {
+        "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
+    },
+    "Employee Advance": {
+        "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
+    },
 }
 
 # Scheduled Tasks
@@ -265,6 +288,19 @@ override_doctype_dashboards = {
     "Purchase Order": "mpsa_suite.money_out.document_dashboards.get_data",
     "Employee": "mpsa_suite.money_out.payroll.get_employee_dashboard_data",
     "Payroll Entry": "mpsa_suite.money_out.payroll.get_dashboard_data",
+    # Frappe passes only ``data``, not the DocType: one function per DocType (money_out.connections)
+    "Expense Claim": "mpsa_suite.money_out.connections.get_expense_claim_data",
+    "Employee Advance": "mpsa_suite.money_out.connections.get_employee_advance_data",
+    "Salary Slip": "mpsa_suite.money_out.connections.get_salary_slip_data",
+    "Sales Order": "mpsa_suite.money_out.connections.get_sales_order_data",
+    "Sales Invoice": "mpsa_suite.money_out.connections.get_sales_invoice_data",
+    "Customer": "mpsa_suite.money_out.connections.get_customer_data",
+    "Payment Entry": "mpsa_suite.money_out.connections.get_payment_entry_data",
+    "Journal Entry": "mpsa_suite.money_out.connections.get_journal_entry_data",
+    "Payment Request": "mpsa_suite.money_out.connections.get_payment_request_data",
+    "POS Invoice": "mpsa_suite.money_out.connections.get_pos_invoice_data",
+    "Bank Transaction": "mpsa_suite.money_out.connections.get_bank_transaction_data",
+    "Bank Account": "mpsa_suite.money_out.connections.get_bank_account_data",
 }
 
 # exempt linked doctypes from being automatically cancelled

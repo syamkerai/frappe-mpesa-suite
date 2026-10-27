@@ -14,11 +14,24 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, flt
 
-# What is paid and where, per DocType: (fields, (child table, row fields)).
+# Who is paid, how much, from where and to where, and for which document, per DocType:
+# (fields, (child table, row fields)). A field the site does not have (an HRMS link before the
+# migrate makes it) reads as empty on both sides.
 PAID = {
-    "Mpesa B2B Payment Request": (("amount", "mpesa_settings", "supplier", "supplier_mpesa_account"), None),
-    "B2C Payment Disbursement": (("mode_of_payment",), ("references", ("party", "partyb", "allocated_amount"))),
-    "B2C Disbursement Request": (("amount", "phone_number", "mpesa_settings"), None),
+    "Mpesa B2B Payment Request": (
+        ("amount", "mpesa_settings", "supplier", "supplier_mpesa_account", "employee", "employee_mpesa_account",
+         "salary_slip", "purchase_invoice", "purchase_order", "expense_claim", "employee_advance",
+         "receiver_shortcode", "account_reference", "command_id"),
+        None,
+    ),
+    "B2C Payment Disbursement": (
+        ("mode_of_payment",),
+        ("references", ("party", "partyb", "allocated_amount", "reference_doctype", "reference_name")),
+    ),
+    "B2C Disbursement Request": (
+        ("amount", "phone_number", "mpesa_settings", "reference_doctype", "reference_name", "party_type", "party"),
+        None,
+    ),
 }
 NUMERIC = ("Currency", "Float", "Int", "Percent")
 

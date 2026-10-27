@@ -9,6 +9,9 @@ Who holds what, per DocType and per endpoint: docs/ROLES_AND_PERMISSIONS.md
 """
 
 import frappe
+from frappe.utils import cint
+
+SUITE_SETTINGS = "M-Pesa Suite Settings"
 
 # Send STK prompts / check their status.
 COLLECT_ROLES = (
@@ -27,6 +30,17 @@ FINANCE_ROLES = (
     "M-Pesa Manager",
     "Accounts Manager",
     "Accounts User",
+)
+
+# Prepare a payout (a draft B2B request or B2C payout, a payment schedule line) from a document
+# they can read: Accounts for invoices and orders, HR for claims, advances and salaries. Only
+# PAYOUT_ROLES send it.
+PREPARE_ROLES = (
+    "M-Pesa Manager",
+    "Accounts Manager",
+    "Accounts User",
+    "HR Manager",
+    "HR User",
 )
 
 # Send money: submit B2C payouts, B2B payments and reversals, retry them, Pay Selected.
@@ -74,6 +88,36 @@ def require(roles) -> None:
     if set(roles).isdisjoint(frappe.get_roles()):
         frappe.throw(
             frappe._("Not permitted: this needs one of the roles {0}.").format(", ".join(roles)),
+            frappe.PermissionError,
+        )
+
+
+def administrator_refused(user: str | None = None) -> bool:
+    """True when ``user`` is the shared Administrator login and M-Pesa Suite Settings refuses it
+    for sending payouts and approving accounts (on by default; a site not yet migrated reads it as
+    on). Installing, migrating and patches are never refused. Bench tests are: they send and
+    approve as named users holding the right roles."""
+    if (user or frappe.session.user) != "Administrator":
+        return False
+    if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
+        return False
+    try:
+        value = frappe.get_cached_doc(SUITE_SETTINGS).get("refuse_administrator_payouts")
+    except frappe.DoesNotExistError:
+        return True
+    return True if value in (None, "") else bool(cint(value))
+
+
+def require_named_user() -> None:
+    """Throw PermissionError when the shared Administrator login sends a payout or approves a
+    payee account (``administrator_refused``), so every payout and approval names a person.
+
+    Call it at the person's own step (the send, Pay Selected and its confirm, a retry, an
+    approval), not in the background jobs the scheduler runs as Administrator.
+    """
+    if administrator_refused():
+        frappe.throw(
+            frappe._("Use your own login to send M-Pesa payouts or approve accounts: the shared Administrator login is not allowed (M-Pesa Suite Settings)."),
             frappe.PermissionError,
         )
 

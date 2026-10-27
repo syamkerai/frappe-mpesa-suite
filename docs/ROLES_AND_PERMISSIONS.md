@@ -156,6 +156,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | `CONFIG_ROLES` | System Manager, M-Pesa Manager |
 | `FINANCE_ROLES` | System Manager, M-Pesa Manager, Accounts Manager, Accounts User |
 | `PAYOUT_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer |
+| `PREPARE_ROLES` | M-Pesa Manager, Accounts Manager, Accounts User, HR Manager, HR User |
 | `SALARY_ROLES` | System Manager, M-Pesa Manager, M-Pesa Payer, HR Manager, HR User |
 
 ### Salary payouts (decision D4)

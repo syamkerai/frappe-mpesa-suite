@@ -772,7 +772,8 @@ def test_the_salary_fields_hrms_and_erpnext_get(env, monkeypatch):
     monkeypatch.setattr(migrate, "create_fields", lambda fields: made.append(fields))
     migrate.create_custom_hrms_fields()
     (hrms,) = made
-    assert [f["fieldname"] for f in hrms["Mpesa B2B Payment Request"]] == ["salary_slip", "payroll_entry"]
+    assert [f["fieldname"] for f in hrms["Mpesa B2B Payment Request"]] == [
+        "salary_slip", "payroll_entry", "expense_claim", "employee_advance"]
     assert hrms["Mpesa B2B Payment Request"][0]["options"] == "Salary Slip"
     made.clear()
     migrate.create_custom_erpnext_fields()

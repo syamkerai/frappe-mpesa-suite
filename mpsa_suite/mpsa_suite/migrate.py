@@ -82,6 +82,28 @@ def create_custom_hrms_fields():
                 "read_only": 1,
                 "search_index": 1,
             },
+            # A B2B to an employee's account that pays an Expense Claim or an Employee Advance
+            # (money_out.b2b, employee_documents): one of the slip, the claim and the advance.
+            {
+                "fieldname": "expense_claim",
+                "fieldtype": "Link",
+                "label": "Expense Claim",
+                "options": "Expense Claim",
+                "insert_after": "payroll_entry",
+                "depends_on": "eval:doc.employee && !doc.salary_slip && !doc.employee_advance",
+                "search_index": 1,
+                "description": "Optional. The Expense Claim this pays: it cannot exceed what the claim has left to pay.",
+            },
+            {
+                "fieldname": "employee_advance",
+                "fieldtype": "Link",
+                "label": "Employee Advance",
+                "options": "Employee Advance",
+                "insert_after": "expense_claim",
+                "depends_on": "eval:doc.employee && !doc.salary_slip && !doc.expense_claim",
+                "search_index": 1,
+                "description": "Optional. The Employee Advance this pays: it cannot exceed what the advance has left to pay.",
+            },
         ],
     }
     create_fields(custom_fields)
