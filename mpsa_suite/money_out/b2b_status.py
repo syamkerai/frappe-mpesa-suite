@@ -17,7 +17,8 @@ payout's receipt, its own ConversationID or OriginatorConversationID is the payo
 paid the payout's receiver shortcode. Then only blank fields are filled (what the Result stated
 is kept; an estimated time is replaced), the receiver name is checked against the approved
 account and the charge gets its statement line. A request whose Result never came (Initiated,
-Unknown) is settled by the answer exactly as its Result would have settled it.
+Unknown) is settled by the answer exactly as its Result would have settled it; a late Paid
+Result still wins over an answer that made it Failed (b2b._record_result).
 """
 
 import re
@@ -128,27 +129,43 @@ def migrated() -> bool:
         "completed_time_estimated")
 
 
-def may_ask(name: str) -> bool:
-    """Whether Safaricom is (still) asked about a Paid request: something is missing, fewer than
-    MAX_QUERIES were made, the last one QUERY_GAP_MINUTES ago or more, no matching answer came
-    yet, and the payout is less than ASK_WITHIN_HOURS old."""
+def paid_at(row):
+    """When the payout was paid (its completed time, else when its send began, else its last change):
+    a request drafted days before it was sent is still a new payment."""
+    return get_datetime(row.get("trans_completed_time") or row.get("send_started_on") or row.get("modified")
+                        or row.get("creation"))
+
+
+def _queries_while_open(name: str):
+    """The queries made about a Paid request Safaricom is still asked about, else None: something is
+    missing, fewer than MAX_QUERIES were made, none answered Paid, and it was paid less than
+    ASK_WITHIN_HOURS ago."""
     if not migrated():
-        return False
+        return None
     row = frappe.db.get_value(
         B2B_DOCTYPE,
         name,
-        ["name", "docstatus", "status", "transaction_id", "creation", "mpesa_settings", "receiver_public_name",
-         "debit_party_charges", "trans_completed_time", "completed_time_estimated"],
+        ["name", "docstatus", "status", "transaction_id", "creation", "modified", "send_started_on", "mpesa_settings",
+         "receiver_public_name", "debit_party_charges", "trans_completed_time", "completed_time_estimated"],
         as_dict=True,
     )
     if (not row or row.docstatus not in (1, 2) or row.status != "Paid" or not row.transaction_id
             or not row.mpesa_settings or not missing(row)):
-        return False
-    if get_datetime(row.creation) < add_to_date(now_datetime(), hours=-ASK_WITHIN_HOURS):
-        return False
+        return None
+    if paid_at(row) < add_to_date(now_datetime(), hours=-ASK_WITHIN_HOURS):
+        return None
     queries = frappe.get_all(QUERY_DOCTYPE, filters={"b2b_request": name}, fields=["name", "creation", "outcome"],
                              order_by="creation desc")
     if len(queries) >= MAX_QUERIES or any(q.outcome == "Paid" for q in queries):
+        return None
+    return queries
+
+
+def may_ask(name: str) -> bool:
+    """Whether Safaricom is asked about a Paid request now: it is still open to asking
+    (``_queries_while_open``) and the last query was QUERY_GAP_MINUTES ago or more."""
+    queries = _queries_while_open(name)
+    if queries is None:
         return False
     newest = max((get_datetime(q.creation) for q in queries), default=None)
     return not newest or newest <= add_to_date(now_datetime(), minutes=-QUERY_GAP_MINUTES)
@@ -156,8 +173,8 @@ def may_ask(name: str) -> bool:
 
 def still_asking(name: str) -> bool:
     """True while a status answer may still give what the request lacks (a query is out, or the
-    sweep will ask again): the charge line and the balance check wait for it."""
-    if may_ask(name):
+    sweep will ask again, however soon): the charge line and the balance check wait for it."""
+    if _queries_while_open(name) is not None:
         return True
     return migrated() and bool(frappe.db.exists(QUERY_DOCTYPE, {
         "b2b_request": name,
@@ -173,8 +190,9 @@ def sweep(limit: int = 20) -> None:
         return  # not migrated yet
     names = frappe.get_all(
         B2B_DOCTYPE,
+        # paid in the window, whenever it was drafted (a Paid Result always leaves a completed time)
         filters={"docstatus": ["in", [1, 2]], "status": "Paid", "transaction_id": ["is", "set"],
-                 "creation": [">=", add_to_date(now_datetime(), hours=-ASK_WITHIN_HOURS)]},
+                 "trans_completed_time": [">=", add_to_date(now_datetime(), hours=-ASK_WITHIN_HOURS)]},
         or_filters={"receiver_public_name": ["is", "not set"], "debit_party_charges": ["is", "not set"],
                     "trans_completed_time": ["is", "not set"], "completed_time_estimated": 1},
         pluck="name",
@@ -329,6 +347,7 @@ def settle(doc, query, outcome: str, values: dict) -> None:
     else:
         update = {
             "status": "Failed",
+            # a Paid Result that comes after all still wins, and staff are told (b2b._record_result)
             "result_code": f"TS:{values.get('TransactionStatus') or 'Failed'}"[:140],
             "result_desc": f"Transaction Status query {query.name}: {values.get('TransactionStatus')}",
         }

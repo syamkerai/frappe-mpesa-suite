@@ -59,9 +59,11 @@ def every_two_minutes() -> None:
 
 
 def _status_results() -> None:
+    from ..money_out.b2c_status import retry_waiting_results
     from ..mpsa_suite.api.m_pesa_api import retry_waiting_status_results
 
     retry_waiting_status_results()
+    retry_waiting_results()  # payout status queries (B2C, B2B) whose result came before the ack
 
 
 def every_five_minutes() -> None:

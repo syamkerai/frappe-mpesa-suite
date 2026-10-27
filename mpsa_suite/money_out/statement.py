@@ -12,8 +12,8 @@ line; "CHG-<receipt>" on the charge line and as its Journal Entry's Cheque No), 
 side makes one first, the other finds it and never makes a second.
 
 The charge: a B2B result states it (DebitPartyCharges); a till's (Buy Goods) does not, and then
-it is the fall in the Working balance since the balance before, until a Transaction Status
-query states it (money_out.b2b_status). A B2C result does not; it carries
+a Transaction Status query states it (money_out.b2b_status); only when no query can is it the
+fall in the Working balance since the balance before. A B2C result does not; it carries
 the wallet balances left after the payout. Daraja's docs put charges on the Charges Paid
 account, but on Astral's shortcode that stays 0 and the charge comes off the Utility
 balance, so the two are added. The charge booked is the B2C Charge Bands setting
@@ -321,21 +321,23 @@ def balance_charge(p) -> float | None:
 
 
 def unstated_b2b_charge(p) -> float | None:
-    """A B2B whose Result stated no charge (a till payment): what the Working balances show, else
-    None. Logged once in the Match Log ("charge not stated") when no status query can give it."""
+    """A B2B whose Result stated no charge (a till payment). None while a status query may still
+    state it: the status answer books it (b2b_status.fill), else the sweep looks again. Then what
+    the Working balances show, else None, logged once in the Match Log ("charge not stated")."""
+    from .b2b_status import still_asking
+
+    if still_asking(p.name):
+        return None  # Safaricom's own figure: a portal payment in between would skew the balance's
     seen = b2b_balance_charge(p)
     if seen is not None:
         return seen
-    from .b2b_status import still_asking
-
-    if not still_asking(p.name):
-        log_match(
-            "Ambiguous", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
-            receipt=p.receipt, amount=p.amount,
-            details=f"Charge not stated: Safaricom did not state the charge on {p.receipt}, its status query did not "
-            "give it and the Working balance cannot show it. No charge was booked: take it from the M-Pesa "
-            "statement and book it by hand.",
-        )
+    log_match(
+        "Ambiguous", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+        receipt=p.receipt, amount=p.amount,
+        details=f"Charge not stated: Safaricom did not state the charge on {p.receipt}, its status query did not "
+        "give it and the Working balance cannot show it. No charge was booked: take it from the M-Pesa "
+        "statement and book it by hand.",
+    )
     return None
 
 
@@ -361,16 +363,17 @@ def b2b_balance_charge(p) -> float | None:
         if cstr(r.business_shortcode).strip() == shortcode
     ] or [p.mpesa_settings]
     since = p.completed - BALANCE_WINDOW
-    # A B2B still in flight may have moved the wallet before this one.
+    # A B2B still in flight may have moved the wallet before this one: sent within the window
+    # (its ack or its send marker), however long before that it was drafted.
     if frappe.get_all(
         B2B,
         filters=[
             [B2B, "mpesa_settings", "in", wallet],
             [B2B, "docstatus", "=", 1],
             [B2B, "status", "in", ("Initiated", "Unknown")],
-            [B2B, "creation", ">=", since],
             [B2B, "creation", "<=", p.completed],
         ],
+        or_filters=[[B2B, "modified", ">=", since], [B2B, "send_started_on", ">=", since]],
         pluck="name",
         limit=1,
     ):
@@ -474,8 +477,19 @@ def feed(doctype: str, name: str) -> str | None:
             charge_line = find_existing(bank_account, key, withdrawal=True)  # one Astral's feed made
         if charge_line:
             _link(p, "charge_bank_transaction", charge_line)
-            _link(p, "mpesa_charge", charge or flt(frappe.db.get_value(BT, charge_line, "withdrawal")))
-            charge_entry(p, bank_account, charge_line, charge)
+            booked = flt(frappe.db.get_value(BT, charge_line, "withdrawal"))
+            if charge and abs(booked - flt(charge)) > 0.005:
+                # a line made earlier (from the balances, or by Astral's feed) says otherwise: the
+                # line, its entry and the charge on the payout stay as they are for staff to correct
+                log_match(
+                    "Ambiguous", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
+                    receipt=p.receipt, amount=flt(charge),
+                    details=f"Charge line {charge_line} says {booked}, but the charge on {p.receipt} is {flt(charge)}. "
+                    "Nothing was changed: correct the charge line and its Journal Entry by hand.",
+                )
+            else:
+                _link(p, "mpesa_charge", charge or booked)
+                charge_entry(p, bank_account, charge_line, charge)
 
     if reconciling():
         gl = frappe.db.get_value("Bank Account", bank_account, "account")

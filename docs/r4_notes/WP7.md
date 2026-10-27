@@ -16,13 +16,16 @@ notes in `docs/OPERATIONS_NOTES.md`. F8 was already right.
   `Working Account|KES|1894.00|1894.00` (B2B always pays from Working). The available-funds figure
   and the charge then use it. The Integration Request keeps the raw text. Helpers:
   `daraja/money_out.basic_amount` and `b2b_balance_text`.
-- **F2.2, a charge Safaricom did not state.** A B2B with blank `DebitPartyCharges` gets its charge
-  from the fall in the Working balance: the Paid B2B just before (or a later Working Account
-  Balance) less this Result's balance less the amount. Live: 1,947 to 1,894 for 50 is 3. Same
-  sanity rules as B2C: no other B2B in flight or without a balance in between, a charge from 1 to
-  100 in whole shillings. A charge that is stated, including a stated 0, still wins. When neither
-  the balance nor a status query can give it, the Mpesa Match Log gets one row ("Charge not
-  stated"). The statement sweep keeps looking for a blank charge; it skips only a stated 0.
+- **F2.2, a charge Safaricom did not state.** A B2B with blank `DebitPartyCharges` waits while a
+  status query may still state the charge (F2.4). Once no query can, it gets its charge from the
+  fall in the Working balance: the Paid B2B just before (or a later Working Account Balance) less
+  this Result's balance less the amount. Live: 1,947 to 1,894 for 50 is 3. Same sanity rules as
+  B2C: no other B2B in flight (sent within the day, whenever it was drafted) or without a balance
+  in between, a charge from 1 to 100 in whole shillings. A charge that is stated, including a
+  stated 0, still wins. When neither the balance nor a status query can give it, the Mpesa Match
+  Log gets one row ("Charge not stated"). The statement sweep keeps looking for a blank charge; it
+  skips only a stated 0. A charge line that already exists with another amount is never changed:
+  the Match Log gets a row and staff correct the line and its Journal Entry.
 - **F2.3, completed time.** A Result with no `TransCompletedTime` (a till) is dated when it arrived.
   It is flagged with the new hidden field `completed_time_estimated` on Mpesa B2B Payment Request
   (a server field, so a save after submit cannot change it). The status query replaces it with
@@ -30,7 +33,8 @@ notes in `docs/OPERATIONS_NOTES.md`. F8 was already right.
 - **F2.4, Transaction Status for B2B** (new `money_out/b2b_status.py`):
   - What starts a query: a Paid Result with no receiver name or no charge queries its receipt from
     a job (`ask_later`). A 5-minute sweep (`money_in.events.every_five_minutes`) asks again while
-    something is missing: at most 3 queries, 10 minutes apart, within 48 hours. There is also a
+    something is missing: at most 3 queries, 10 minutes apart, within 48 hours of the payment
+    (not of the draft: with maker-checker a request may be sent days after it was made). There is also a
     **Check Status** button on Paid, Initiated and Unknown requests, through the new endpoint
     `money_out.api.check_b2b_status`, which needs a PAYOUT or ADMIN role and read on the request.
   - The query is a **Mpesa B2C Status Query**. It now has `b2b_request`, `debit_party_charges` and
@@ -45,7 +49,10 @@ notes in `docs/OPERATIONS_NOTES.md`. F8 was already right.
     blank or estimated). Then the receiver-name check runs, through the existing
     `record_receiver_name`, and the charge line and charge Journal Entry are made.
   - A request whose Result never came (Initiated or Unknown) is settled by the answer exactly as
-    its Result would have been: Paid and booked, or Failed. A late real Result is then ignored.
+    its Result would have been: Paid and booked, or Failed. A late real Result is then ignored,
+    except a Paid Result after an answer made the request Failed: Safaricom's Result is the
+    record of the payment, so the request becomes Paid and is booked, with an Error Log, a comment
+    and an alert to Notify Role ("check that what it paid was not paid again").
 - **F4.** A B2C Payment Disbursement row whose document owes nothing (paid, or not submitted) is
   refused at save: "Row #n: <doctype> <name> has nothing left to pay." An amended copy of a row
   that was sent already still saves.
@@ -70,7 +77,9 @@ notes in `docs/OPERATIONS_NOTES.md`. F8 was already right.
     dialog open.
   - Payout receipts: a receipt that belongs to a B2C or B2B payout is answered with the payout's
     status, receiver, charge and time, and a B2B gets what its Result left out. It is no longer
-    rejected or logged as an error.
+    rejected or logged as an error. A salary payout's receipt (to an employee, or for a Salary
+    Slip) asked about by someone who may not see salaries is answered only "This receipt is an
+    ERP salary payout.", with no amount, name or document; the answer is still applied.
   - Money the ERP did not send: a receipt paid from our shortcode with no ERP payout is flagged
     as a warning and in the Mpesa Match Log. This is how the KES 100 portal payment would have
     shown.
@@ -81,7 +90,11 @@ notes in `docs/OPERATIONS_NOTES.md`. F8 was already right.
     stays Queued and is tried again every two minutes for 10 minutes
     (`m_pesa_api.retry_waiting_status_results`, from `money_in.events.every_two_minutes`).
     `b2c_status.send_query` (B2C and B2B) commits the query before sending it and again right
-    after the ack. `results.find_request` matches by IDs read again under the lock.
+    after the ack. `results.find_request` matches by IDs read again under the lock. A payout
+    status query's result (B2C, B2B) that comes while its query is still Queued without an ack is
+    kept the same way (an Integration Request "Mpesa Status Result (waiting for its ack)") and
+    handled once the ack is recorded (`b2c_status.retry_waiting_results`, every two minutes),
+    else rejected after 10 minutes.
   - Mpesa Settings form: its realtime listeners are no longer added again on every refresh.
 - **F12, balance snapshots.**
   - New fields on Mpesa Balance Snapshot: `available`, `reserved`, `previous_snapshot`,
@@ -123,10 +136,30 @@ Role, B2C Charge Bands and the Mpesa Settings Cost Center.
   not flagged as estimated.
 - Status queries already sent before the release have no `ref` on their ResultURL. Their results
   are still matched by the ack's ConversationID, as before.
-- The 5-minute B2B status sweep asks only about payouts Paid in the last 48 hours. Older till
-  payments with a blank charge are logged once in the Mpesa Match Log for Accounts.
+- The 5-minute B2B status sweep asks only about payouts Paid in the last 48 hours (by their
+  completed time). Older till payments with a blank charge are logged once in the Mpesa Match Log
+  for Accounts.
 - Other work packages: `salary_entries.build` (schedule salary Journal Entries) still uses the
   Payroll Entry's cost center, else the company default. It does not use `payout_cost_center` yet.
+
+## Review fixes (branch r4-fix-wp7)
+- Salary data (decision D4): a status query about a B2B payout to an employee is salary data, in
+  the single-document check and in lists, reports and exports (`salary_access`). Before, only a
+  query about a salary B2C payout was hidden.
+- `b2b_status.still_asking` is true for the whole time the sweep may still ask (fewer than 3
+  queries, none answered Paid, within 48 hours of the payment, or a query out), not only when a
+  query may be sent this minute. The charge line and the balance check waited only for the first
+  query before.
+- A blank B2B charge is taken from the Working balance only once no status query can state it
+  (see F2.2). An existing charge line with another amount is logged, not overwritten.
+- The 48-hour window runs from the payment (`trans_completed_time`), and a B2B counts as in flight
+  for the balance charge by when it was sent (`modified`, `send_started_on`), not when it was
+  drafted.
+- A Paid Result after a status answer made the request Failed is recorded and booked, and staff
+  are told (see F2.4).
+- A payout status result that comes before its query's ack is kept and retried (see F11).
+- The Mpesa Settings answer for a salary payout's receipt tells only that it is one, to who may
+  not see salaries (see F11).
 
 ## Tests
 - Unit, 1797 passed (baseline 1724):
@@ -138,6 +171,11 @@ Role, B2C Charge Bands and the Mpesa Settings Cost Center.
   - `fake_frappe.FakeDB` gained a no-op `commit`;
   - `test_payout_statement.py` now expects a blank B2B charge to be looked for, and only a stated
     0 to give no charge line. `test_fix2_b2c2.py` checks both salary JE rows' cost center.
+  - review fixes, 2265 passed (2252 at c507634): `test_b2b_status.py` (salary status queries,
+    still_asking between queries, the window from the payment, a result before its ack, a Paid
+    Result after a Failed answer, the salary receipt answer), `test_payout_statement.py` (no
+    balance charge while asking, a differing charge line logged) and `test_trident_fixes.py` (a
+    request drafted long before it was sent counts as in flight).
 - Bench (not run here). None of them submits or approves as Administrator: requests are written
   as their submit and ack leave them.
   - `money_out/test_trident_fixes.py`:
@@ -147,6 +185,13 @@ Role, B2C Charge Bands and the Mpesa Settings Cost Center.
     - F5, cost centers and project;
     - F11, the live answer through `process_mpesa_integration_request`;
     - F4 and F7.
+  - `money_out/test_trident_fixes.py` (review fixes): a status answer settles an Initiated till
+    payment and books exactly one Payment Entry, CHG line and charge Journal Entry, and its late
+    Result books nothing more; a Paid Result after an answer made it Failed is booked and told;
+    a result before its query's ack waits and is applied once the ack is recorded; the status
+    query of a payout to an employee is not readable or listed by Accounts User, Accounts
+    Manager, M-Pesa Viewer or System Manager, and is by an M-Pesa Payer; the till charge from the
+    Working balance comes only once the status queries are exhausted.
   - `money_in/test_integration_user.py`: F1, an STK payment on a Sales Order with a project the
     callback user cannot see books on the first attempt; a C2B receipt is auto-submitted for a
     callback user with no document rights.

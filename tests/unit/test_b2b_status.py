@@ -291,10 +291,45 @@ def test_a_paid_payout_is_asked_again_while_something_is_missing(env):
 def test_nothing_is_asked_when_nothing_is_missing_or_the_payout_is_old(env):
     payout(env, receiver_public_name="835811 - X", debit_party_charges="x|KES|3.00", completed_time_estimated=0)
     assert not env.status.may_ask(NAME)
-    payout(env, creation=datetime.datetime(2026, 10, 15, 11, 0))
-    assert not env.status.may_ask(NAME)
+    payout(env, trans_completed_time=datetime.datetime(2026, 10, 16, 11, 0))  # paid more than 48 hours ago
+    assert not env.status.may_ask(NAME) and not env.status.still_asking(NAME)
     payout(env, status="Initiated")
     assert not env.status.may_ask(NAME)
+
+
+def test_a_payout_drafted_days_before_it_was_paid_is_asked_about(env, monkeypatch):
+    # maker-checker: drafted on Monday, sent on Thursday; the 48 hours run from the payment
+    payout(env, creation=datetime.datetime(2026, 10, 13, 9, 0), trans_completed_time=datetime.datetime(2026, 10, 18, 11, 59))
+    assert env.status.may_ask(NAME) and env.status.still_asking(NAME)
+    rich_db = importlib.import_module("rich_db")
+    rich_db.install(env.frappe)
+    asked = []
+    monkeypatch.setattr(env.status, "auto_query", lambda name: asked.append(name) or "MB2CQ-1")
+    env.status.sweep()
+    assert asked == [NAME]
+    env.frappe.db.table(B2B)[NAME]["trans_completed_time"] = datetime.datetime(2026, 10, 16, 11, 0)
+    asked.clear()
+    env.status.sweep()
+    assert asked == [], "paid more than 48 hours ago"
+
+
+def test_still_asking_between_two_queries(env):
+    # the first answer is often "not found": the sweep asks again in ten minutes, so the charge waits
+    payout(env)
+    query_row(env, 5, "Unresolved")
+    assert not env.status.may_ask(NAME), "not yet: the last query was five minutes ago"
+    assert env.status.still_asking(NAME), "but the sweep will ask again"
+    for minutes in (40, 30):
+        query_row(env, minutes, "Unresolved")
+    assert not env.status.still_asking(NAME), "three queries in all: nothing more will come"
+    env.frappe.db.table(QUERY).clear()
+    query_row(env, 2, None, status="Sent")
+    query_row(env, 40, "Unresolved")
+    query_row(env, 30, "Unresolved")
+    assert env.status.still_asking(NAME), "the third is still out"
+    env.frappe.db.table(QUERY).clear()
+    query_row(env, 20, "Paid")
+    assert not env.status.still_asking(NAME), "Safaricom gave what it had"
 
 
 def test_the_results_job_asks_quietly(env):
@@ -453,3 +488,160 @@ def test_every_status_event_python_publishes_is_one_the_desk_listens_for():
     m_pesa_api = (REPO / "mpsa_suite/mpsa_suite/api/m_pesa_api.py").read_text(encoding="utf-8")
     assert 'STATUS_EVENT = "mpesa_transaction_status_update"' in m_pesa_api
     assert published <= listened, f"published but nobody listens: {published - listened}"
+
+
+# ================================================================ salary payouts' status queries (D4)
+@pytest.fixture
+def salaries(env):
+    module = importlib.import_module("mpsa_suite.money_out.salary_access")
+    env.frappe.session.user = "clerk@example.com"
+    return module
+
+
+class Record(fake_frappe._dict):
+    def is_new(self):
+        return False
+
+
+def test_the_status_query_of_a_b2b_payout_to_an_employee_is_salary_data(env, salaries):
+    payout(env, supplier=None, employee="HR-EMP-0001")
+    env.frappe.db.table(B2B)["MB2B-SUPPLIER"] = {"name": "MB2B-SUPPLIER", "supplier": "ACME", "employee": None}
+    query = Record(doctype=QUERY, b2b_request=NAME, b2c_request=None, owner="Administrator")
+    other = Record(query, b2b_request="MB2B-SUPPLIER")
+    for roles in ({"Accounts User"}, {"Accounts Manager"}, {"M-Pesa Viewer"}, {"System Manager"}):
+        env.frappe.user_roles = roles
+        assert salaries.has_permission(query, "read") is False, roles
+        assert salaries.has_permission(other, "read") is True, roles
+        condition = salaries.query_conditions("clerk@example.com", doctype=QUERY)
+        assert ("NOT EXISTS (SELECT 1 FROM `tabMpesa B2B Payment Request` sal_b2b WHERE sal_b2b.name = "
+                "`tabMpesa B2C Status Query`.b2b_request AND COALESCE(sal_b2b.employee, '') != '')") in condition
+        assert "`tabMpesa B2C Status Query`.b2c_request" in condition and "owner = 'clerk@example.com'" in condition
+    for roles in ({"M-Pesa Payer"}, {"M-Pesa Manager"}, {"HR Manager"}):
+        env.frappe.user_roles = roles
+        assert salaries.has_permission(query, "read") is True, roles
+        assert salaries.query_conditions("clerk@example.com", doctype=QUERY) == ""
+
+
+def test_a_salary_payouts_receipt_tells_who_may_not_see_salaries_nothing_more(env, mpesa):
+    row = payout(env, supplier=None, employee="HR-EMP-0001")
+    asked(env)
+    ir = answer(env)
+    env.frappe.user_roles = {"Accounts User"}  # who asked: FINANCE_ROLES, no salary role
+    mpesa.process_mpesa_integration_request("IR-RES")
+    ((_user, status, message),) = told(env)
+    assert (status, message) == ("success", "This receipt is an ERP salary payout.")
+    assert ir["status"] == "Completed"
+    output = json.loads(ir["output"])
+    assert output["salary"] == 1 and "Amount" not in output and "CreditPartyName" not in output
+    assert not ir.get("reference_docname"), "no link to the salary payout"
+    assert row["debit_party_charges"] == "Business Buy Goods Charge|KES|3.00", "the answer is still applied"
+
+    env.calls.published.clear()
+    env.frappe.db.table(IR).clear()
+    asked(env)
+    answer(env)
+    env.frappe.user_roles = {"M-Pesa Payer"}
+    mpesa.process_mpesa_integration_request("IR-RES")
+    ((_user, _status, message),) = told(env)
+    assert message.startswith(f"Payout {NAME} Completed: KES 50.00")
+
+
+# ================================================================ a result before its query's ack
+def racing(env):
+    """A query whose ack the sender has not recorded yet (committed Queued, no IDs)."""
+    name = ask(env)
+    env.frappe.db.table(QUERY)[name].update(status="Queued", conversation_id=None, originator_conversation_id=None)
+    return name
+
+
+def kept(env):
+    return [r for r in env.frappe.db.table(IR).values()
+            if r.get("request_description") == env.b2c_status.WAITING]
+
+
+@pytest.fixture
+def waiting(env):
+    env.b2c_status = importlib.import_module("mpsa_suite.money_out.b2c_status")
+    return env
+
+
+def test_a_result_that_beats_its_querys_ack_waits_for_it(waiting):
+    env = waiting
+    row = payout(env)
+    before = dict(row)
+    name = racing(env)
+    env.api.b2c_status_result(Result=LIVE, ref=name)
+    (ir,) = kept(env)
+    assert (ir["status"], ir["reference_docname"]) == ("Queued", name)
+    assert row == before and env.frappe.errors == [], "neither rejected nor applied yet"
+    ir["creation"] = env.frappe.utils.now_datetime() - datetime.timedelta(minutes=2)
+    env.b2c_status.retry_waiting_results()
+    assert ir["status"] == "Queued", "the ack is still on its way"
+
+    env.frappe.db.table(QUERY)[name].update(status="Sent", conversation_id=QUERY_CID, originator_conversation_id=QUERY_OCID)
+    env.b2c_status.retry_waiting_results()
+    assert ir["status"] == "Completed"
+    assert row["debit_party_charges"] == "Business Buy Goods Charge|KES|3.00"
+    assert env.frappe.db.table(QUERY)[name]["outcome"] == "Paid" and env.frappe.errors == []
+    env.b2c_status.retry_waiting_results()  # handled once
+    assert env.calls.lines == [(B2B, NAME)]
+
+
+def test_a_result_whose_querys_ack_never_comes_is_rejected_after_ten_minutes(waiting):
+    env = waiting
+    row = payout(env)
+    before = dict(row)
+    name = racing(env)
+    env.api.b2c_status_result(Result=LIVE, ref=name)
+    (ir,) = kept(env)
+    ir["creation"] = env.frappe.utils.now_datetime() - datetime.timedelta(minutes=11)
+    env.b2c_status.retry_waiting_results()
+    assert ir["status"] == "Completed" and row == before
+    assert any("mismatch" in kw.get("title", "") for _a, kw in env.frappe.errors)
+    assert any(r.get("request_description") == "Mpesa B2C Status Result (unmatched)"
+               for r in env.frappe.db.table(IR).values())
+
+
+def test_a_result_for_a_query_with_its_ack_is_not_kept_waiting(waiting):
+    env = waiting
+    payout(env)
+    name = ask(env)
+    env.api.b2c_status_result(Result=LIVE, ref=name)
+    assert kept(env) == [] and env.frappe.db.table(QUERY)[name]["outcome"] == "Paid"
+
+
+# ================================================================ a Paid Result after an answer made it Failed
+def test_a_paid_result_after_a_status_answer_made_it_failed_wins_and_is_told(env, monkeypatch):
+    row = payout(env, status="Unknown", transaction_id=None, result_code=None, receiver_public_name=None)
+    name = ask(env)
+    env.api.b2c_status_result(Result=live(TransactionStatus="Expired"), ref=name)
+    assert (row["status"], row["result_code"]) == ("Failed", "TS:Expired")
+    alerts = []
+    party_accounts = importlib.import_module("mpsa_suite.money_out.party_accounts")
+    monkeypatch.setattr(party_accounts, "alert", lambda message, doc, roles=None: alerts.append((message, doc.name)))
+    b2b = importlib.import_module("mpsa_suite.money_out.b2b")
+    late = {"ResultCode": "0", "ResultDesc": "ok", "ConversationID": PAYOUT_CID, "OriginatorConversationID": PAYOUT_OCID,
+            "TransactionID": "UJRSN5BOEH", "ResultParameters": {"ResultParameter": [
+                {"Key": "TransCompletedTime", "Value": "20261027143900"},
+                {"Key": "ReceiverPartyPublicName", "Value": "835811 - ASTRAL INDUSTRIES LTD HQ"},
+                {"Key": "DebitPartyCharges", "Value": "Business Buy Goods Charge|KES|3.00"}]}}
+    b2b.handle_result(late, NAME)
+    assert (row["status"], row["result_code"], row["transaction_id"]) == ("Paid", "0", "UJRSN5BOEH")
+    assert [kw["name"] for m, kw in env.frappe.enqueued if m.endswith("b2b.book_payment_entry")] == [NAME]
+    ((message, doc),) = alerts
+    assert doc == NAME and "UJRSN5BOEH" in message and "made it Failed (Expired)" in message
+    assert "KES" not in message, "no amount: it may be a salary"
+    assert any(kw.get("title") == "M-Pesa B2B Result contradicts its status query" for _a, kw in env.frappe.errors)
+
+    b2b.handle_result(late, NAME)  # re-sent: recorded once, booked once
+    assert len([m for m, _kw in env.frappe.enqueued if m.endswith("b2b.book_payment_entry")]) == 1 and len(alerts) == 1
+
+
+def test_a_failed_result_after_a_status_answer_made_it_failed_changes_nothing(env):
+    row = payout(env, status="Unknown", transaction_id=None, result_code=None)
+    name = ask(env)
+    env.api.b2c_status_result(Result=live(TransactionStatus="Failed"), ref=name)
+    before = dict(row)
+    b2b = importlib.import_module("mpsa_suite.money_out.b2b")
+    b2b.handle_result({"ResultCode": "2001", "ConversationID": PAYOUT_CID, "TransactionID": ""}, NAME)
+    assert row == before

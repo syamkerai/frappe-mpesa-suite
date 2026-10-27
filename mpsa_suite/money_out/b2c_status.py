@@ -7,13 +7,21 @@ matches our amount, and only while the payout is still unsettled.
 
 A query for a B2B payout (``b2b_request``) goes through the same doctype and endpoints;
 its result is handled by money_out.b2b_status.
+
+Safaricom has answered 0.4 s after the ack, before the sender recorded the ack's IDs: such a
+result is kept (an Integration Request, Queued) and tried again every two minutes once the ack is
+recorded (``retry_waiting_results``); after ACK_WAIT_MINUTES it is rejected like any result that
+answers no query of ours.
 """
 
+import json
+
 import frappe
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from ..daraja import apis
 from ..daraja import money_out as daraja
+from ..daraja.guard import daraja_id
 from ..utils.doctype_names import B2C_REQUEST_DOCTYPE
 from .common import callback_url, initiator_settings, log_callback, post
 from .results import find_request
@@ -23,6 +31,9 @@ QUERY_DOCTYPE = "Mpesa B2C Status Query"
 UNSETTLED = ("Not Initiated", "Initiated", "Status Unknown", "", None)
 # Don't let people hammer Daraja: one open query per payout within this window.
 QUERY_COOLDOWN_MINUTES = 2
+# How long a result waits for its query's ack (as m_pesa_api.STATUS_WAIT_MINUTES), and how it is kept.
+ACK_WAIT_MINUTES = 10
+WAITING = "Mpesa Status Result (waiting for its ack)"
 
 
 def start_query(b2c_request: str) -> str:
@@ -129,7 +140,11 @@ def send_query(link: dict, mpesa_settings: str, receipt, originator_id, remarks:
     return query.name
 
 
-def handle_result(result: dict, ref: str | None) -> None:
+def handle_result(result: dict, ref: str | None, final: bool = False) -> None:
+    """A query's result (the callback, or ``retry_waiting_results`` with ``final``: no more waiting)."""
+    if not final and awaiting_ack(result, ref):
+        log_callback({"Result": result}, WAITING, QUERY_DOCTYPE, ref, "Queued")
+        return
     query = find_request(QUERY_DOCTYPE, result, ref)
     if not query:
         log_callback({"Result": result}, "Mpesa B2C Status Result (unmatched)", QUERY_DOCTYPE, ref, "Failed")
@@ -219,6 +234,52 @@ def apply_to_payout(b2c, query, outcome: str, values: dict) -> None:
         b2c_request_name=b2c.name,
         enqueue_next=True,
     )
+
+
+def awaiting_ack(result: dict, ref: str | None) -> bool:
+    """The result's URL names a query of ours (``ref``) whose ack the sender has not recorded yet:
+    still Queued, with no IDs. A locking read, so an ack being written now is waited for."""
+    result = result or {}
+    if not ref or not any(daraja_id(result.get(k)) for k in ("ConversationID", "OriginatorConversationID")):
+        return False
+    row = frappe.db.get_value(QUERY_DOCTYPE, ref, ["status", "conversation_id", "originator_conversation_id"],
+                              as_dict=True, for_update=True)
+    return bool(row) and row.status == "Queued" and not (row.conversation_id or row.originator_conversation_id)
+
+
+def retry_waiting_results(limit: int = 50) -> None:
+    """Every two minutes: results kept while their query's ack was on its way are handled once the
+    ack is recorded, and for the last time after ACK_WAIT_MINUTES (rejected if it never came)."""
+    now = now_datetime()
+    rows = frappe.get_all(
+        "Integration Request",
+        filters={"request_description": WAITING, "status": "Queued", "creation": [">=", add_to_date(now, hours=-24)]},
+        fields=["name", "creation"],
+        order_by="creation asc",
+        limit=limit,
+    )
+    for row in rows:
+        # a locking read: one result is never handled twice
+        kept = frappe.db.get_value("Integration Request", row.name, ["status", "data", "reference_docname"],
+                                   as_dict=True, for_update=True)
+        if not kept or kept.status != "Queued":
+            continue
+        data = json.loads(kept.data) if isinstance(kept.data, str) else (kept.data or {})
+        result = data.get("Result") or {}
+        final = get_datetime(row.creation) <= add_to_date(now, minutes=-ACK_WAIT_MINUTES)
+        if not final and awaiting_ack(result, kept.reference_docname):
+            continue  # its ack is still on its way
+        try:
+            frappe.db.set_value("Integration Request", row.name, "status", "Completed", update_modified=False)
+            handle_result(result, kept.reference_docname, final=True)
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            # kept, with the result, to be replayed by hand
+            frappe.db.set_value("Integration Request", row.name, {"status": "Failed", "error": frappe.get_traceback()},
+                                update_modified=False)
+            frappe.db.commit()
+            frappe.log_error(title=f"M-Pesa status result {row.name} not recorded"[:140], message=frappe.get_traceback())
 
 
 def handle_queue_timeout(payload: dict, ref: str | None) -> None:

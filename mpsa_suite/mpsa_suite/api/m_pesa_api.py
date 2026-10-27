@@ -957,12 +957,22 @@ def _payout_for(receipt_no: str, values: dict):
     return None
 
 
+def _pays_salary(doctype: str, name: str) -> bool:
+    """Whether the payout pays a salary: a B2C payout to an employee or for a Salary Slip, or a B2B
+    payout to an employee (money_out.salary_access)."""
+    from ...money_out import salary_access
+
+    fields = ["employee"] if doctype == "Mpesa B2B Payment Request" else ["party_type", "reference_doctype"]
+    row = frappe.db.get_value(doctype, name, fields, as_dict=True)
+    return bool(row) and salary_access.has_salaries(frappe._dict(row, doctype=doctype))
+
+
 def _answer_payout(integration_request, asker, payout, result_data: dict, values: dict) -> None:
     """A status answer for one of our payouts' receipts (handover F11): no C2B receipt is made, and
     no error logged. The person who asked sees the payout's status, receiver, charge and time; a
     B2B payout gets what its Result left out (money_out.b2b_status)."""
     from ...daraja.money_out import parse_daraja_datetime
-    from ...money_out import b2b_status
+    from ...money_out import b2b_status, salary_access
     from ...money_out.statement import parse_charges
 
     doctype, name = payout
@@ -977,6 +987,12 @@ def _answer_payout(integration_request, asker, payout, result_data: dict, values
         elif not filled and frappe.db.get_value(doctype, name, "status") != "Paid":
             note = f" Press Check Status on {name} to settle it."
     state = cstr(values.get("TransactionStatus")).strip() or "(no status)"
+    if _pays_salary(doctype, name) and not salary_access.can_see_salaries(asker):
+        # salary data (decision D4): the asker learns only that the receipt is the ERP's own payout
+        message = "This receipt is an ERP salary payout."
+        _close(integration_request, "Completed", json.dumps({"kind": kind, "salary": 1, "filled": filled}))
+        publish_transaction_status(asker, "success" if state.lower() == "completed" else "warning", message)
+        return
     finalised = parse_daraja_datetime(values.get("FinalisedTime"))
     parts = [f"KES {flt(values.get('Amount')):,.2f} to {values.get('CreditPartyName') or 'an unnamed receiver'}"]
     if cstr(values.get("DebitPartyCharges")).strip():

@@ -261,11 +261,39 @@ def test_b2b_whose_charge_a_status_query_may_still_give_is_left_quietly(env, mon
 
 
 def test_b2b_charge_from_the_working_balance_gets_its_line(env, monkeypatch):
+    # only once no status query can state it
     b2b(env, debit_party_charges="")
     monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: 3.0)
+    status = importlib.import_module("mpsa_suite.money_out.b2b_status")
+    monkeypatch.setattr(status, "still_asking", lambda name: False)
     env.statement.after_payout(B2B, "MB2B-26-10-000012")
     assert [(line["receipt"], line["amount"]) for line in env.calls.lines] == [("UJMTM632YM", 10.0), ("CHG-UJMTM632YM", 3.0)]
     assert env.calls.entries == [("BT-CHG-UJMTM632YM", 3.0)]
+
+
+def test_b2b_charge_is_not_taken_from_the_balance_while_a_status_query_may_state_it(env, monkeypatch):
+    # a portal payment between two tills would make the balance's figure wrong: Safaricom's own wins
+    b2b(env, debit_party_charges="")
+    monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: pytest.fail("looked at the balances"))
+    status = importlib.import_module("mpsa_suite.money_out.b2b_status")
+    monkeypatch.setattr(status, "still_asking", lambda name: True)
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM"]
+    assert env.calls.entries == [] and env.calls.logs == []
+
+
+def test_a_stated_charge_that_differs_from_its_booked_line_is_logged_not_moved(env):
+    # a charge line of 53 made earlier (from the balances, or Astral's feed); Safaricom now states 3
+    row = b2b(env, debit_party_charges="Business Buy Goods Charge|KES|3.00", mpesa_charge=53.0,
+              charge_bank_transaction="BT-CHG-UJMTM632YM")
+    env.frappe.db.table(BT)["BT-CHG-UJMTM632YM"] = {"name": "BT-CHG-UJMTM632YM", "withdrawal": 53.0, "docstatus": 1}
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert row["mpesa_charge"] == 53.0 and row["charge_bank_transaction"] == "BT-CHG-UJMTM632YM"
+    assert env.calls.entries == [], "no second entry, and the first is left for staff"
+    ((result, method), kw), = env.calls.logs
+    assert (result, method, kw["reference_name"], kw["on_change"]) == ("Ambiguous", "Payout Charge",
+                                                                       "MB2B-26-10-000012", True)
+    assert "says 53.0, but the charge on UJMTM632YM is 3.0" in kw["details"]
 
 
 def test_a_stated_b2b_charge_wins_over_the_balance(env, monkeypatch):
