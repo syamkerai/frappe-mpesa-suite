@@ -142,7 +142,12 @@ class TestConnections(IntegrationTestCase):
         self.assertEqual(self._counts("Customer", self.customer)[REGISTER], 1)
 
     def test_every_hooked_form_builds_its_mpesa_group_from_fields_the_site_has(self):
-        for doctype in frappe.get_hooks("override_doctype_dashboards"):
+        # this app's hooks only: get_hooks merges every app's, and HRMS hooks Holiday List, Task,
+        # Project and Timesheet, which have no M-Pesa group
+        hooked = frappe.get_hooks("override_doctype_dashboards", app_name="mpsa_suite")
+        self.assertIn("Sales Invoice", hooked)
+        self.assertNotIn("Holiday List", hooked)
+        for doctype in hooked:
             if not frappe.db.exists("DocType", doctype):
                 continue
             data = frappe.get_meta(doctype).get_dashboard_data()
@@ -170,6 +175,15 @@ class TestConnections(IntegrationTestCase):
         with self.as_user(MANAGER), _counting():
             employee = frappe.get_meta("Employee").get_dashboard_data()
         self.assertEqual(employee.non_standard_fieldnames[B2B], "employee")
+        # an employee's M-Pesa account lists the same salary payouts: the same rule
+        with self.as_user(ACCOUNTS), _counting():
+            account = frappe.get_meta("Employee M-Pesa Account").get_dashboard_data()
+        self.assertEqual((account.non_standard_fieldnames[B2B], account.non_standard_fieldnames[SCHEDULE]),
+                         ("name", "name"))
+        with self.as_user(MANAGER), _counting():
+            account = frappe.get_meta("Employee M-Pesa Account").get_dashboard_data()
+        self.assertEqual((account.non_standard_fieldnames[B2B], account.non_standard_fieldnames[SCHEDULE]),
+                         ("employee_mpesa_account", "payee_account"))
         # the form's own Connections, built once for everyone, keep every link
         with self.as_user(ACCOUNTS):
             self.assertFalse(connections.counting())

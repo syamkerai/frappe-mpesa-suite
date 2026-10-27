@@ -113,6 +113,18 @@ class TestCollect(IntegrationTestCase):
         self._ask(so, 3500)
         self.assertEqual(len(self._requests(so)), 2)
 
+    def test_a_partly_invoiced_order_is_not_asked_for_payment(self):
+        # ERPNext reckons the order's due as its total less advances: what its invoices owe, or were
+        # paid, would be asked for again
+        so = t.sales_order(self.customer, 5000, submit=True)
+        frappe.db.set_value("Sales Order", so.name, "per_billed", 60)
+        so = frappe.get_doc("Sales Order", so.name)
+        with self.as_user(COLLECTOR):
+            self.assertIn("is partly invoiced", collect.collect_options("Sales Order", so.name)["problem"])
+        with self.assertRaisesRegex(frappe.ValidationError, "is partly invoiced: request payment on its invoices"):
+            self._ask(so, 2000)
+        self.assertEqual(self._requests(so), [])
+
     def test_a_submitted_invoice_is_asked_for_at_most_its_outstanding(self):
         si = t.sales_invoice(self.customer, 2000)
         with self.assertRaisesRegex(frappe.ValidationError, "2,000.00 left to ask for"):

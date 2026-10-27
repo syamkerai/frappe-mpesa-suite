@@ -3,6 +3,7 @@
 Payment Request (make_payment_request, then submit, which prompts). Bench coverage:
 mpsa_suite/money_in/test_collect.py."""
 
+import contextlib
 import datetime
 import importlib
 import sys
@@ -116,10 +117,30 @@ def env(monkeypatch):
                                   "customer": "CUST-1", "outstanding_amount": 3000, "is_pos": 0, "is_return": 0,
                                   "contact_mobile": "+254 722 000 111"}
         _shortcode(db, "TILL", COMPANY, limit=150000)
+        # Payment Requests another prompt committed after this request's snapshot: only a locking
+        # read (get_values for_update) sees them
+        db.committed_meanwhile = {}
+
+        def get_values(doctype, filters=None, fieldname="name", for_update=False, pluck=False, **kw):
+            assert (fieldname, for_update, pluck) == ("name", True, True)
+            rows = db._rows(doctype, filters) + [
+                r for r in db.committed_meanwhile.values() if fake_frappe._match(r, filters)]
+            return [r["name"] for r in rows]
+
+        db.get_values = get_values
         collect = importlib.import_module("mpsa_suite.money_in.collect")
-        superseded = []
+        superseded, locks = [], []
+
+        @contextlib.contextmanager
+        def named_lock(key, timeout=10, busy=None):
+            locks.append([key, busy, "held"])
+            yield
+            locks[-1][2] = "until commit"  # common.named_lock: released when the request commits
+
+        monkeypatch.setattr(collect, "named_lock", named_lock)
         monkeypatch.setattr(collect, "supersede_unpaid", lambda doc: superseded.append(doc.reference_name))
-        yield types.SimpleNamespace(frappe=frappe, db=db, collect=collect, made=made, superseded=superseded)
+        yield types.SimpleNamespace(frappe=frappe, db=db, collect=collect, made=made, superseded=superseded,
+                                    locks=locks)
     finally:
         fake_frappe.uninstall(saved)
 
@@ -179,6 +200,9 @@ def test_the_checks_name_the_document(env):
     (SO, "SO-1", {"status": "Closed"}, "is Closed"),
     (SO, "SO-1", {"status": "On Hold"}, "is On Hold"),
     (SO, "SO-1", {"per_billed": 100}, "fully invoiced"),
+    # ERPNext's due on an order does not take off what its invoices owe or were paid
+    (SO, "SO-1", {"per_billed": 0.5}, "is partly invoiced: request payment on its invoices"),
+    (SO, "SO-1", {"per_billed": 60}, "is partly invoiced"),
     (SO, "SO-1", {"advance_paid": 5000}, "nothing left to pay"),
 ])
 def test_what_cannot_be_collected_from_its_form(env, doctype, name, values, message):
@@ -295,6 +319,50 @@ def test_no_new_prompt_while_the_last_may_be_on_the_phone(env, reference):
     _request(env, amount=100)
     _prompt(env, "MPESAEXP-2", *reference, seconds_ago=5, status="Failed")
     _request(env, amount=100)
+
+
+# ---------------------------------------------------------------- one prompt at a time per document
+def test_the_checks_and_the_prompt_run_under_the_documents_lock(env, monkeypatch):
+    erp = sys.modules["erpnext.accounts.doctype.payment_request.payment_request"]
+    make = erp.make_payment_request
+    state = []
+    monkeypatch.setattr(erp, "make_payment_request", lambda **args: state.append(env.locks[-1][2]) or make(**args))
+    _request(env, doctype=SO, name="SO-1")
+    assert state == ["held"]  # the Payment Request is made while the lock is held
+    assert env.locks == [["collect:Sales Order:SO-1",
+                          "Another M-Pesa prompt for SO-1 is being sent: wait a moment, then look at its Payment "
+                          "Requests.", "until commit"]]
+    env.collect.collect_options(SI, "SINV-1")  # reading what is left takes no lock
+    assert len(env.locks) == 1
+
+
+def _meanwhile(name, reference_name="SINV-1", docstatus=1):
+    return {"name": name, "reference_doctype": SI, "reference_name": reference_name, "docstatus": docstatus,
+            "status": "Requested", "grand_total": 3000, "outstanding_amount": 3000, "payment_gateway": "Mpesa-TILL",
+            "payment_gateway_account": "Mpesa-TILL-KES"}
+
+
+@pytest.mark.parametrize("supersede", [0, 1])
+def test_a_request_committed_while_this_one_waited_for_the_lock_stops_it(env, supersede):
+    """Two Sends at once: the second waits for the first's lock, but its snapshot predates the
+    first's commit, so the plain reads (and ERPNext's own check) miss the first's Payment Request
+    and both would ask for everything. The locking read sees it."""
+    env.frappe.suite_values = {"supersede_unpaid_prompts": supersede}
+    env.db.committed_meanwhile["ACC-PRQ-7"] = _meanwhile("ACC-PRQ-7")
+    with pytest.raises(env.frappe.ValidationError, match=r"A prompt was just sent for SINV-1 \(ACC-PRQ-7\)"):
+        _request(env, amount=3000)
+    assert env.made == [] and env.superseded == []
+    # another document's request, or one cancelled meanwhile, does not
+    env.db.committed_meanwhile = {"X": _meanwhile("X", reference_name="SINV-2"), "Y": _meanwhile("Y", docstatus=2)}
+    _request(env, amount=3000)
+    assert len(env.made) == 1
+
+
+def test_a_request_this_one_already_sees_is_not_counted_twice(env):
+    _open_request(env, "PR-OLD", outstanding=1000)
+    _request(env, amount=2000)  # seen by both reads: only what it holds is taken off
+    with pytest.raises(env.frappe.ValidationError, match="KES 2,000.00 left to ask for"):
+        _request(env, amount=2000.01)
 
 
 def test_a_draft_payment_request_is_dealt_with_first(env):

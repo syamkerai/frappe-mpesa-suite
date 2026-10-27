@@ -8,12 +8,14 @@ here talks to Safaricom.
 The server decides, whatever the browser shows:
 - COLLECT_ROLES, read on the order or invoice and create on Payment Request (ERPNext's own rule
   in make_payment_request);
-- only a submitted Sales Order or non-POS Sales Invoice in KES that still owes;
+- only a submitted Sales Order not invoiced yet, or a non-POS Sales Invoice, in KES that still owes
+  (ERPNext reckons an order's due without what its invoices owe or were paid);
 - the amount is at most what is owed less what open Payment Requests still ask for (the unpaid
   M-Pesa ones a new prompt supersedes aside, when M-Pesa Suite Settings says so), and at most the
   shortcode's Transaction Limit (Safaricom's 250,000 at most): a Payment Request is prompted once;
 - at most PROMPTS_PER_MINUTE prompts a minute per user, and none while the document's last
-  prompt may still be on the customer's phone (as the Express Request's own resend rule).
+  prompt may still be on the customer's phone (as the Express Request's own resend rule);
+- one prompt at a time per document: a second Send waits for the first to commit, then is refused.
 """
 
 import datetime
@@ -27,7 +29,7 @@ from ..daraja import apis
 from ..daraja.guard import STK_MAX_AMOUNT, STK_MIN_AMOUNT
 from ..permissions import COLLECT_ROLES, require
 from ..utils.phone import normalize_msisdn, to_local
-from .common import EXPRESS, enabled
+from .common import EXPRESS, enabled, named_lock
 from .payment_request import is_mpesa, supersede_unpaid
 
 DOCTYPES = ("Sales Order", "Sales Invoice")
@@ -79,20 +81,24 @@ def request_payment(doctype: str, name: str, phone_number: str, amount, payment_
     if not phone:
         frappe.throw(_("Enter the customer's Kenyan mobile number, e.g. 0712345678."))
     amount = flt(amount, 2)
-    _check_amount(doc, amount, gateway)
-    _rate_limit()
-    pending = prompt_pending(doc)
-    if pending:
-        frappe.throw(
-            _("A prompt was just sent for {0} ({1}): wait for the customer to answer it before sending another.").format(
-                doc.name, pending
+    # One prompt at a time per document, held until this request commits (common.named_lock): a
+    # second Send for the same order or invoice waits here, then is refused below.
+    with named_lock(f"collect:{doc.doctype}:{doc.name}", busy=_busy(doc)):
+        _check_sent_meanwhile(doc)
+        _check_amount(doc, amount, gateway)
+        _rate_limit()
+        pending = prompt_pending(doc)
+        if pending:
+            frappe.throw(
+                _("A prompt was just sent for {0} ({1}): wait for the customer to answer it before sending another.").format(
+                    doc.name, pending
+                )
             )
-        )
-    _check_drafts(doc)
-    if enabled("supersede_unpaid_prompts"):
-        # what make_payment_request counts must not include what this prompt replaces
-        supersede_unpaid(frappe._dict(reference_doctype=doc.doctype, reference_name=doc.name, name=None))
-    pr = _payment_request(doc, gateway, phone, amount)
+        _check_drafts(doc)
+        if enabled("supersede_unpaid_prompts"):
+            # what make_payment_request counts must not include what this prompt replaces
+            supersede_unpaid(frappe._dict(reference_doctype=doc.doctype, reference_name=doc.name, name=None))
+        pr = _payment_request(doc, gateway, phone, amount)
     return {
         "payment_request": pr.name,
         "express_request": frappe.db.get_value(
@@ -125,6 +131,10 @@ def document_problem(doc) -> str | None:
             return _("{0} is {1}: payment is not requested on it.").format(doc.name, doc.status)
         if flt(doc.get("per_billed")) >= 100:
             return _("{0} is fully invoiced: request payment on its invoice.").format(doc.name)
+        if flt(doc.get("per_billed")) > 0:
+            # ERPNext's due on an order (owed) is its total less advances: what its invoices owe,
+            # or were paid, would be asked for again
+            return _("{0} is partly invoiced: request payment on its invoices.").format(doc.name)
     if owed(doc) <= 0:
         return _("{0} has nothing left to pay.").format(doc.name)
     return None
@@ -184,6 +194,32 @@ def _check_amount(doc, amount: float, gateway) -> None:
         frappe.throw(
             _("KES {0} is above the M-Pesa Transaction Limit of KES {1} on {2}: ask for KES {1} or less, and "
               "for the rest in another request.").format(f"{amount:,.2f}", f"{gateway.limit:,.2f}", gateway.settings)
+        )
+
+
+def _busy(doc) -> str:
+    return _("Another M-Pesa prompt for {0} is being sent: wait a moment, then look at its Payment Requests.").format(
+        doc.name
+    )
+
+
+def _check_sent_meanwhile(doc) -> None:
+    """Refuse a prompt for ``doc`` when another one made a Payment Request of it while this request
+    waited for the document's lock.
+
+    Every plain read here, ERPNext's own amount check included, sees this transaction's snapshot,
+    which may predate the other request's commit: its Payment Request would be missing and both
+    would ask for the whole amount. A locking read sees what was committed since.
+    """
+    filters = {"reference_doctype": doc.doctype, "reference_name": doc.name, "docstatus": ["<", 2]}
+    seen = set(frappe.get_all(PAYMENT_REQUEST, filters=filters, pluck="name"))
+    latest = frappe.db.get_values(PAYMENT_REQUEST, filters, "name", pluck=True, for_update=True) or []
+    meanwhile = [name for name in latest if name not in seen]
+    if meanwhile:
+        frappe.throw(
+            _("A prompt was just sent for {0} ({1}): look at it before sending another.").format(
+                doc.name, ", ".join(meanwhile)
+            )
         )
 
 
