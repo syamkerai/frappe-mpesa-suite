@@ -7,8 +7,9 @@ Results are handed to handle_result the way Safaricom posts them; the booking jo
 run in the test. Each test is rolled back: commits made by the code under test (the Result's
 Integration Request log, the sweep) are replaced for the whole test, so nothing one test does is
 seen by the next. Requests are made with the test company: ERPNext's v15 test setup makes
-another company the site default. Unit coverage is in tests/unit/test_b2b_owed.py and
-tests/unit/test_b2b_entries.py.
+another company the site default. Requests are prepared as Administrator and sent by a named
+M-Pesa Payer with Send via M-Pesa (t.send_as), as the form does: Administrator may not send.
+Unit coverage is in tests/unit/test_b2b_owed.py and tests/unit/test_b2b_entries.py.
 """
 
 from unittest.mock import patch
@@ -18,7 +19,7 @@ from frappe.utils import add_days, add_to_date, flt, getdate, now_datetime, nowd
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, b2b_entries, owed
+from mpsa_suite.money_out import b2b, b2b_entries, owed, send_confirm
 
 SETTINGS, SHORTCODE = "TESTB2BDOCS", "600777"
 B2B, PE, JE, BT = b2b.B2B_DOCTYPE, "Payment Entry", "Journal Entry", "Bank Transaction"
@@ -127,6 +128,7 @@ class TestB2BDocuments(IntegrationTestCase):
         frappe.db.set_value("Item", t.ITEM, "is_purchase_item", 1)
         cls.expense = _account(EXPENSE, "Expense", "Profit and Loss")
         cls.cost_center = frappe.get_cached_value("Company", t.COMPANY, "cost_center")
+        cls.payer = t.payer()  # sends the requests (Send via M-Pesa)
         # Requests an interrupted run committed would show as earlier payouts to the test supplier
         # (it exists only for these tests).
         frappe.db.delete(B2B, {"supplier": cls.supplier})
@@ -144,6 +146,7 @@ class TestB2BDocuments(IntegrationTestCase):
         frappe.set_user("Administrator")
         frappe.db.rollback()
         frappe.local.mpesa_suite_bank_accounts = None
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")  # a switch a test changed
 
     # ------------------------------------------------------------ helpers
     def _receipt(self) -> str:
@@ -187,7 +190,7 @@ class TestB2BDocuments(IntegrationTestCase):
                "ConversationID": f"AG_{frappe.generate_hash(length=12)}",
                "OriginatorConversationID": f"OC_{frappe.generate_hash(length=12)}"}
         with patch("mpsa_suite.money_out.b2b.post", return_value=answer or (ack, None)) as post:
-            doc.submit()
+            t.send_as(self.payer, doc)
         return post
 
     def _pay(self, name, charge="Business Pay Bill Charge|KES|2.00", book=True) -> str:
@@ -361,7 +364,7 @@ class TestB2BDocuments(IntegrationTestCase):
         req = self._request(4000, send=False, purchase_invoice=pi.name)
         frappe.db.set_value("Supplier", self.supplier, {"on_hold": 1, "hold_type": "Payments", "release_date": None})
         with patch("mpsa_suite.money_out.b2b.post") as post:
-            self.assertRaisesRegex(frappe.ValidationError, "is on hold for payments", req.submit)
+            self.assertRaisesRegex(frappe.ValidationError, "is on hold for payments", t.send_as, self.payer, req)
         post.assert_not_called()
 
     def test_booking_runs_as_administrator_for_a_restricted_callback_user(self):
@@ -599,20 +602,79 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertRaisesRegex(frappe.ValidationError, "already recorded on Payment Entry", pe.insert)
 
     def test_typed_paybill_inserted_already_submitted_is_refused(self):
-        # frappe.client.insert with docstatus 1 runs before_submit, not the draft-only validate (F1)
-        doc = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "command_id": "BusinessPayBill",
-                              "receiver_shortcode": "555555", "account_reference": "X1", "amount": 100,
-                              "remarks": "typed", "docstatus": 1})
+        # frappe.client.insert with docstatus 1 runs before_submit, not the draft-only validate (F1):
+        # it is no deliberate step (Send via M-Pesa), and inside one the typed paybill is refused too
+        values = {"doctype": B2B, "mpesa_settings": SETTINGS, "command_id": "BusinessPayBill",
+                  "receiver_shortcode": "555555", "account_reference": "X1", "amount": 100, "remarks": "typed",
+                  "docstatus": 1}
+        frappe.set_user(self.payer)
         with patch("mpsa_suite.money_out.b2b.post") as post:
-            self.assertRaisesRegex(frappe.ValidationError, "approved M-Pesa account", doc.insert)
+            self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", frappe.get_doc(values).insert)
+            with send_confirm.deliberate("server code"):
+                # its maker sends it: refused by maker-checker, and with that off (one-person team)...
+                self.assertRaisesRegex(frappe.ValidationError, "another person must send it",
+                                       frappe.get_doc(values).insert)
+                frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 0)
+                frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+                try:  # ...by the destination check (the test's rollback puts the switch back)
+                    self.assertRaisesRegex(frappe.ValidationError, "approved M-Pesa account",
+                                           frappe.get_doc(values).insert)
+                finally:
+                    frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
         post.assert_not_called()
+
+    def test_only_send_via_mpesa_sends_a_request(self):
+        """The form's Submit, the list's bulk Submit, frappe.client.submit and run_doc_method all end in
+        doc.submit(), which before_submit refuses; Send via M-Pesa's confirm is the one way."""
+        from frappe.desk.doctype.bulk_update.bulk_update import submit_cancel_or_update_docs
+
+        pi = self._invoice(10000)
+        req = self._request(4000, send=False, purchase_invoice=pi.name)
+        frappe.set_user(self.payer)
+        with patch("mpsa_suite.money_out.b2b.post") as post:
+            self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", frappe.get_doc(B2B, req.name).submit)
+            # Actions > Submit on the list: each refused document is reported back, nothing sent (its
+            # rollback is the test's own here)
+            with patch.object(frappe.db, "rollback"):
+                self.assertEqual(submit_cancel_or_update_docs(B2B, [req.name], "submit"), [req.name])
+        post.assert_not_called()
+        self.assertEqual(frappe.db.get_value(B2B, req.name, "docstatus"), 0)
+        frappe.set_user("Administrator")
+        self._send(req)
+        self.assertEqual(frappe.db.get_value(B2B, req.name, ["docstatus", "status"]), (1, "Initiated"))
+
+    def test_the_shared_administrator_login_cannot_send(self):
+        pi = self._invoice(10000)
+        req = self._request(4000, send=False, purchase_invoice=pi.name)
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        try:
+            self.assertRaisesRegex(frappe.PermissionError, "Use your own login", send_confirm.send_for_test, req)
+            with send_confirm.deliberate("server code", req):
+                self.assertRaisesRegex(frappe.PermissionError, "Use your own login", req.submit)
+        finally:
+            frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        self.assertEqual(frappe.db.get_value(B2B, req.name, "docstatus"), 0)
+
+    def test_the_payer_who_prepared_a_request_cannot_send_it(self):
+        pi = self._invoice(10000)
+        frappe.set_user(self.payer)  # maker-checker: who prepared it is shown why, and gets no token
+        try:
+            req = self._request(4000, send=False, purchase_invoice=pi.name)
+            found = send_confirm.prepare_send(B2B, req.name)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertIsNone(found["token"])
+        self.assertIn("another person must send it", found["problems"][0])
+        self.assertRaisesRegex(frappe.ValidationError, "another person must send it", t.send_as, self.payer, req)
 
     def test_earlier_payout_warning_blocks_submit_until_ticked(self):
         self._paid_later()  # money the supplier got with no invoice
         pi = self._invoice(10000)
         req = self._request(3000, send=False, purchase_invoice=pi.name)
         with patch("mpsa_suite.money_out.b2b.post") as post:
-            self.assertRaisesRegex(frappe.ValidationError, "Check that none of them paid this invoice", req.submit)
+            self.assertRaisesRegex(frappe.ValidationError, "Check that none of them paid this invoice", t.send_as,
+                                   self.payer, req)
         post.assert_not_called()
         req = frappe.get_doc(B2B, req.name)
         req.checked_earlier_payouts = 1

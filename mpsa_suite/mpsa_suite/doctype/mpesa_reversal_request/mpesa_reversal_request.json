@@ -252,7 +252,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-23 19:00:00.000000",
+ "modified": "2026-10-27 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa Reversal Request",
@@ -261,7 +261,6 @@
  "permissions": [
   {
    "amend": 1,
-   "cancel": 1,
    "create": 1,
    "delete": 1,
    "email": 1,
@@ -271,7 +270,6 @@
    "report": 1,
    "role": "System Manager",
    "share": 1,
-   "submit": 1,
    "write": 1
   },
   {

@@ -185,10 +185,9 @@ class TestEmployeePayouts(_Base):
         with _as(PREPARER):
             doc.insert()
             self.assertEqual(doc.phone, "254722000998")
-            self.assertRaisesRegex(frappe.ValidationError, "different person", doc.submit)
-        with _as(MANAGER):
-            doc = frappe.get_doc(EMPACC, doc.name)
-            doc.submit()
+        # approved with the form's Approve and its confirm (send_confirm), by a named M-Pesa Manager
+        self.assertRaisesRegex(frappe.ValidationError, "different person", t.send_as, PREPARER, doc)
+        doc = t.send_as(MANAGER, doc)
         self.assertEqual((doc.docstatus, doc.approved_by), (1, MANAGER))
 
     def test_b2b_to_an_employee_bank_paybill_without_a_slip_waits_for_make_entry(self):
@@ -200,9 +199,9 @@ class TestEmployeePayouts(_Base):
             self.assertEqual((req.employee_mpesa_account, req.receiver_shortcode, req.entry_mode, req.supplier),
                              (self.accounts["_T Pay Bank"], "247247", "Make the entry later", None))
         # another person sends what Accounts prepared (maker-checker on direct payouts, decision D3)
-        with _as(MANAGER), patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack):
-            req = frappe.get_doc(B2B, req.name)
-            req.submit()
+        # (a payment no Salary Slip caps is sent by an M-Pesa Manager, with Send via M-Pesa)
+        with patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack):
+            req = t.send_as(MANAGER, req)
         self._b2b_result(req.name)
         self.assertEqual(frappe.db.get_value(B2B, req.name, "entry_status"), "Entry Not Made")
         expense = _account("_T Pay Allowances", "Expense", "Profit and Loss")

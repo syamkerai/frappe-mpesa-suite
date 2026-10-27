@@ -4,9 +4,10 @@
 import frappe
 from frappe.model.document import Document
 
+from ....money_out import maker_checker, send_confirm
 from ....money_out.api import PAYOUT_OR_ADMIN
 from ....money_out.reversal import send_reversal, validate_request
-from ....permissions import require
+from ....permissions import require, require_named_user
 
 
 class MpesaReversalRequest(Document):
@@ -17,7 +18,10 @@ class MpesaReversalRequest(Document):
             validate_request(self)
 
     def before_submit(self):
+        require_named_user()
+        send_confirm.assert_deliberate(self)  # Send via M-Pesa, never a plain submit
         require(PAYOUT_OR_ADMIN)
+        maker_checker.check(self)  # who sends it is not who made it (Make Reversal) or last saved it
         self.status = "Not Initiated"
 
     def on_submit(self):

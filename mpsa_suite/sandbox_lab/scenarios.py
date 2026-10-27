@@ -11,6 +11,7 @@ import frappe
 from frappe.utils import cint, flt, now_datetime
 
 from ..daraja.guard import is_zero_code
+from ..money_out.send_confirm import deliberate
 from . import payloads
 from .framework import (
     AUTO,
@@ -557,7 +558,8 @@ def start_b2c_paid(ctx):
     doc = frappe.get_doc("B2C Payment Disbursement", name)
     ctx.set_reference(doc.doctype, name)
     if doc.docstatus == 0:
-        doc.submit()
+        with deliberate("Sandbox Lab", doc):  # the lab run is the admin's deliberate step
+            doc.submit()
     elif doc.docstatus == 2:
         raise Skip(f"{name} is cancelled: use a new test disbursement")
     ctx.save(disbursement=name, since=now_datetime())
@@ -659,7 +661,8 @@ def start_b2b_pay(ctx):
         raise Skip(f"Could not create the B2B payment: {e}. Give {supplier} an approved Supplier M-Pesa Account "
                    "(Party B 600000 from Test Credentials) and set the hold to 0 hours for the lab.")
     try:
-        doc.submit()  # every check runs again here, before anything is sent
+        with deliberate("Sandbox Lab", doc):  # the lab run is the admin's deliberate step
+            doc.submit()  # every check runs again here, before anything is sent
     except frappe.ValidationError as e:
         raise Skip(f"Could not send the B2B payment: {e}")
     ctx.set_reference(B2B, doc.name)
@@ -719,7 +722,12 @@ def start_reversal(ctx):
     _, state, _ = ctx.other("c2b_exact")
     name = make_reversal(state.get("register"), "Sandbox lab reversal test")
     doc = frappe.get_doc(REVERSAL, name)
-    doc.submit()
+    try:
+        with deliberate("Sandbox Lab", doc):  # the lab run is the admin's deliberate step
+            doc.submit()
+    except frappe.ValidationError as e:
+        # maker-checker: who made the reversal (this run) may not send it while the switch is on
+        raise Skip(f"Could not send the reversal: {e}")
     ctx.set_reference(REVERSAL, name)
     ctx.save(request=name, since=now_datetime())
 

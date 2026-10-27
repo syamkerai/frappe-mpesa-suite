@@ -4,9 +4,22 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint, cstr
 
 from ....daraja.guard import parse_allowlist
 from ....permissions import CONFIG_ROLES, require
+
+# Switches that guard who sends payouts and where: a change to any is written on the settings and
+# sent to the Notify Role, naming who changed what (turning off maker-checker, allowing one-off
+# B2B, shortening the hold on new payee accounts, another Integration User, Administrator sends).
+WATCHED = (
+    "schedule_maker_checker",
+    "refuse_administrator_payouts",
+    "allow_one_off_b2b",
+    "supplier_account_hold_hours",
+    "employee_account_hold_hours",
+    "integration_user",
+)
 
 
 class MPesaSuiteSettings(Document):
@@ -23,6 +36,29 @@ class MPesaSuiteSettings(Document):
             parse_bands(self.get("b2c_charge_bands"))
         except ValueError as e:
             frappe.throw(_("B2C Charge Bands: {0}").format(e))
+
+    def on_update(self):
+        self.alert_safety_changes()
+
+    def alert_safety_changes(self):
+        """A comment on the settings and an alert to the Notify Role for each WATCHED change."""
+        before = self.get_doc_before_save()
+        if not before:
+            return  # first save (install)
+        changes = []
+        for field in WATCHED:
+            df = self.meta.get_field(field)
+            if not df or _shown(df, before.get(field)) == _shown(df, self.get(field)):
+                continue
+            changes.append(_("{0} from {1} to {2}").format(_(df.label), _shown(df, before.get(field)),
+                                                         _shown(df, self.get(field))))
+        if not changes:
+            return
+        from ....money_out.party_accounts import alert
+
+        message = _("{0} changed M-Pesa Suite Settings: {1}.").format(frappe.session.user, "; ".join(changes))
+        self.add_comment("Comment", message)
+        alert(message, self)
 
     @frappe.whitelist()
     def regenerate_callback_token(self):
@@ -41,3 +77,12 @@ class MPesaSuiteSettings(Document):
         self.last_rejected_callback_on = None
         self.last_rejected_callback_reason = None
         self.save()
+
+
+def _shown(df, value) -> str:
+    """A setting's value as the alert says it."""
+    if df.fieldtype == "Check":
+        return _("on") if cint(value) else _("off")
+    if df.fieldtype == "Int":
+        return str(cint(value))
+    return cstr(value).strip() or _("not set")

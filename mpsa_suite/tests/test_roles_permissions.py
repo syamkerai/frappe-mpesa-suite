@@ -8,6 +8,7 @@ and a site's own rules (Custom DocPerm). Nothing reaches Safaricom: the send fun
 replaced, and the network is blocked on the test benches.
 """
 
+import json
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -329,28 +330,67 @@ class TestRolesPermissions(IntegrationTestCase):
             frappe.clear_cache(doctype=doctype)
 
     # ------------------------------------------------------------ the user's decisions (2026-10-23)
+    PAYOUTS = ("B2C Payment Disbursement", "B2C Disbursement Request", "Mpesa B2B Payment Request",
+               "Mpesa Reversal Request")
+
     def test_only_the_payer_roles_send_money(self):
-        """D1: Accounts Manager and HR Manager prepare payouts; they do not send them."""
-        for doctype in ("B2C Payment Disbursement", "B2C Disbursement Request", "Mpesa B2B Payment Request",
-                        "Mpesa Reversal Request"):
-            for role in (M.AM, M.HM, M.AU, M.HU, M.MV):
-                with self.as_user(user_for(role)):
+        """D1: Accounts Manager and HR Manager prepare payouts; they do not send them. Round 4: nor does
+        System Manager (only named payers send). Checked inside the deliberate step (Send via M-Pesa's
+        confirm), where the role gate is what refuses them."""
+        from mpsa_suite.money_out.send_confirm import deliberate
+
+        sm_user = _user(f"sysmgr@{DOMAIN}", [M.SM])
+        for doctype in self.PAYOUTS:
+            for user in [user_for(r) for r in (M.AM, M.HM, M.AU, M.HU, M.MV)] + [sm_user]:
+                with self.as_user(user):
                     doc = frappe.new_doc(doctype)
-                    with self.assertRaises(frappe.PermissionError, msg=f"{role} could send a {doctype}"):
-                        doc.before_submit()
+                    with deliberate("test"):
+                        with self.assertRaises(frappe.PermissionError, msg=f"{user} could send a {doctype}"):
+                            doc.before_submit()
+
+    def test_no_plain_submit_sends_money_and_administrator_never_does(self):
+        """Round 4 (decision 2): a payout is sent only by Send via M-Pesa; the list's Submit, REST,
+        frappe.client.submit and run_doc_method all end in before_submit, which refuses them, a payer
+        too. The shared Administrator login is refused even inside the deliberate step (decision 1)."""
+        from mpsa_suite.money_out.send_confirm import deliberate
+
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        for doctype in self.PAYOUTS:
+            with self.as_user(user_for(M.MP)):
+                with self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", msg=doctype):
+                    frappe.new_doc(doctype).before_submit()
+            with deliberate("test"):
+                with self.assertRaisesRegex(frappe.PermissionError, "Use your own login", msg=doctype):
+                    frappe.new_doc(doctype).before_submit()
+
+    def test_send_via_mpesa_is_for_the_payer_roles_on_every_route(self):
+        name = self._raw({"doctype": "Mpesa B2B Payment Request", "amount": 1500, "supplier": "_T Nobody",
+                          "mpesa_settings": t.SETTINGS}, user_for(M.AU))
+        path = "/api/method/mpsa_suite.money_out.send_confirm.prepare_send"
+        for role in (M.AM, M.AU, M.MV, M.HM):
+            with self.as_user(user_for(role)):
+                self.refused(path, doctype="Mpesa B2B Payment Request", name=name)
+        with self.as_user(user_for(M.MP)):  # through the gate: the summary of what it would send
+            answer = json.loads(self.call(path, doctype="Mpesa B2B Payment Request", name=name).get_data())
+        self.assertEqual((answer["message"]["name"], answer["message"]["action"]), (name, "Send via M-Pesa"))
+        self.assertTrue(answer["message"]["token"])
 
     def test_only_mpesa_managers_do_admin_work(self):
-        """D2: approving payee accounts and the other ADMIN_ROLES actions left Accounts Manager."""
+        """D2: approving payee accounts and the other ADMIN_ROLES actions left Accounts Manager; D5:
+        System Manager too. Inside the deliberate step (Approve's confirm), where the roles decide."""
         from mpsa_suite.money_out import supplier_accounts
+        from mpsa_suite.money_out.send_confirm import deliberate
 
         account = frappe.new_doc("Supplier M-Pesa Account")
         account.owner = user_for(M.AU)
         account.proof = "/files/proof.pdf"
-        for role in (M.AM, M.AU, M.MP):
-            with self.as_user(user_for(role)), self.assertRaises(frappe.PermissionError, msg=role):
+        with deliberate("test"):
+            for user in [user_for(r) for r in (M.AM, M.AU, M.MP)] + [_user(f"sysmgr@{DOMAIN}", [M.SM])]:
+                with self.as_user(user), self.assertRaises(frappe.PermissionError, msg=user):
+                    supplier_accounts.approve(account)
+            with self.as_user(user_for(M.MM)):
                 supplier_accounts.approve(account)
-        with self.as_user(user_for(M.MM)):
-            supplier_accounts.approve(account)
         self.assertEqual(account.approved_by, user_for(M.MM))
 
     def test_maker_checker_on_direct_payouts(self):

@@ -119,3 +119,26 @@ class TestMPesaSuiteSettings(IntegrationTestCase):
         self.settings.enforce_ip_allowlist = 1
         self.settings.allowed_callback_ips = "not an ip"
         self.assertRaises(frappe.ValidationError, self.settings.save)
+
+    def test_switching_off_a_payout_safety_setting_is_written_and_alerted(self):
+        """Round 4: maker-checker, the Administrator refusal, one-off B2B, the hold hours and the
+        Integration User: a change is a comment on the settings and an alert to the Notify Role."""
+        settings = frappe.get_single(SETTINGS)
+        was = settings.schedule_maker_checker
+        try:
+            with patch("mpsa_suite.money_out.party_accounts.alert") as alert:
+                settings.schedule_maker_checker = 0 if was else 1
+                settings.save()
+                settings.reload()
+                settings.save()  # nothing watched changed: nobody is told
+            (message, doc), _ = alert.call_args
+            self.assertEqual(alert.call_count, 1)
+            self.assertEqual(doc.doctype, SETTINGS)
+            self.assertIn("Administrator changed M-Pesa Suite Settings: Who Sends a Payout Must Not Be Who Prepared It",
+                          message)
+            comment = frappe.get_all("Comment", filters={"reference_doctype": SETTINGS, "reference_name": SETTINGS,
+                                                         "comment_type": "Comment"},
+                                     fields=["content"], order_by="creation desc", limit=1)
+            self.assertEqual(comment[0].content, message)
+        finally:
+            frappe.db.set_single_value(SETTINGS, "schedule_maker_checker", was)

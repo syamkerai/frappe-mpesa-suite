@@ -252,7 +252,9 @@ def test_the_request_submit_refuses_a_line_not_yet_due_even_with_the_schedules_f
     doc.flags.mpesa_from_schedule = doc.flags.mpesa_send_later = True
     doc.insert()
     line_of(env)["request"] = doc.name
-    with pytest.raises(env.frappe.ValidationError, match="Not due until 19 Oct 2026"):
+    with pytest.raises(env.frappe.ValidationError, match="Send via M-Pesa button"):
+        doc.submit()  # not even Pay Selected's flags make a plain submit the deliberate step
+    with pytest.raises(env.frappe.ValidationError, match="Not due until 19 Oct 2026"), _deliberate(doc):
         doc.submit()
 
 
@@ -282,6 +284,11 @@ def test_send_deferred_marks_a_line_not_yet_due_failed_without_sending(env):
 
 
 # ---------------------------------------------------------------- a schedule line only from Pay Selected
+def _deliberate(doc):
+    """As if Send via M-Pesa (send_confirm.confirm_send) submitted it."""
+    return importlib.import_module("mpsa_suite.money_out.send_confirm").deliberate("Send via M-Pesa", doc)
+
+
 @pytest.mark.parametrize("field", ["schedule_line", "payment_schedule"])
 def test_a_request_carrying_a_schedule_line_without_the_schedule_is_refused(env, field):
     # an API insert with docstatus 1 runs before_submit (F1), and flags cannot come through the API
@@ -291,7 +298,9 @@ def test_a_request_carrying_a_schedule_line_without_the_schedule_is_refused(env,
     doc = env.B2BDoc({"name": "MB2B-API", "docstatus": 1, "mpesa_settings": b2b_fixture.SETTINGS, "amount": 3000,
                       "supplier": "ACME", "supplier_mpesa_account": "MSA-1", "purchase_invoice": "PINV-1",
                       field: "L1" if field == "schedule_line" else "MPS-1"})
-    with pytest.raises(env.frappe.ValidationError, match="paid with Pay Selected in M-Pesa Payments Due"):
+    with pytest.raises(env.frappe.ValidationError, match="Send via M-Pesa button"):
+        doc.before_submit()
+    with _deliberate(doc), pytest.raises(env.frappe.ValidationError, match="paid with Pay Selected in M-Pesa Payments"):
         doc.before_submit()
     doc._row["docstatus"] = 0
     with pytest.raises(env.frappe.ValidationError, match="paid with Pay Selected"):

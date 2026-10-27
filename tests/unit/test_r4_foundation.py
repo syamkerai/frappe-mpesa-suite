@@ -308,8 +308,8 @@ def test_claim_and_advance_cancel_and_the_boot_hook_are_wired():
 
 
 def test_the_new_modules_add_no_endpoint():
-    for name in ("boot.py", "money_out/connections.py", "money_out/employee_documents.py",
-                 "money_out/send_confirm.py"):
+    # money_out/send_confirm.py has two since WP1 (tests/unit/test_send_confirm.py)
+    for name in ("boot.py", "money_out/connections.py", "money_out/employee_documents.py"):
         tree = ast.parse((APP / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
@@ -319,13 +319,9 @@ def test_the_new_modules_add_no_endpoint():
 def test_stubs_do_nothing_yet(env):
     employee_documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
     assert employee_documents.before_cancel(fake_frappe._dict(doctype="Expense Claim"), "before_cancel") is None
-    send_confirm = importlib.import_module("mpsa_suite.money_out.send_confirm")
+    send_confirm = importlib.import_module("mpsa_suite.money_out.send_confirm")  # built in WP1
     with send_confirm.deliberate("Pay Selected"):
         send_confirm.assert_deliberate(fake_frappe._dict(doctype="Mpesa B2B Payment Request"))
-    with pytest.raises(NotImplementedError):
-        send_confirm.prepare_send("Mpesa B2B Payment Request", "MB2B-1")
-    with pytest.raises(NotImplementedError):
-        send_confirm.confirm_send("Mpesa B2B Payment Request", "MB2B-1", "token")
 
 
 # ---------------------------------------------------------------- M-Pesa Suite Settings

@@ -47,10 +47,10 @@ from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..permissions import ADMIN_ROLES, FINANCE_ROLES, PAYOUT_ROLES, require
+from ..permissions import ADMIN_ROLES, FINANCE_ROLES, PAYOUT_ROLES, require, require_named_user
 from ..wallet import accounts as wallet_accounts
 from ..wallet import balances
-from . import employee_accounts, owed, party_accounts, supplier_accounts
+from . import employee_accounts, owed, party_accounts, send_confirm, supplier_accounts
 
 SCHEDULE = "M-Pesa Payment Schedule"
 LINE = "M-Pesa Payment Schedule Line"
@@ -567,7 +567,7 @@ def line_problem(line, schedule=None, *, for_update: bool = False, payer=None, s
         return refuse(f"Not due until {_day(line.planned_date)}.")
     if cint(schedule.closed):
         return refuse(f"{schedule.name} is closed.")
-    if maker_checker_on() and payer != "Administrator" and payer in (line.prepared_by, line.changed_by):
+    if maker_checker_on() and payer in (line.prepared_by, line.changed_by):
         return refuse("You prepared or last changed this line: another person must pay it.")
     if line.party_type == "Employee" and line.party:
         own = employee_accounts.own_payment_problem(line.party, payer)
@@ -626,7 +626,7 @@ def _send_problem(line, schedule, payer) -> str | None:
             return "A phone (B2C) line pays an employee's approved phone: pick the employee."
         if not cint(frappe.db.get_single_value(supplier_accounts.SUITE, "allow_one_off_b2b")):
             return "Paying a number not saved on a supplier is switched off (M-Pesa Suite Settings)."
-        if payer != "Administrator" and not set(ADMIN_ROLES) & set(frappe.get_roles(payer)):
+        if not set(ADMIN_ROLES) & set(frappe.get_roles(payer)):
             return "A number not saved on a supplier is paid by an M-Pesa Manager only."
     if b2c:
         return _caught(check_b2c_settings, schedule.b2c_settings, flt(line.amount), schedule.company)
@@ -911,6 +911,7 @@ def prepare_payment(lines) -> dict:
     Per payee and per shortcode and route, the grand total, each shortcode's balance with its age
     and any shortfall, the lines left out and why. The token is bound to this user and the lines
     as shown, used once, and works from 5 seconds to 10 minutes after this call."""
+    require_named_user()
     require(PAYOUT_ROLES)
     names = _names(lines)
     if not names:
@@ -1011,6 +1012,7 @@ def confirm_payment(token) -> dict:
     """Pay the lines of a summary: once per token, by its user, no sooner than 5 seconds after it
     was made. Each line is checked again under its locks and gets a submitted B2B request; the
     requests are sent by send_batch after this commits."""
+    require_named_user()
     require(PAYOUT_ROLES)
     token = cstr(token).strip()
     if not token:
@@ -1130,7 +1132,8 @@ def _pay_line(item, batch, payer) -> tuple:
             "status": SENDING, "request": doc.name, "approved_by": payer, "approved_on": now_datetime(),
             "batch": batch, "attempts": cint(line.attempts) + 1, "last_problem": None,
         }, update_modified=False)
-        doc.submit()  # every B2B check again under the document's lock; sent later (flags)
+        with send_confirm.deliberate("Pay Selected", doc):  # this confirm is the payer's deliberate step
+            doc.submit()  # every B2B check again under the document's lock; sent later (flags)
     return doc.name, line, schedule
 
 
@@ -1201,7 +1204,8 @@ def _pay_b2c_group(members, batch, payer) -> str:
             "status": SENDING, "b2c_disbursement": doc.name, "b2c_row": row.name, "approved_by": payer,
             "approved_on": now, "batch": batch, "attempts": cint(line.attempts) + 1, "last_problem": None,
         }, update_modified=False)
-    doc.submit()  # B2C's guard under each slip's lock; its jobs make and send the payouts after commit
+    with send_confirm.deliberate("Pay Selected", doc):  # this confirm is the payer's deliberate step
+        doc.submit()  # B2C's guard under each slip's lock; its jobs make and send the payouts after commit
     return doc.name
 
 

@@ -4,6 +4,9 @@ Upstream left these open to any logged-in user (including website/portal users).
 Collecting and finance work keep the standard ERPNext roles staff already hold. Sending money
 and M-Pesa administration are for the suite's own roles only (the user's decisions D1 and D2,
 2026-10-23): ERPNext's Accounts Manager and HR Manager prepare payouts but do not send them.
+Only named payers send (decision 1, 2026-10-27): System Manager configures the suite but neither
+sends, approves payee accounts nor sees salaries, and the shared Administrator login is refused
+for sends and approvals (``require_named_user``).
 Who holds what, per DocType and per endpoint: docs/ROLES_AND_PERMISSIONS.md
 (kept in step with mpsa_suite.permission_matrix by the unit tests).
 """
@@ -43,24 +46,23 @@ PREPARE_ROLES = (
     "HR User",
 )
 
-# Send money: submit B2C payouts, B2B payments and reversals, retry them, Pay Selected.
+# Send money: submit B2C payouts, B2B payments and reversals, retry them, Pay Selected. Named
+# payers only (decision 1, 2026-10-27): not System Manager.
 PAYOUT_ROLES = (
-    "System Manager",
     "M-Pesa Manager",
     "M-Pesa Payer",
 )
 
 # Approve payee accounts and one-off destinations, change registrations at Safaricom (C2B URLs,
-# Pull), settle Unknown payouts, reconcile by hand, the Sandbox Lab.
+# Pull), settle Unknown payouts, reconcile by hand, the Sandbox Lab. M-Pesa Manager only.
 ADMIN_ROLES = (
-    "System Manager",
     "M-Pesa Manager",
 )
 
 # See salary payouts (decision D4): those who read Salary Slips in HRMS (HR User, HR Manager) and
-# those who send or administer payouts. Employee is not here: it reads only its own slip.
+# those who send or administer payouts. Employee is not here: it reads only its own slip; nor is
+# System Manager, which HRMS does not let read Salary Slips either (decision 1, 2026-10-27).
 SALARY_ROLES = (
-    "System Manager",
     "M-Pesa Manager",
     "M-Pesa Payer",
     "HR Manager",

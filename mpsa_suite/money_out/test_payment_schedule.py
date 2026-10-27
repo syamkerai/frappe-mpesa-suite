@@ -17,7 +17,7 @@ from frappe.utils import add_days, add_to_date, flt, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, owed, schedule
+from mpsa_suite.money_out import b2b, owed, schedule, send_confirm
 from mpsa_suite.money_out.test_b2b_documents import _settings  # the shortcode TESTB2BDOCS, its accounts
 
 SETTINGS = "TESTB2BDOCS"
@@ -245,17 +245,25 @@ class TestPaymentSchedule(IntegrationTestCase):
         values = {"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 3000, "remarks": "x",
                   "supplier": self.supplier, "supplier_mpesa_account": ACCOUNT, "purchase_invoice": pi,
                   "payment_schedule": doc.name, "schedule_line": line.name}
+        frappe.set_user(PAYER)  # submits are a named payer's (Administrator is refused); tearDown resets it
         with patch("mpsa_suite.money_out.b2b.post") as post:
-            # 2. an API insert already submitted, carrying the line (flags cannot come through the API)
-            self.assertRaisesRegex(frappe.ValidationError, "Pay Selected",
+            # 2. an API insert already submitted, carrying the line (flags cannot come through the API,
+            # and no plain submit is the deliberate step); even inside one, the line is refused
+            self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa",
                                    frappe.get_doc({**values, "docstatus": 1}).insert)
+            with send_confirm.deliberate("a console"):
+                self.assertRaisesRegex(frappe.ValidationError, "Pay Selected",
+                                       frappe.get_doc({**values, "docstatus": 1}).insert)
             # 3. a console insert with the schedule's flags set by hand: the submit still refuses
             req = frappe.get_doc(values)
             req.flags.mpesa_from_schedule = True
             req.insert()
             frappe.db.set_value(LINE, line.name, {"request": req.name, "status": "Sending"}, update_modified=False)
             req.flags.mpesa_send_later = True
-            self.assertRaisesRegex(frappe.ValidationError, "Not due until", req.submit)
+            self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", req.submit)
+            with send_confirm.deliberate("a console", req):
+                self.assertRaisesRegex(frappe.ValidationError, "Not due until", req.submit)
+            frappe.set_user("Administrator")
             # 4. a console send of a submitted one, and 5. the job's send
             frappe.db.set_value(B2B, req.name, {"docstatus": 1, "status": "Not Initiated"}, update_modified=False)
             self.assertRaisesRegex(frappe.ValidationError, "Not due until", b2b.send_b2b, req.name)
@@ -292,6 +300,15 @@ class TestPaymentSchedule(IntegrationTestCase):
             self.assertRaisesRegex(frappe.ValidationError, "used already", schedule.confirm_payment, token)
         finally:
             frappe.set_user("Administrator")
+
+    def test_the_shared_administrator_login_cannot_pay_selected(self):
+        pi = self._invoice(10000)
+        line = self._schedule((3000, pi, 0)).lines[0]
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", schedule.prepare_payment, [line.name])
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", schedule.confirm_payment, "any")
+        self.assertEqual(len(self._pay([line])["sent"]), 1)  # the payer's own login
 
     def test_a_schedule_form_opened_before_a_payment_cannot_be_saved(self):
         pi = self._invoice(10000)

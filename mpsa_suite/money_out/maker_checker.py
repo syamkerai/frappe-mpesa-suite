@@ -1,13 +1,14 @@
 """Maker-checker on payouts sent by submitting a document (decision D3, 2026-10-23).
 
-Who sends a direct B2B request, a B2C Payment Disbursement or a direct B2C Disbursement Request
-must not be who created it or last saved it, and the submitting save must not change what is
-paid or where. Shares M-Pesa Suite Settings' switch with the payment schedule
+Who sends a direct B2B request, a B2C Payment Disbursement, a direct B2C Disbursement Request or
+a reversal must not be who created it or last saved it, and the submitting save must not change
+what is paid or where. Shares M-Pesa Suite Settings' switch with the payment schedule
 (``schedule_maker_checker``: on by default, off for one-person teams).
 
-Not checked here: Administrator (installs, tests, console), requests a payment schedule makes
-(its own maker-checker ran at Pay Selected) and the B2C requests of a disbursement that was
-checked when it was submitted.
+Administrator is checked like everyone else (round 4: it may not send at all while M-Pesa Suite
+Settings refuses it, permissions.require_named_user). Not checked here: requests a payment
+schedule makes (its own maker-checker ran at Pay Selected) and the B2C requests of a
+disbursement that was checked when it was submitted.
 """
 
 import frappe
@@ -32,6 +33,8 @@ PAID = {
         ("amount", "phone_number", "mpesa_settings", "reference_doctype", "reference_name", "party_type", "party"),
         None,
     ),
+    # the receipt reversed, how much, and from which shortcode
+    "Mpesa Reversal Request": (("c2b_register", "transaction_id", "amount", "mpesa_settings"), None),
 }
 NUMERIC = ("Currency", "Float", "Int", "Percent")
 
@@ -58,19 +61,29 @@ def _paid(doc) -> tuple:
     return _values(doc, fields), rows
 
 
+def _made_it(doc) -> str:
+    return _("You created or last changed {0}: another person must send it (maker-checker, M-Pesa Suite "
+             "Settings).").format(doc.name)
+
+
+def preview(doc, user: str | None = None) -> str | None:
+    """What ``check`` will say when ``user`` sends ``doc`` as it is saved now (None: it passes).
+    For the Send via M-Pesa summary (money_out.send_confirm)."""
+    user = user or frappe.session.user
+    if doc.doctype not in PAID or not enabled():
+        return None
+    return _made_it(doc) if user in {doc.owner, doc.get("modified_by")} else None
+
+
 def check(doc) -> None:
     """Throw unless someone other than the document's makers sends it, unchanged."""
     user = frappe.session.user
-    if user == "Administrator" or not enabled():
+    if not enabled():
         return
     before = doc.get_doc_before_save()
     makers = {doc.owner, before.modified_by if before else None}
     if user in makers:
-        frappe.throw(
-            _("You created or last changed {0}: another person must send it (maker-checker, M-Pesa Suite Settings).")
-            .format(doc.name),
-            title=_("Another person must send this"),
-        )
+        frappe.throw(_made_it(doc), title=_("Another person must send this"))
     if before and _paid(doc) != _paid(before):
         frappe.throw(
             _("{0} was changed while being sent. Save the change first; then another person sends it.").format(doc.name),

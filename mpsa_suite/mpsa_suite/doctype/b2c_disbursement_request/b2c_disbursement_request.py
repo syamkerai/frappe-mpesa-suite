@@ -10,8 +10,8 @@ from frappe.model.document import Document
 from frappe.utils import cint, flt
 
 from ...api.b2c import make_b2c_payment_request
-from ....money_out import maker_checker
-from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require
+from ....money_out import maker_checker, send_confirm
+from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require, require_named_user
 
 # Written only by the send, the ack, the Result and the booking (db writes). A scheduled payout's
 # cancel decides on, and keeps, what the database holds.
@@ -40,6 +40,8 @@ class B2CDisbursementRequest(Document):
         check_b2c_request(self)  # a scheduled payout only from the job that makes it
 
     def before_submit(self) -> None:
+        require_named_user()
+        send_confirm.assert_deliberate(self)  # Send via M-Pesa, or its disbursement's job
         require(PAYOUT_ROLES)  # submitting sends the money
         if not (self.flags.get("mpesa_from_disbursement") or self.flags.get("mpesa_from_schedule")):
             maker_checker.check(self)
@@ -112,6 +114,7 @@ class B2CDisbursementRequest(Document):
     @frappe.whitelist()
     def retry_failed_payment(self) -> None:
         """Retry only payments Safaricom reported as failed."""
+        require_named_user()
         require(PAYOUT_ROLES)
         # The document lock before the row lock: a disbursement submit takes the document
         # lock first and its locking read then reaches this row.
