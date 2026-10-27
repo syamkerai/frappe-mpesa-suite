@@ -496,6 +496,16 @@ function mpesa_show_request_dialog(frm, outstanding, mop_config, parent_dialog =
 					default: phone,
 					description: __("Format: 0712345678 or 254712345678"),
 				},
+				// the invoice desk passes no mop_config: the prompt's shortcode comes from the Mode of Payment
+				{
+					fieldtype: "Link",
+					fieldname: "mode_of_payment",
+					label: __("Mode of Payment"),
+					options: "Mode of Payment",
+					reqd: mop_config ? 0 : 1,
+					hidden: mop_config ? 1 : 0,
+					get_query: () => ({ filters: { type: "Phone" } }),
+				},
 			],
 			primary_action_label: __("Send Request"),
 			primary_action(values) {
@@ -522,7 +532,7 @@ function mpesa_show_request_dialog(frm, outstanding, mop_config, parent_dialog =
 						phone_number: values.phone_number,
 						amount: outstanding,
 						currency: frm.doc.currency,
-						mode_of_payment: mop_config.mop,
+						mode_of_payment: mop_config ? mop_config.mop : values.mode_of_payment,
 						company: frm.doc.company,
 						type: frm.doc.doctype,
 					},
@@ -773,3 +783,245 @@ function mpesa_inject_dialog_styles() {
 		.mpesa-req-row:not(:last-child) { border-bottom:1px solid rgba(255,255,255,.15); }
 	</style>`).appendTo("head");
 }
+
+// ---------------------------------------------------------------- Request M-Pesa payment
+// A submitted Sales Order or Sales Invoice asks the customer's phone through a Payment Request
+// (money_in.collect). The button shows to who may collect and create Payment Requests; the server
+// checks everything again, the amount and how often included.
+frappe.provide("mpsa_collect");
+
+mpsa_collect.can_request = function () {
+	return Boolean(frappe.boot.mpsa?.can_collect) && frappe.model.can_create("Payment Request");
+};
+
+// 0712345678, 712345678 or +254 712 345 678 -> 254712345678 (what the prompt's server functions store)
+mpsa_collect.msisdn = function (phone) {
+	const digits = String(phone || "").replace(/\D/g, "");
+	if (digits.length === 10 && digits.startsWith("0")) return "254" + digits.slice(1);
+	if (digits.length === 9) return "254" + digits;
+	return digits;
+};
+
+mpsa_collect.add_button = function (frm) {
+	frm.add_custom_button(__("Request Payment"), () => mpsa_collect.show_dialog(frm), __("M-Pesa"));
+};
+
+mpsa_collect.show_dialog = function (frm) {
+	const e = frappe.utils.escape_html;
+	const kes = (value) => format_number(value, null, 2);
+	frappe
+		.xcall("mpsa_suite.money_in.collect.collect_options", { doctype: frm.doctype, name: frm.doc.name })
+		.then((o) => {
+			if (o.problem) {
+				frappe.msgprint(e(o.problem));
+				return;
+			}
+			if (!(o.gateways || []).length) {
+				frappe.msgprint(__("No M-Pesa shortcode of {0} sends STK prompts.", [e(frm.doc.company)]));
+				return;
+			}
+			if (flt(o.owed) <= 0) {
+				frappe.msgprint(
+					__("Payment Requests {0} already ask for everything {1} owes: resend their prompt instead.", [
+						e((o.held_by || []).join(", ")),
+						e(frm.doc.name),
+					])
+				);
+				return;
+			}
+			const most = (gateway) => Math.min(flt(o.owed), flt(gateway.limit));
+			const first = o.gateways[0];
+			let summary = `<p>${__("{0} has KES {1} left to ask for.", [e(o.customer_name), kes(o.owed)])}</p>`;
+			if ((o.held_by || []).length) {
+				summary += `<p class="text-muted small">${__("Open Payment Requests {0} ask for the rest.", [
+					e(o.held_by.join(", ")),
+				])}</p>`;
+			}
+			const dialog = new frappe.ui.Dialog({
+				title: __("Request M-Pesa Payment"),
+				fields: [
+					{ fieldtype: "HTML", fieldname: "summary", options: summary },
+					{
+						fieldtype: "Data",
+						fieldname: "phone_number",
+						label: __("Customer's Phone"),
+						reqd: 1,
+						default: o.phone,
+						description: __("Format: 0712345678 or 254712345678"),
+					},
+					{
+						fieldtype: "Currency",
+						fieldname: "amount",
+						label: __("Amount (KES)"),
+						reqd: 1,
+						default: most(first),
+						description: __("At most KES {0}: one prompt asks at most the shortcode's Transaction Limit.", [
+							kes(most(first)),
+						]),
+					},
+					{
+						fieldtype: "Select",
+						fieldname: "payment_gateway_account",
+						label: __("Prompt From"),
+						options: o.gateways.map((g) => ({ value: g.name, label: g.label })),
+						default: first.name,
+						reqd: 1,
+						hidden: o.gateways.length < 2 ? 1 : 0,
+					},
+				],
+				primary_action_label: __("Send Prompt"),
+				primary_action(values) {
+					const gateway = o.gateways.find((g) => g.name === values.payment_gateway_account) || first;
+					const limit = most(gateway);
+					if (flt(values.amount) <= 0 || flt(values.amount) > limit + 0.005) {
+						frappe.msgprint(__("Ask for more than 0 and at most KES {0}.", [kes(limit)]));
+						return;
+					}
+					frappe.call({
+						method: "mpsa_suite.money_in.collect.request_payment",
+						args: {
+							doctype: frm.doctype,
+							name: frm.doc.name,
+							phone_number: values.phone_number,
+							amount: values.amount,
+							payment_gateway_account: gateway.name,
+						},
+						freeze: true,
+						freeze_message: __("Sending the prompt..."),
+						callback(r) {
+							if (r.exc || !r.message) return;
+							dialog.hide();
+							frappe.show_alert(
+								{
+									message: __("Prompt sent to {0} for KES {1}: Payment Request {2}.", [
+										e(r.message.phone),
+										kes(r.message.amount),
+										e(r.message.payment_request),
+									]),
+									indicator: "green",
+								},
+								7
+							);
+							frm.reload_doc();
+						},
+					});
+				},
+			});
+			dialog.show();
+		});
+};
+
+// ---------------------------------------------------------------- Purchase Invoice / Order
+// What M-Pesa has on its way for the document and what is left to pay (money_out.b2b.amount_left),
+// and a line for it on an M-Pesa Payment Schedule: the schedule's form saves and checks it.
+frappe.provide("mpsa_payables");
+
+mpsa_payables.SCHEDULE = "M-Pesa Payment Schedule";
+
+mpsa_payables.show_left = function (frm) {
+	return frappe
+		.xcall("mpsa_suite.money_out.b2b.amount_left", { doctype: frm.doctype, name: frm.doc.name })
+		.then((r) => {
+			const s = (r && r.summary) || {};
+			if (!flt(s.in_progress) && !flt(s.planned)) return;
+			const kes = (value) => format_number(value, null, 2);
+			const parts = [];
+			if (flt(s.in_progress)) parts.push(__("KES {0} on its way", [kes(s.in_progress)]));
+			if (flt(s.planned)) parts.push(__("KES {0} planned on a payment schedule", [kes(s.planned)]));
+			frm.dashboard.set_headline(
+				__("M-Pesa: {0}. Left to pay: KES {1}.", [parts.join(", "), kes(s.left)]),
+				flt(s.in_progress) ? "orange" : "blue"
+			);
+		});
+};
+
+mpsa_payables.add_schedule_button = function (frm) {
+	frm.add_custom_button(__("Add to M-Pesa Payment Schedule"), () => mpsa_payables.add_to_schedule(frm), __("M-Pesa"));
+};
+
+mpsa_payables.add_to_schedule = function (frm) {
+	const doc = frm.doc;
+	const e = frappe.utils.escape_html;
+	const kes = (value) => format_number(value, null, 2);
+	frappe.xcall("mpsa_suite.money_out.b2b.amount_left", { doctype: doc.doctype, name: doc.name }).then((r) => {
+		const stops = [...(r.problems || []), ...(r.supplier_hold ? [r.supplier_hold] : [])];
+		if (stops.length) {
+			frappe.msgprint(stops.map(e).join("<br>"));
+			return;
+		}
+		if (flt(r.left) <= 0) {
+			frappe.msgprint(__("{0} has nothing left to pay by M-Pesa.", [e(doc.name)]));
+			return;
+		}
+		const dialog = new frappe.ui.Dialog({
+			title: __("Add to M-Pesa Payment Schedule"),
+			fields: [
+				{
+					fieldtype: "Link",
+					fieldname: "schedule",
+					label: __("Payment Schedule"),
+					options: mpsa_payables.SCHEDULE,
+					description: __("Leave empty for a new schedule."),
+					get_query: () => ({ filters: { company: doc.company, closed: 0, purpose: "General" } }),
+				},
+				{
+					fieldtype: "Date",
+					fieldname: "planned_date",
+					label: __("Pay On"),
+					reqd: 1,
+					default: frappe.datetime.get_today(),
+				},
+				{
+					fieldtype: "Currency",
+					fieldname: "amount",
+					label: __("Amount (KES)"),
+					reqd: 1,
+					default: flt(r.left),
+					description: __("KES {0} is left to pay.", [kes(r.left)]),
+				},
+			],
+			primary_action_label: __("Add Line"),
+			primary_action(values) {
+				if (flt(values.amount) <= 0 || flt(values.amount) > flt(r.left) + 0.005) {
+					frappe.msgprint(__("Plan more than 0 and at most KES {0}.", [kes(r.left)]));
+					return;
+				}
+				dialog.hide();
+				mpsa_payables.open_schedule(values.schedule, doc, r, {
+					planned_date: values.planned_date,
+					party_type: "Supplier",
+					party: r.supplier,
+					reference_doctype: doc.doctype,
+					reference_name: doc.name,
+					amount: flt(values.amount),
+					remarks: [doc.name, doc.bill_no].filter(Boolean).join(" ").slice(0, 140),
+				});
+			},
+		});
+		dialog.show();
+	});
+};
+
+// Opens the schedule (a new one when none is picked) with the line added and not yet saved:
+// saving it runs the schedule's own checks (approved account, what is left to pay, maker-checker).
+mpsa_payables.open_schedule = function (name, doc, r, line) {
+	const SCHEDULE = mpsa_payables.SCHEDULE;
+	const add_line = (schedule) => {
+		const row = frappe.model.add_child(schedule, "M-Pesa Payment Schedule Line", "lines");
+		Object.assign(row, line);
+		schedule.__unsaved = 1;
+		frappe.set_route("Form", SCHEDULE, schedule.name);
+		frappe.show_alert({ message: __("Line added: save the schedule to keep it."), indicator: "blue" }, 5);
+	};
+	if (name) {
+		frappe.model.with_doc(SCHEDULE, name).then(add_line);
+		return;
+	}
+	frappe.model.with_doctype(SCHEDULE, () => {
+		const schedule = frappe.model.get_new_doc(SCHEDULE);
+		schedule.company = doc.company;
+		schedule.title = __("Supplier payments {0}", [frappe.datetime.str_to_user(line.planned_date)]);
+		if ((r.mpesa_settings || []).length === 1) schedule.b2b_settings = r.mpesa_settings[0];
+		add_line(schedule);
+	});
+};

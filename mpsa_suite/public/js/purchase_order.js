@@ -22,5 +22,15 @@ frappe.ui.form.on("Purchase Order", {
 				__("M-Pesa")
 			);
 		}
+		// what M-Pesa has on its way or planned for the order's advance, and a schedule line for it (utils.js)
+		if (
+			doc.docstatus === 1 &&
+			!flt(doc.per_billed) &&
+			!["On Hold", "Closed", "Completed"].includes(doc.status) &&
+			(doc.currency || "KES") === "KES"
+		) {
+			if (frappe.model.can_read("Mpesa B2B Payment Request")) mpsa_payables.show_left(frm);
+			if (frappe.model.can_create("M-Pesa Payment Schedule")) mpsa_payables.add_schedule_button(frm);
+		}
 	},
 });

@@ -4,6 +4,7 @@ frappe.ui.form.on("B2C Disbursement Request", {
 	refresh(frm) {
 		const unsettled = ["Not Initiated", "Initiated", "Status Unknown", "", null, undefined].includes(frm.doc.status);
 		if (frm.doc.docstatus !== 1 || !frm.doc.mpesa_settings || !unsettled) return;
+		if (!(frappe.boot.mpsa?.can_pay || frappe.boot.mpsa?.can_approve)) return; // PAYOUT_ROLES or ADMIN_ROLES
 		frm.add_custom_button(
 			__("Check Status with M-Pesa"),
 			() =>

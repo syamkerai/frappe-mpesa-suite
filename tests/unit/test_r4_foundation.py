@@ -282,13 +282,18 @@ def test_dashboards_keep_the_old_entries_and_add_one_function_per_doctype():
         assert _defines(target), target
 
 
-def test_connections_leave_the_dashboards_unchanged_for_now():
+def test_connections_extend_the_dashboards_they_are_given(env):
+    # WP6 fills them: tests/unit/test_r4_connections.py has what each one adds
+    _, frappe = env
+    frappe.get_meta = lambda doctype, *a, **kw: types.SimpleNamespace(has_field=lambda f: True,
+                                                                     get_table_fields=lambda: [])
     connections = importlib.import_module("mpsa_suite.money_out.connections")
     for target in _hook("override_doctype_dashboards").values():
         if target.startswith("mpsa_suite.money_out.connections."):
             data = {"fieldname": "reference_name", "transactions": [{"label": "Payment", "items": ["Payment Entry"]}]}
             assert getattr(connections, target.rpartition(".")[2])(data=data) is data
-            assert getattr(connections, target.rpartition(".")[2])() == {}
+            assert data["transactions"][0] == {"label": "Payment", "items": ["Payment Entry"]}
+            assert data["transactions"][1]["label"] == "M-Pesa"
 
 
 def test_claim_and_advance_cancel_and_the_boot_hook_are_wired():

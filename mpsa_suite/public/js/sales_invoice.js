@@ -9,11 +9,25 @@ const MPESA_FORM_CONFIG = {
 
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
+		// a submitted invoice still owed: prompt the customer's phone (utils.js mpsa_collect)
+		if (
+			frm.doc.docstatus === 1 &&
+			!frm.doc.is_pos &&
+			!frm.doc.is_return &&
+			flt(frm.doc.outstanding_amount) > 0 &&
+			(frm.doc.currency || "KES") === "KES" &&
+			mpsa_collect.can_request()
+		) {
+			mpsa_collect.add_button(frm);
+		}
+
+		// the STK and C2B buttons below call endpoints for COLLECT_ROLES only
 		if (
 			!frm.is_new() &&
 			frm.doc.is_pos &&
 			frm.doc.docstatus === 0 &&
-			frm.doc.outstanding_amount > 0
+			frm.doc.outstanding_amount > 0 &&
+			frappe.boot.mpsa?.can_collect
 		) {
 			frappe.call({
 				method: "mpsa_suite.mpsa_suite.api.sales_invoice.validate_stk_push_eligibility",
@@ -77,14 +91,19 @@ frappe.ui.form.on("Sales Invoice", {
 	},
 
 	open_mpesa_payment_modal: function (frm) {
-		// Fetch Mpesa payments
+		// Draft Mpesa payments of the invoice's company, the customer's or not matched to anyone yet
 		frappe.call({
 			method: "frappe.client.get_list",
 			args: {
 				doctype: "Mpesa C2B Payment Register",
 				filters: {
 					docstatus: 0,
+					company: frm.doc.company,
 				},
+				or_filters: [
+					["customer", "=", frm.doc.customer],
+					["customer", "is", "not set"],
+				],
 				fields: [
 					"name",
 					"transamount",
@@ -198,24 +217,6 @@ frappe.ui.form.on("Sales Invoice", {
 			},
 		});
 	},
-
-	insert_payment_entry: function (frm, payment_response) {
-		console.log("Inserting Payment Entry for Sales Invoice", frm.doc.name);
-		frappe.call({
-			method: "frappe.client.insert",
-			args: {
-				doc: {
-					doctype: "Payment Entry",
-					payment_type: "Receive",
-					party_type: "Customer",
-					party: frm.doc.customer,
-					paid_to: "Cash",
-					reference_no: payment_response["MpesaReceiptNumber"],
-					amount: frm.doc.grand_total,
-				},
-			},
-		});
-	},
 });
 
 frappe.ui.form.on("Sales Invoice Payment", {
@@ -253,7 +254,13 @@ function setup_stk_push_button_logic(frm) {
 			(row.mode_of_payment && row.mode_of_payment.toLowerCase().includes("mpesa")) ||
 			row.type === "Phone";
 
-		if (is_mpesa_or_phone && row.phone_number && row.amount > 0 && !row.reference_no) {
+		if (
+			is_mpesa_or_phone &&
+			row.phone_number &&
+			row.amount > 0 &&
+			!row.reference_no &&
+			frappe.boot.mpsa?.can_collect
+		) {
 			row.initiate_stk_push = `
         <div style="margin-top:5px;">
           <button class="btn btn-primary btn-xs stk-button" data-row-name="${row.name}">

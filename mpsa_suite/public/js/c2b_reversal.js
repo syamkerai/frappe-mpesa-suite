@@ -2,6 +2,7 @@
 frappe.ui.form.on("Mpesa C2B Payment Register", {
 	refresh(frm) {
 		if (frm.is_new() || frm.doc.docstatus === 2 || !frm.doc.transid) return;
+		if (!(frappe.boot.mpsa?.can_pay || frappe.boot.mpsa?.can_approve)) return; // PAYOUT_ROLES or ADMIN_ROLES
 		frm.add_custom_button(
 			__("Reverse Payment"),
 			() =>

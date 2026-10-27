@@ -296,21 +296,27 @@ def _schedules(payroll_entry: str) -> list:
 
 # ---------------------------------------------------------------- the forms' Connections
 def get_dashboard_data(data=None):
-    """Payroll Entry Connections: its M-Pesa payment schedule and B2B salary requests."""
-    data = data or {}
-    data.setdefault("fieldname", "payroll_entry")
-    data.setdefault("transactions", []).append(
-        {"label": "M-Pesa", "items": ["M-Pesa Payment Schedule", "Mpesa B2B Payment Request"]})
-    return data
+    """Payroll Entry Connections: its M-Pesa payment schedule, B2B salary requests and B2C salary
+    payouts (their rows' payroll_entry). Salary data: no counts for who may not see salaries."""
+    from .connections import B2C, add_group
+
+    return add_group(
+        PAYROLL_ENTRY, data,
+        links={SCHEDULE: "payroll_entry", B2B: "payroll_entry", B2C: "payroll_entry"},
+        dynamic={"payroll_entry": "payroll_doctype"}, fieldname="payroll_entry",
+    )
 
 
 def get_employee_dashboard_data(data=None):
-    """Employee Connections: the employee's M-Pesa accounts and B2B payments."""
-    data = data or {}
-    data.setdefault("fieldname", "employee")
-    data.setdefault("transactions", []).append(
-        {"label": "M-Pesa", "items": ["Employee M-Pesa Account", "Mpesa B2B Payment Request"]})
-    return data
+    """Employee Connections: the employee's M-Pesa accounts, B2B and B2C payments and payment
+    schedule lines. Salary data: no counts for who may not see salaries."""
+    from .connections import B2C, add_group
+
+    return add_group(
+        "Employee", data,
+        links={EMPLOYEE_ACCOUNT: "employee", B2B: "employee", B2C_REQUEST: "party", B2C: "party", SCHEDULE: "party"},
+        dynamic={"party": "party_type"}, fieldname="employee",
+    )
 
 
 @frappe.whitelist()

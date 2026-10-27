@@ -3,7 +3,7 @@ frappe.ui.form.on("Supplier", {
 	refresh(frm) {
 		if (frm.is_new() || !frappe.model.can_read("Supplier M-Pesa Account")) return;
 
-		frm.add_custom_button(
+		frappe.model.can_create("Supplier M-Pesa Account") && frm.add_custom_button(
 			__("Add M-Pesa Account"),
 			() => frappe.new_doc("Supplier M-Pesa Account", { supplier: frm.doc.name }),
 			__("M-Pesa")
