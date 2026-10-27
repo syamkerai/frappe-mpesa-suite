@@ -44,14 +44,15 @@ account is the party's default. The suite ships the paybills of the top Kenyan b
     warning (not refused: ported numbers keep their prefix).
   - Paybill and till: 5 to 7 digits, never the company's own; a paybill needs its account number;
     a plain Paybill whose number is an enabled bank paybill is refused ("pick Bank Account and
-    <bank>").
+    <bank>"), unless its account number is a business's code#reference (see Review fixes).
   - Bank account: the bank must be enabled; the paybill and the name M-Pesa shows are copied from
     it; the account number is kept without spaces and dashes, letters and digits only, at most 20,
     and must fit the bank's pattern when it has one; the account holder defaults to the party's
     name, and a different name gets a "third-party account" warning.
   - An employee paid to a business paybill or till gets an orange warning.
   - Copying the bank's paybill or name again at approval is nobody's change: the person who
-    entered the account stays who entered it.
+    entered the account stays who entered it. A paybill that changed on the bank's row since the
+    draft was saved is refused at approval (see Review fixes).
 - **Uniqueness** on `destination_key`, across both DocTypes: the same destination for the same
   party is refused; for another employee (on an employee's account), refused; for another
   supplier, warned; between a supplier and an employee, a phone or bank account is refused (the
@@ -69,7 +70,8 @@ account is the party's default. The suite ships the paybills of the top Kenyan b
   account left becomes the default, and with two or more left none is guessed. A blocked account
   (name mismatch, bank paybill changed) cannot be the default; one on hold can. **Make Default**
   (a button and a whitelisted method on both DocTypes) replaces ticking the box after approval:
-  Supplier: FINANCE_ROLES and Purchase Manager; Employee: ADMIN_ROLES and HR Manager. It leaves a
+  Supplier: M-Pesa Manager, Accounts Manager and User, Purchase Manager (not System Manager: see
+  Review fixes); Employee: ADMIN_ROLES and HR Manager; a named login for both. It leaves a
   Version and a Comment, and an employee's change alerts the Notify Role (no names). A save after
   submit that changes `is_default` is refused. Lines and draft requests keep the account they
   name.
@@ -139,3 +141,51 @@ None. (The bank paybill list is data; WP0's settings are unchanged.)
   supplier bank account paid by B2B with "522522 - KCB Paybill AC" matching). Sends and approvals
   run as named users inside `send_confirm.deliberate`. `money_out/test_payroll_payouts.py`
   updated for the renamed type.
+
+## Review fixes (branch r4-fix-wp2, from c507634)
+- **Make Default is not System Manager's** (decision 1): the supplier profile's `default_roles` is
+  now M-Pesa Manager, Accounts Manager, Accounts User and Purchase Manager (FINANCE_ROLES without
+  System Manager). `make_default` also calls `require_named_user()`, so the shared Administrator
+  login cannot change where a supplier's payments or an employee's salary go; the form hides the
+  button from it. The `make_default` rows in `permission_matrix.py` and
+  `docs/ROLES_AND_PERMISSIONS.md` say so.
+- **Make Default from the form works for HR and Accounts**: the button called `frm.call`, which
+  sends the whole document to `run_doc_method`; Frappe (v15 and v16) then runs `check_if_latest`,
+  which for a submitted document is an update after submit and needs submit permission: only
+  M-Pesa Manager holds it, so HR Manager, Accounts User and Purchase Manager were refused before
+  `make_default` ran. Both forms now call `run_doc_method` by name (`dt`, `dn`), which checks read
+  only; `make_default` keeps its own role, named-user and read checks.
+- **A save after approval never unblocks an account**: `needs_reapproval`, `reapproval_reason`,
+  `name_mismatch`, `last_receiver_name` and `last_paid_on` lost Allow on Submit (the code writes them
+  with `frappe.db.set_value` only), and `before_update_after_submit` (`refuse_default_edit`) refuses
+  a change to any of them as well as to `is_default`, also when a site sets Allow on Submit back
+  with Customize Form. Who could do it before: whoever holds submit on the account (M-Pesa
+  Manager, and the shared Administrator login), skipping the second approver of a changed bank
+  paybill and the named Receiver Name Confirmed step. Roles without submit (Accounts User, HR)
+  were already refused by Frappe's own submit-permission check on an update after submit.
+- **A bank paybill changed after the draft was saved is not approved unseen**: at approval
+  (`before_submit`) the paybill is copied again from the bank's row, after Approve's summary and
+  token showed the saved draft. When the row's paybill differs from the saved draft's, the
+  approval is refused ("The bank's paybill changed from X to Y since this account was saved: save
+  it again and press Approve again"). Saving the draft again copies the new number (still nobody's
+  change), and the summary then shows it.
+- **A collection reference at a bank paybill stays a Paybill**: a Paybill whose number is an
+  enabled bank paybill and whose account number has `#` (a business's code and the payer's
+  reference, e.g. "Lipa na I&M" 542542 with 888888#house10) is accepted with an orange warning
+  instead of refused; without `#` it is still refused ("pick Bank Account"). A bank account number
+  with `#` is refused with a pointer to the Paybill type.
+- Tests: unit (`tests/unit/test_payee_accounts.py`): Make Default refused to System Manager and to
+  the shared Administrator login, no button for either; a save after approval refused for each of
+  the five fields, and an empty field sent back passes; the JSON fields without Allow on Submit;
+  the collection reference at I&M (Paybill accepted with a warning, Bank Account pointed to
+  Paybill, a plain number still refused, a 14-digit I&M account accepted); the approval refused
+  after a bank-row paybill change and accepted once saved again. Bench (written, not run):
+  `money_out/test_payee_accounts.py`: Approve through `send_confirm` (`t.send_as`) as a named
+  M-Pesa Manager after a bank-row paybill change (refused, then approved at the new number after a
+  save); Make Default through Frappe's router (`/api/method/run_doc_method` with `dt`/`dn`) as an
+  Accounts User and an HR Manager, refused to a System Manager and to Administrator; a save after
+  approval refused (HR and Accounts User by Frappe, an M-Pesa Manager by the hook, through
+  `doc.save` and `frappe.client.set_value`); an employee's till paid by B2B (BusinessBuyGoods, no
+  account number, the request's name as Daraja's AccountReference, no name check).
+  `money_out/test_payroll_payouts.py`: a payroll salary to an employee's Paybill default, sent by
+  Pay Selected as BusinessPayBill with the account number and booked by `salary_entries.for_b2b`.

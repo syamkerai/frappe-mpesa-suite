@@ -1,12 +1,15 @@
 """Payee accounts, round 4, against the real database (ERPNext v15 and v16 with HRMS): the shipped
-bank paybill list and its sync, the four account types, approval by a named manager, Make Default,
-a bank paybill change blocking the accounts on it, and a supplier bank account paid by B2B.
+bank paybill list and its sync, the four account types, approval by a named manager (also through
+the Approve step itself, send_confirm, with a bank paybill changed since the draft was saved),
+Make Default (also the form's own call through Frappe's router), a save after approval never
+unblocking an account, a bank paybill change blocking the accounts on it, a supplier bank account
+and an employee till paid by B2B.
 
 Every send and approval is made by a named test user holding the right role (never Administrator,
 never System Manager), inside send_confirm.deliberate so the deliberate-step rule lets the test's
-own submit through. Nothing reaches Safaricom: post() is replaced and the Result is handed to
-handle_result the way Safaricom posts it. Each test rolls back. Unit coverage:
-tests/unit/test_payee_accounts.py and test_bank_paybills.py.
+own submit through, or with send_confirm.send_for_test (t.send_as). Nothing reaches Safaricom:
+post() is replaced and the Result is handed to handle_result the way Safaricom posts it. Each test
+rolls back. Unit coverage: tests/unit/test_payee_accounts.py and test_bank_paybills.py.
 """
 
 import json
@@ -16,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import frappe
+from frappe.client import set_value as client_set_value
 from frappe.utils import add_days, now_datetime
 
 from mpsa_suite.compat import IntegrationTestCase
@@ -31,9 +35,11 @@ BANK, PAYBILL, TILL, PHONE = party_accounts.BANK, party_accounts.PAYBILL, party_
 HR, MANAGER, PREPARER, PAYER, BUYER = ("_t_payee_hr@example.com", "_t_payee_manager@example.com",
                                        "_t_payee_accounts@example.com", "_t_payee_payer@example.com",
                                        "_t_payee_buyer@example.com")
+SYSMGR = "_t_payee_sysmgr@example.com"  # configures the suite only (decision 1, 2026-10-27)
 SUPPLIER = "_T Payee Supplier"
 SUITE_VALUES = dict(allow_one_off_b2b=0, schedule_maker_checker=1, supplier_account_hold_hours=0,
                     employee_account_hold_hours=0, book_payout_charges=0, reconcile_payout_lines=0)
+RUN_DOC_METHOD = "/api/method/run_doc_method"
 
 
 @contextmanager
@@ -65,6 +71,26 @@ def _approved(doctype: str, name: str, **values) -> str:
     return name
 
 
+def _call(path: str, **form):
+    """POST ``path`` through Frappe's API router as the session user, as the browser sends it (the
+    helper of mpsa_suite/tests/test_roles_permissions.py)."""
+    from frappe.app import make_form_dict
+    from werkzeug.test import EnvironBuilder
+    from werkzeug.wrappers import Request
+
+    import frappe.api
+
+    request = Request(EnvironBuilder(path=path, method="POST", data=form).get_environ())
+    saved = getattr(frappe.local, "request", None), frappe.local.form_dict, frappe.local.response
+    frappe.local.request = request
+    frappe.local.response = frappe._dict(docs=[])  # as a fresh request has it
+    try:
+        make_form_dict(request)
+        return frappe.api.handle(request)
+    finally:
+        frappe.local.request, frappe.local.form_dict, frappe.local.response = saved
+
+
 class TestPayeeAccounts(IntegrationTestCase):
     @classmethod
     def setUpClass(cls):
@@ -77,6 +103,7 @@ class TestPayeeAccounts(IntegrationTestCase):
         _user(PREPARER, ("Accounts User",))
         _user(PAYER, ("M-Pesa Payer",))
         _user(BUYER, ("Purchase Manager",))
+        _user(SYSMGR, ("System Manager",))
         bank_paybills.sync_shipped()  # what install and every migrate run
         cls.supplier = _supplier()
         cls.employee = _employee("_T Payee Bank")
@@ -149,6 +176,31 @@ class TestPayeeAccounts(IntegrationTestCase):
             approved.submit()
         self.assertEqual((approved.docstatus, approved.approved_by), (1, MANAGER))
 
+    def test_approve_never_approves_a_bank_paybill_changed_since_the_draft_was_saved(self):
+        """The Approve step itself (send_confirm: prepare_send, then confirm_send, which submits): its
+        summary and token show the draft as saved, and the approval copies the bank's row again."""
+        with _as(HR):
+            doc = frappe.get_doc({"doctype": EMP, "employee": self.other_employee, "account_type": BANK,
+                                  "bank_paybill": "KCB", "account_number": "1234567890127",
+                                  "proof": "/private/files/_t_payee_letter.pdf"}).insert()
+        with _as(MANAGER):
+            summary = send_confirm.prepare_send(EMP, doc.name)
+            # a CONFIG role edits the bank's row: no approved account is on it, and drafts are never flagged
+            kcb = frappe.get_doc(BANKS, "KCB")
+            kcb.paybill = "522598"
+            kcb.save()
+        self.assertIn("522522", summary["rows"][0]["destination"])
+        self.assertRaisesRegex(frappe.ValidationError, "The bank's paybill changed from 522522 to 522598",
+                               t.send_as, MANAGER, frappe.get_doc(EMP, doc.name))
+        self.assertEqual(frappe.db.get_value(EMP, doc.name, ["docstatus", "shortcode"]), (0, "522522"))
+        with _as(HR):
+            frappe.get_doc(EMP, doc.name).save()  # saved again: the draft, and so the summary, show 522598
+        with _as(MANAGER):
+            self.assertIn("522598", send_confirm.prepare_send(EMP, doc.name)["rows"][0]["destination"])
+        approved = t.send_as(MANAGER, frappe.get_doc(EMP, doc.name))
+        self.assertEqual((approved.docstatus, approved.shortcode, approved.approved_by, approved.entered_by),
+                         (1, "522598", MANAGER, HR))  # copying the bank's number again is nobody's change
+
     def test_a_banks_paybill_typed_as_a_plain_paybill_is_refused(self):
         with _as(BUYER), self.assertRaisesRegex(frappe.ValidationError, "bank paybill: pick Account Type Bank Account"):
             frappe.get_doc({"doctype": SUP, "supplier": self.supplier, "account_type": PAYBILL, "shortcode": "522522",
@@ -184,6 +236,65 @@ class TestPayeeAccounts(IntegrationTestCase):
             doc = frappe.get_doc(EMP, phone)
             doc.is_default = 1
             doc.save()  # update after submit: the default changes only through Make Default
+
+    def test_the_forms_make_default_works_for_hr_and_accounts_but_not_system_manager(self):
+        """The form calls run_doc_method with dt and dn, through Frappe's router: HR Manager and Accounts
+        User hold no submit permission on the accounts (sent with the form's copy, Frappe would check one
+        as a save after submit and refuse them). System Manager and the shared Administrator login never
+        change where payments go."""
+        _approved(EMP, "_T-MEA-PAYEE-F1", employee=self.other_employee, account_type=PHONE, phone="254722000883",
+                  expected_name="Test Name", is_default=1)
+        bank = _approved(EMP, "_T-MEA-PAYEE-F2", employee=self.other_employee, account_type=BANK, bank_paybill="KCB",
+                         shortcode="522522", account_number="1234567890128", expected_name="KCB Paybill AC",
+                         account_holder_name="Test Name")
+        _approved(SUP, "_T-MSA-PAYEE-F1", supplier=self.supplier, account_type=PAYBILL, shortcode="888883",
+                  account_number="TP-3", expected_name=SUPPLIER, is_default=1)
+        till = _approved(SUP, "_T-MSA-PAYEE-F2", supplier=self.supplier, account_type=TILL, shortcode="777773",
+                         expected_name=SUPPLIER)
+        for user in (SYSMGR, "Administrator"):
+            with _as(user), self.assertRaises(frappe.PermissionError, msg=user):
+                _call(RUN_DOC_METHOD, dt=SUP, dn=till, method="make_default")
+        self.assertEqual(frappe.db.get_value(SUP, till, "is_default"), 0)
+        with _as(PREPARER):
+            _call(RUN_DOC_METHOD, dt=SUP, dn=till, method="make_default")
+        self.assertEqual(supplier_accounts.pick_account(self.supplier), till)
+        with _as(HR):
+            _call(RUN_DOC_METHOD, dt=EMP, dn=bank, method="make_default")
+        self.assertEqual(party_accounts.default_account(EMP, self.other_employee), bank)
+
+    def test_a_save_after_approval_never_unblocks_an_account(self):
+        """Frappe enforces neither read only nor anything but Allow on Submit on a save after submit
+        (PUT /api/resource, frappe.client.set_value): the block is set and cleared by the suite only."""
+        account = _approved(EMP, "_T-MEA-PAYEE-B", employee=self.employee, account_type=PHONE, phone="254722000884",
+                            expected_name="Test Name", is_default=1, name_mismatch=1,
+                            last_receiver_name="999999 - JOHN")
+        supplier_account = _approved(SUP, "_T-MSA-PAYEE-B", supplier=self.supplier, account_type=PAYBILL,
+                                     shortcode="888884", account_number="TP-4", expected_name=SUPPLIER,
+                                     needs_reapproval=1, reapproval_reason="Blocked for the test")
+        # write but no submit right: Frappe refuses any save of an approved account
+        for user, doctype, name in ((HR, EMP, account), (PREPARER, SUP, supplier_account)):
+            with _as(user), self.assertRaises((frappe.PermissionError, frappe.ValidationError), msg=user):
+                doc = frappe.get_doc(doctype, name)
+                doc.update({"name_mismatch": 0, "needs_reapproval": 0})
+                doc.save()
+        # an M-Pesa Manager holds submit: still refused, so unblocking stays Receiver Name Confirmed (a
+        # named login, a note) or cancel, amend and a second person's approval
+        with _as(MANAGER):
+            for doctype, name, values in ((EMP, account, {"name_mismatch": 0}),
+                                          (EMP, account, {"last_receiver_name": "254722000884 - TEST NAME"}),
+                                          (SUP, supplier_account, {"needs_reapproval": 0, "reapproval_reason": ""})):
+                with self.subTest(values=values), self.assertRaisesRegex(frappe.ValidationError,
+                                                                         "set by M-Pesa Suite only"):
+                    doc = frappe.get_doc(doctype, name)
+                    doc.update(values)
+                    doc.save()  # what PUT /api/resource does
+            with self.assertRaisesRegex(frappe.ValidationError, "set by M-Pesa Suite only"):
+                client_set_value(EMP, account, {"name_mismatch": 0})
+        self.assertEqual(frappe.db.get_value(EMP, account, ["name_mismatch", "last_receiver_name"]),
+                         (1, "999999 - JOHN"))
+        self.assertEqual(frappe.db.get_value(SUP, supplier_account, "needs_reapproval"), 1)
+        self.assertIn("is blocked", employee_accounts.usable_problem(employee_accounts.get_account(account),
+                                                                      self.employee))
 
     # ------------------------------------------------------------ a bank paybill change
     def test_a_paybill_change_blocks_the_account_until_approved_again(self):
@@ -254,3 +365,39 @@ class TestPayeeAccounts(IntegrationTestCase):
         self.assertEqual(frappe.db.get_value(B2B, request.name, ["status", "receiver_name_mismatch"]), ("Paid", 0))
         self.assertEqual(frappe.db.get_value(SUP, account, ["name_mismatch", "last_receiver_name"]),
                          (0, "522522 - KCB Paybill AC"))
+
+    def test_an_employees_till_is_paid_by_buy_goods_with_no_account_number(self):
+        till = _approved(EMP, "_T-MEA-PAYEE-TL", employee=self.other_employee, account_type=TILL, shortcode="835819",
+                         expected_name="Test Till", is_default=1)
+        with _as(PREPARER):
+            request = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 1200, "company": t.COMPANY,
+                                      "employee": self.other_employee, "remarks": "T payee till"}).insert()
+        self.assertEqual((request.employee_mpesa_account, request.command_id, request.receiver_shortcode,
+                          request.account_reference or None, request.entry_mode),
+                         (till, "BusinessBuyGoods", "835819", None, "Make the entry later"))
+        ack = {"ResponseCode": "0", "ResponseDescription": "Accepted", "ConversationID": "AG_T_PAYEE_TL",
+               "OriginatorConversationID": "OC_T_PAYEE_TL"}
+        # no Salary Slip caps it: an M-Pesa Manager sends it, with Send via M-Pesa
+        with patch("mpsa_suite.money_out.b2b.post", return_value=(ack, None)) as post:
+            request = t.send_as(MANAGER, request)
+        payload = post.call_args.args[2]
+        # Daraja's Buy Goods body lists AccountReference: the request's name, never an account number
+        self.assertEqual((payload["CommandID"], payload["PartyB"], payload["AccountReference"]),
+                         ("BusinessBuyGoods", "835819", request.name))
+        balance = "{Amount={CurrencyCode=KES, MinimumAmount=500000, BasicAmount=5000.00}}"
+        result = {
+            "ResultType": 0, "ResultCode": 0, "ResultDesc": "The service request is processed successfully.",
+            "ConversationID": "AG_T_PAYEE_TL", "OriginatorConversationID": "OC_T_PAYEE_TL",
+            "TransactionID": "TPAYEETL01",
+            # what a till's Result holds (Trident, 2026-10-22): a balance and the amount, no receiver
+            "ResultParameters": {"ResultParameter": [
+                {"Key": "DebitAccountCurrentBalance", "Value": balance},
+                {"Key": "InitiatorAccountCurrentBalance", "Value": balance},
+                {"Key": "Amount", "Value": 1200.0},
+            ]},
+        }
+        with patch("frappe.enqueue"):
+            b2b.handle_result(result, request.name)
+        self.assertEqual(frappe.db.get_value(B2B, request.name, ["status", "receiver_name_mismatch"]), ("Paid", 0))
+        # a till's Result names no one: nothing is checked, nothing blocked
+        self.assertEqual(frappe.db.get_value(EMP, till, ["name_mismatch", "last_receiver_name"]), (0, None))

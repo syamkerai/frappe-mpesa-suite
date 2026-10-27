@@ -281,7 +281,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.retry_failed_payments` | PAYOUT_ROLES | roles:PAYOUT_ROLES |
 | `mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.update_disbursement_status` | Submit B2C Payment Disbursement | direct, perm |
 | `mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.confirm_receiver_name` | ADMIN_ROLES | via:confirm_receiver_name |
-| `mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.make_default` | ADMIN_ROLES or HR Manager + read the account | via:make_default |
+| `mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.make_default` | ADMIN_ROLES or HR Manager, a named login + read the account | via:make_default |
 | `mpsa_suite.doctype.employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee` | Read Employee M-Pesa Account | via:accounts_for |
 | `mpsa_suite.doctype.m_pesa_suite_settings.m_pesa_suite_settings.MPesaSuiteSettings.regenerate_callback_token` | CONFIG_ROLES | roles:CONFIG_ROLES |
 | `mpsa_suite.doctype.m_pesa_suite_settings.m_pesa_suite_settings.MPesaSuiteSettings.reset_rejection_counter` | CONFIG_ROLES | roles:CONFIG_ROLES |
@@ -305,7 +305,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `mpsa_suite.doctype.mpesa_statement_import.mpesa_statement_import.MpesaStatementImport.import_statement` | Write the import | perm |
 | `mpsa_suite.doctype.mpesa_webhook_delivery.mpesa_webhook_delivery.MpesaWebhookDelivery.retry_now` | CONFIG_ROLES | roles:CONFIG_ROLES |
 | `mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.confirm_receiver_name` | ADMIN_ROLES | via:confirm_receiver_name |
-| `mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.make_default` | FINANCE_ROLES or Purchase Manager + read the account | via:make_default |
+| `mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.make_default` | M-Pesa Manager, Accounts Manager, Accounts User or Purchase Manager (not System Manager), a named login + read the account | via:make_default |
 | `mpsa_suite.doctype.supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier` | Read Supplier M-Pesa Account | via:accounts_for |
 | `sandbox_lab.api.add_scenarios` | ADMIN_ROLES + write the run | via:_run |
 | `sandbox_lab.api.check_now` | ADMIN_ROLES + write the run | via:_run |

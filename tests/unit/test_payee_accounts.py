@@ -124,8 +124,11 @@ def test_both_doctypes_take_the_four_types_and_have_every_field_the_code_reads(e
     assert set(env.pa.PROFILES[doctype].fields) - {"name", "docstatus"} <= set(fields)
     assert fields["bank_paybill"]["options"] == BANKS and fields["bank"]["fetch_from"] == "bank_paybill.bank"
     assert fields["is_default"]["read_only_depends_on"] == "eval:doc.docstatus==1"
-    for name in ("needs_reapproval", "reapproval_reason"):
-        assert (fields[name]["read_only"], fields[name]["allow_on_submit"], fields[name]["no_copy"]) == (1, 1, 1)
+    # the block and the last payment are written by the code (frappe.db.set_value) only: not Allow on
+    # Submit, so a save after approval cannot clear them (Frappe does not enforce read only there)
+    for name in env.pa.SET_BY_THE_SUITE:
+        assert (fields[name]["read_only"], fields[name].get("allow_on_submit"), fields[name]["no_copy"]) == (1, None, 1)
+        assert fields[name]["label"] == env.pa.SET_BY_THE_SUITE[name]
     assert fields["destination_key"]["search_index"] == 1 and fields["destination_key"]["hidden"] == 1
 
 
@@ -189,6 +192,35 @@ def test_a_bank_account_checks_the_banks_pattern_and_that_the_bank_is_on(env, do
         env.pa.validate_account(new(env, doctype, **dict(bank(doctype), account_number="12345")))
     with pytest.raises(env.frappe.ValidationError, match="Old Sacco is switched off in M-Pesa Bank Paybills"):
         env.pa.validate_account(new(env, doctype, **dict(bank(doctype), bank_paybill="OLD-SACCO")))
+
+
+@BOTH
+def test_a_collection_reference_at_a_bank_paybill_stays_a_paybill_with_a_warning(env, doctype):
+    # "Lipa na I&M": a business's code at I&M's paybill, then the payer's reference (the research of
+    # 2026-10-27); not an account at the bank, whose 14-digit pattern it could never fit
+    env.frappe.db.table(BANKS)["IM-BANK"] = {
+        "name": "IM-BANK", "code": "IM-BANK", "institution_name": "I&M Bank Limited", "paybill": "542542",
+        "enabled": 1, "bank": None, "receiver_name": None, "account_number_pattern": r"\d{14}",
+        "account_number_rule": "The full 14-digit I&M account number.", "observed_receiver_name": None}
+    doc = new(env, doctype, shortcode="542542", account_number=" 888888#house10 ", expected_name="I&M Bank")
+    env.pa.validate_account(doc)
+    assert (doc.account_type, doc.shortcode, doc.account_number) == (PAYBILL, "542542", "888888#house10")
+    assert doc.destination_key == "PB:542542:888888#HOUSE10"
+    assert any("888888#house10 is a business's collection reference there (code#reference), so this stays a "
+               "Paybill" in m for m in env.frappe.messages)
+    # typed as a bank account, it is pointed to the Paybill type
+    with pytest.raises(env.frappe.ValidationError,
+                       match="888888#house10 is a business's collection reference \\(code#reference\\): pick Account "
+                             "Type Paybill, with Paybill 542542"):
+        env.pa.validate_account(new(env, doctype, **dict(bank(doctype), bank_paybill="IM-BANK",
+                                                         account_number="888888#house10")))
+    # a plain account number at I&M is still an account at the bank
+    with pytest.raises(env.frappe.ValidationError,
+                       match="542542 is I&M Bank Limited's bank paybill: pick Account Type Bank Account"):
+        env.pa.validate_account(new(env, doctype, shortcode="542542", account_number="12345678901234",
+                                    expected_name="I&M Bank"))
+    env.pa.validate_account(new(env, doctype, **dict(bank(doctype), bank_paybill="IM-BANK",
+                                                     account_number="1234 5678 9012 34")))
 
 
 @BOTH
@@ -335,6 +367,9 @@ def test_cancelling_leaves_the_last_account_the_default_and_never_guesses_betwee
 
 @pytest.mark.parametrize("doctype, roles, allowed", [
     (SUP, {"Accounts User"}, True), (SUP, {"Purchase Manager"}, True), (SUP, {"HR Manager"}, False),
+    (SUP, {"Accounts Manager"}, True), (SUP, {"M-Pesa Manager"}, True),
+    # where payments go is routing, not configuration: never System Manager (decision 1, 2026-10-27)
+    (SUP, {"System Manager"}, False), (EMP, {"System Manager"}, False),
     (EMP, {"HR Manager"}, True), (EMP, {"M-Pesa Manager"}, True), (EMP, {"Accounts Manager"}, False),
     (EMP, {"HR User"}, False),
 ])
@@ -375,11 +410,33 @@ class Saved(fake_frappe._dict):
     def has_value_changed(self, field):
         return self.get(field) != self["_before"].get(field)
 
+    def get_doc_before_save(self):
+        return fake_frappe._dict(self["_before"])
+
 
 def test_the_default_of_an_approved_account_changes_only_with_make_default(env):
     with pytest.raises(env.frappe.ValidationError, match="Use Make Default"):
         env.pa.refuse_default_edit(Saved(doctype=SUP, is_default=1, _before={"is_default": 0}))
     env.pa.refuse_default_edit(Saved(doctype=SUP, is_default=1, remarks="x", _before={"is_default": 1}))
+
+
+@pytest.mark.parametrize("field, before, after", [
+    ("needs_reapproval", 1, 0),  # KCB's paybill changed: only cancel, amend and approve again clears it
+    ("name_mismatch", 1, 0),  # only Receiver Name Confirmed (a manager, named) clears it
+    ("reapproval_reason", "Bank paybill KCB changed from 522522 to 522599", None),
+    ("last_receiver_name", "999999 - JOHN", "522522 - KCB Paybill AC"),
+    ("last_paid_on", datetime.datetime(2026, 10, 1, 9, 0), datetime.datetime(2026, 10, 2, 9, 0)),
+])
+def test_a_save_after_approval_never_clears_a_block_nor_rewrites_the_last_payment(env, field, before, after):
+    with pytest.raises(env.frappe.ValidationError, match="set by M-Pesa Suite only on an approved M-Pesa account"):
+        env.pa.refuse_default_edit(Saved(doctype=EMP, **{field: after}, _before={field: before}))
+    env.pa.refuse_default_edit(Saved(doctype=EMP, **{field: before}, _before={field: before}))  # unchanged
+
+
+def test_a_save_after_approval_that_changes_nothing_passes(env):
+    # 0, "" and None alike: a form or API client sending an empty field changes nothing
+    env.pa.refuse_default_edit(Saved(doctype=SUP, needs_reapproval=None, name_mismatch="", reapproval_reason="",
+                                     _before={"needs_reapproval": 0, "name_mismatch": 0, "reapproval_reason": None}))
 
 
 def test_the_form_knows_when_a_default_is_missing(env):
@@ -390,6 +447,20 @@ def test_the_form_knows_when_a_default_is_missing(env):
     assert state == {"can_make_default": True, "approved": 2, "default": None}
     env.frappe.user_roles = {"Purchase User"}
     assert env.pa.form_state(doc_of(env, SUP, "MSA-1"))["can_make_default"] is False
+    env.frappe.user_roles = {"System Manager"}
+    assert env.pa.form_state(doc_of(env, SUP, "MSA-1"))["can_make_default"] is False
+
+
+@BOTH
+def test_the_shared_administrator_login_cannot_change_a_default(env, doctype):
+    stored(env, doctype, "ACC-1", is_default=1)
+    stored(env, doctype, "ACC-2", shortcode="111111")
+    env.frappe.user_roles, env.frappe.session.user = {"M-Pesa Manager"}, "Administrator"
+    assert env.pa.form_state(doc_of(env, doctype, "ACC-2"))["can_make_default"] is False  # no button
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        env.pa.make_default(doc_of(env, doctype, "ACC-2"))
+    table = env.frappe.db.table(doctype)
+    assert (table["ACC-1"]["is_default"], table["ACC-2"]["is_default"]) == (1, 0) and not versions(env)
 
 
 # ---------------------------------------------------------------- picking the account of a channel
@@ -557,6 +628,34 @@ def test_a_bank_name_copied_again_at_approval_is_nobodys_change_but_another_bank
     env.pa.validate_account(doc)
     with pytest.raises(env.frappe.ValidationError, match="A different person must approve"):
         env.pa.approve(doc)
+
+
+@BOTH
+def test_a_bank_paybill_changed_since_the_draft_was_saved_is_never_approved_unseen(env, doctype):
+    # Approve shows the draft as saved (522522); the approval copies the bank's row again
+    first = env.frappe.get_doc(dict(draft(doctype, **bank(doctype)), name="ACC-NEW", owner="hr@example.com",
+                                    doctype=doctype))
+    env.pa.validate_account(first)  # HR's save
+    env.frappe.db.table(doctype)["ACC-NEW"] = dict(first._row)
+    assert first.shortcode == "522522"
+    env.frappe.db.table(BANKS)["KCB"]["paybill"] = "123456"  # a CONFIG role edits the bank's row meanwhile
+
+    def approving():  # before_submit: the saved draft, docstatus 1
+        return env.frappe.get_doc(dict(env.frappe.db.table(doctype)["ACC-NEW"], doctype=doctype, docstatus=1))
+
+    with pytest.raises(env.frappe.ValidationError, match="The bank's paybill changed from 522522 to 123456 since this "
+                                                         "account was saved: save it again and press Approve again"):
+        env.pa.validate_account(approving())
+    resaved = env.frappe.get_doc(dict(env.frappe.db.table(doctype)["ACC-NEW"], doctype=doctype))
+    env.pa.validate_account(resaved)  # saved again: the draft, and so the Approve summary, show 123456
+    env.frappe.db.table(doctype)["ACC-NEW"] = dict(resaved._row)
+    doc = approving()
+    env.pa.validate_account(doc)
+    assert (doc.shortcode, doc.destination_key) == ("123456", "PB:123456:1234567890123")
+    # a paybill, till or phone is typed, never copied: nothing to compare
+    other = env.frappe.get_doc(dict(draft(doctype), name="ACC-PB", doctype=doctype, docstatus=1))
+    env.frappe.db.table(doctype)["ACC-PB"] = dict(other._row, docstatus=0)
+    env.pa.validate_account(other)
 
 
 # ---------------------------------------------------------------- migrate
