@@ -39,6 +39,7 @@ class B2CPaymentDisbursement(Document):
             ref.validate()
         self.validate_payout_limits()
         self.validate_reference_doctypes()
+        self.check_salary_reader()
         from ....money_out.schedule import check_b2c_disbursement
 
         check_b2c_disbursement(self)  # schedule lines only from Pay Selected
@@ -196,6 +197,7 @@ class B2CPaymentDisbursement(Document):
             b2b_slip_open,
             billed_order,
             busy_message,
+            employee_doc_taken_off,
             order_advances,
             planned_lines,
             slip_bank_problem,
@@ -204,6 +206,8 @@ class B2CPaymentDisbursement(Document):
 
         rows = self._rows_to_send()
         own_requests = self._own_requests()
+        # the claim payee lines this disbursement pays: their own share of what the claim owes
+        own_payees = sorted({r.claim_payee for r in self.references if r.get("claim_payee")})
         totals = {}
         for ref in rows:
             key = (ref.reference_doctype, ref.reference_name)
@@ -223,10 +227,12 @@ class B2CPaymentDisbursement(Document):
                             allocated += flt(paid.allocated_amount)  # this disbursement's own, not sent again
                         else:
                             others.append(paid)
+                b2b = []
                 if doctype in DOC_FIELDS or doctype in EMPLOYEE_DOC_FIELDS:
                     # B2B requests for the invoice, order, claim or advance count too (same lock,
                     # locking read)
-                    others += b2b_open(doctype, name, for_update=True)
+                    b2b = b2b_open(doctype, name, for_update=True)
+                    others += b2b
                 elif doctype == SLIP:
                     # B2B salary requests to the employee's bank paybill still on their way (a Paid
                     # one is in what the slip owes already)
@@ -252,6 +258,11 @@ class B2CPaymentDisbursement(Document):
                 # is no longer planned): taken off, as owed.left_to_pay does
                 advances += planned_lines(doctype, name, for_update=True)
                 advances += paying  # money_out.claim_payees.others_taken_off
+                if doctype in EMPLOYEE_DOC_FIELDS:
+                    # draft Payment and Journal Entries allocated to the claim or advance (HRMS's Make
+                    # Payment Entry left as a draft), and a claim's approved payee lines no payout
+                    # counted here represents: taken off, as owed.left_to_pay does for B2B and prepare
+                    advances += employee_doc_taken_off(doctype, name, b2b, own_payees)
                 owed = current_outstanding(doctype, name, for_update=True)  # the document row last (R4)
                 # an invoice made from the order may be paid already (B2B, bank): its advance_paid
                 # does not show that
@@ -468,10 +479,35 @@ class B2CPaymentDisbursement(Document):
 
         args = args.get("args", args) if isinstance(args, dict) else args
         doctype = args["transaction_to_pay_against"]
+        if doctype == "Salary Slip":
+            # salaries (decision D4): who may see them, and who reads the Payroll Entry (HRMS)
+            from ....money_out import payroll
+
+            payroll.require_salary_reader()
+            if args.get("payroll_entry"):
+                frappe.has_permission("Payroll Entry", "read", doc=args["payroll_entry"], throw=True)
         config = self._get_doctype_config(doctype)
         filters = self._build_filters(args, config)
         entries = self._fetch_entries(doctype, config, args, filters)
         return self._populate_references(entries, args, doctype, config.date_field)
+
+    def check_salary_reader(self) -> None:
+        """Decision D4: a disbursement row paying a Salary Slip is salary data (net pay, the
+        employee's phone). Who may not see salaries (an Accounts role alone) cannot make or change
+        one, and each slip is read by its own rights (HRMS). A draft's save only: not for a
+        payment schedule's rows (Pay Selected checked its preparer), nor at the send (the payer's
+        roles see salaries; Salary Slip is not theirs to read in HRMS)."""
+        if self.flags.get("mpesa_from_schedule") or cint(self.docstatus) != 0:
+            return
+        slips = sorted({ref.reference_name for ref in self.references
+                        if ref.reference_doctype == "Salary Slip" and ref.reference_name})
+        if not slips and self.transaction_to_pay_against != "Salary Slip":
+            return
+        from ....money_out import payroll
+
+        payroll.require_salary_reader()
+        for slip in slips:
+            frappe.has_permission("Salary Slip", "read", doc=slip, throw=True)
 
     def _check_can_prepare(self) -> None:
         """Form helpers that read other documents (bypassing their permissions) run for anyone who
@@ -705,6 +741,8 @@ class B2CPaymentDisbursement(Document):
         # never matches a net_pay with cents, so also ask what the slip still owes.
         unpaid_slips = []
         for slip in salary_slips:
+            if not frappe.has_permission("Salary Slip", "read", doc=slip.name):
+                continue  # a slip the user may not read (HRMS's rights, User Permissions) is not listed
             if (slip.employee, slip.net_pay) in paid_employees:
                 continue
             if flt(current_outstanding(doctype, slip.name)) < B2C_MIN_AMOUNT:
@@ -952,6 +990,14 @@ class B2CPaymentDisbursement(Document):
             return result
 
         if party_type == "Supplier":
+            from ....money_out.employee_documents import supplier_b2c_phone
+
+            # a supplier with approved Phone (B2C) M-Pesa Accounts is paid to one of them (the row's
+            # validate refuses any other number); one with none, to its Contact's phone
+            phone = supplier_b2c_phone(entry.get("party"))
+            if phone is not None:
+                result["account_number"] = phone
+                return result
             contact = frappe.db.get_all(
                 "Contact",
                 filters={"link_name": entry.party},

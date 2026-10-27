@@ -25,7 +25,7 @@ These destinations are not approved M-Pesa accounts, so:
   number is refused (an employee is paid by reimbursing the claim);
 - a per-payment and a per-day (per company) cap from M-Pesa Suite Settings, when above 0, except for
   a destination that is a supplier's approved Supplier M-Pesa Account (noted on the line);
-- a payout of a line must be the approved line's: the same destination, at most its amount, the line
+- a payout of a line must be the approved line's: the same destination, its whole amount, the line
   not paid or on its way already, the claim still payable (check_b2b, check_b2c_row: on save, at
   the send and right before the money leaves);
 - the name M-Pesa paid is compared with the name the claimant gave (a bank account: with the bank's
@@ -49,7 +49,7 @@ from frappe.utils import cint, cstr, flt, now_datetime, nowdate
 from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
-from ..permissions import ADMIN_ROLES, PREPARE_ROLES, require
+from ..permissions import ADMIN_ROLES, PREPARE_ROLES, require, require_named_user
 from ..utils.phone import is_safaricom, normalize_msisdn, to_local
 from . import owed
 from . import party_accounts as pa
@@ -183,6 +183,10 @@ def validate_claim(doc, method=None) -> None:
             for row in rows:
                 row.status = CANCELLED
         return
+    if at_submit and getattr(doc, "_action", None) == "submit":
+        # the claim's approval approves its payees' unverified tills, paybills, bank accounts and
+        # phones: a named approver, never the shared Administrator login (decision 1)
+        require_named_user()
     s = settings()
     if not s.allow:
         frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings): "
@@ -294,6 +298,11 @@ def clean_line(row, own=None, warnings=None) -> None:
             if not row.account_number:
                 frappe.throw(f"Row #{row.idx}: a paybill needs the Account Number the merchant gave.")
             bank = _bank_with_paybill(row.shortcode)
+            if bank and not cint(bank.enabled):
+                # a bank paybill nobody has checked yet: not paid as a merchant's paybill either
+                frappe.throw(f"Row #{row.idx}: {row.shortcode} is {bank.institution_name}'s bank paybill, switched off "
+                             "in M-Pesa Bank Paybills: an M-Pesa Manager checks its paybill and enables it, then pick "
+                             f"Pay To Bank Account (via Bank Paybill) and {bank.institution_name}.")
             if bank:
                 # the bank's account number rule and Safaricom's name for the bank apply to it
                 frappe.throw(f"Row #{row.idx}: {row.shortcode} is {bank.institution_name}'s bank paybill: pick Pay "
@@ -346,10 +355,11 @@ def _fits(pattern, value) -> bool:
 
 
 def _bank_with_paybill(shortcode):
-    """The enabled M-Pesa Bank Paybill row with this paybill, if the list exists on the site."""
+    """The M-Pesa Bank Paybill row with this paybill, enabled or not (a shipped row is disabled
+    until an M-Pesa Manager checks it), if the list exists on the site."""
     if not frappe.db.exists("DocType", BANK_PAYBILL):
         return None
-    return frappe.db.get_value(BANK_PAYBILL, {"paybill": shortcode, "enabled": 1}, ["name", "institution_name"],
+    return frappe.db.get_value(BANK_PAYBILL, {"paybill": shortcode}, ["name", "institution_name", "enabled"],
                                as_dict=True)
 
 
@@ -468,6 +478,13 @@ def employee_problem(row, claimant, found) -> str | None:
     if not who and row.get("payee_type") == BANK:
         who = found.bank_numbers.get(bank_number(row.get("account_number")))
     shown = f"{describe(row)} is"
+    if not who and row.get("payee_type") == PAYBILL and bank_number(row.get("account_number")):
+        # a paybill that is a bank's (one not on M-Pesa Bank Paybills, or a Sacco's) credits that account
+        who = found.bank_numbers.get(bank_number(row.get("account_number")))
+        if who:
+            whose = "the claimant's own" if who == claimant else "an employee's"
+            return (f"Row #{row.idx}: the account number {cstr(row.get('account_number')).strip()} is {whose} bank "
+                    "account number. An employee is paid by reimbursing the claim, never as a payee.")
     if not who and row.get("payee_type") in (PAYBILL, BANK):
         # a bank (or a paybill) that takes a phone number as the account credits that phone's owner
         msisdn = normalize_msisdn(row.get("account_number"))
@@ -524,7 +541,12 @@ def keep_results(doc, method=None) -> None:
 def on_cancel_claim(doc, method=None) -> None:
     """Expense Claim on_cancel: its lines are not paid any more (the cancel was refused while a
     payout of the claim was paid or on its way: money_out.employee_documents.before_cancel). A
-    draft payout left for a line cannot be sent: the claim is no longer payable."""
+    draft payout left for a line cannot be sent: the claim is no longer payable. Its failed payouts
+    do not hold the cancel either (employee_documents.ignore_payout_links): a wrong phone or till
+    is corrected by cancelling and amending the claim."""
+    from .employee_documents import ignore_payout_links
+
+    ignore_payout_links(doc)
     for row in doc.get(TABLE) or []:
         if row.get("status") not in (PAID, IN_FLIGHT):
             frappe.db.set_value(LINE, row.name, "status", CANCELLED, update_modified=False)
@@ -592,6 +614,7 @@ def payouts_of(lines, for_update: bool = False) -> list:
                 line=r.claim_payee, doctype=B2B, name=r.name, state=state, creation=r.creation,
                 receipt=r.transaction_id, receiver_name=r.receiver_public_name, paid_on=r.trans_completed_time,
                 error=(r.result_desc or r.error_message) if state == FAILED else None,
+                docstatus=cint(r.docstatus), status=r.status,
             ))
     if frappe.db.has_column(B2C_ROW, "claim_payee"):
         for r in frappe.db.sql(
@@ -613,8 +636,53 @@ def payouts_of(lines, for_update: bool = False) -> list:
                 creation=r.creation, receipt=r.transaction_id, receiver_name=r.receiver_public_name,
                 paid_on=r.transaction_completed_datetime,
                 error=(r.result_desc or r.error_message or "Not sent") if state == FAILED else None,
+                parent_docstatus=cint(r.parent_docstatus), request_docstatus=cint(r.request_docstatus),
             ))
     return found
+
+
+def counted_in_left_to_pay(payout) -> bool:
+    """Whether money_out.owed counts this payout of a line in what the claim has left to pay (or it
+    lowered the claim's outstanding already, once booked): a B2B request on its way (drafts too) or
+    Paid; a B2C row of a submitted disbursement (or a submitted payout) that did not fail, or Paid.
+    A B2C draft is not counted until it is sent (owed.b2c_open lists submitted rows), nor a failed
+    payout, nor one cancelled before it could take money."""
+    if payout.doctype == B2B:
+        status = payout.get("status") or "Not Initiated"
+        return status == "Paid" or (cint(payout.get("docstatus")) < 2 and status in owed.OPEN)
+    if payout.state == PAID:
+        return True
+    submitted = cint(payout.get("parent_docstatus")) == 1 or (
+        bool(payout.get("request")) and cint(payout.get("request_docstatus")) == 1)
+    return submitted and payout.state in (IN_FLIGHT, QUEUED)
+
+
+def unpaid_lines(claim: str, exclude_lines=(), for_update: bool = False) -> list:
+    """What a submitted Expense Claim's approved payee lines still hold of what it owes: each line
+    that is not Cancelled and that no payout counted by money_out.owed represents
+    (counted_in_left_to_pay): Draft, Failed, or Queued on a draft B2C disbursement. That money is
+    the merchants' and casual payees', approved with the claim: owed.left_to_pay (and B2C's
+    double-payout guards) take it off what is left for any other payout, so the employee is
+    offered only the rest. ``exclude_lines``: the lines the payout being checked pays (its own
+    share). As left_to_pay parts: _dict(kind="payee", name, line, amount, label)."""
+    if not paid_in_parts(CLAIM, claim):
+        return []  # no payee lines (most claims): nothing more to read
+    if cint(frappe.db.get_value(CLAIM, claim, "docstatus")) != 1:
+        return []  # a draft pays nobody yet; a cancelled claim pays nobody
+    skip = {cstr(n).strip() for n in exclude_lines or () if cstr(n).strip()}
+    rows = [r for r in read_lines(claim, for_update)
+            if r.name not in skip and r.get("status") != CANCELLED and flt(r.amount) > owed.MIN]
+    if not rows:
+        return []
+    payouts = payouts_of([r.name for r in rows], for_update)
+    parts = []
+    for row in rows:
+        if any(counted_in_left_to_pay(p) for p in payouts if p.line == row.name):
+            continue
+        parts.append(frappe._dict(
+            kind="payee", name=row.name, line=row.name, amount=flt(row.amount, 2),
+            label=f"payee row #{row.idx} ({row.payee_name}) {money(row.amount)} not paid yet"))
+    return parts
 
 
 def deciding_payout(payouts):
@@ -815,7 +883,7 @@ def check_b2b(doc) -> None:
     """A B2B request that pays a merchant line of an Expense Claim (its claim_payee). money_out.b2b
     calls it beside an employee request's checks: on save, at the send (submit) and right before
     the money leaves. A draft takes the line's destination, and every check compares with it: the
-    line's claim and claimant, its till, paybill or bank account, at most its amount, the line not
+    line's claim and claimant, its till, paybill or bank account, its whole amount, the line not
     paid or on its way by another payout. At the send, under the claim's lock: the claim still
     payable, the destination still no employee's, and the payee caps (M-Pesa Suite Settings)."""
     name = cstr(doc.get("claim_payee")).strip()
@@ -854,9 +922,11 @@ def check_b2b(doc) -> None:
             != _account_of(line.account_number, line.payee_type)):
         frappe.throw(f"The destination on {doc.name or 'this request'} is not payee row #{line.idx}'s of {claim} "
                      f"({describe(line)}).")
-    if flt(doc.get("amount")) > flt(line.amount) + 0.001:
-        frappe.throw(f"KES {money(doc.amount)} is more than payee row #{line.idx} of {claim} pays "
-                     f"(KES {money(line.amount)}).")
+    if abs(flt(doc.get("amount")) - flt(line.amount)) > 0.001:
+        # a payee is paid its line, whole: a payout of part of it would mark the line Paid and leave the
+        # rest of the merchant's money to be reimbursed to the employee
+        frappe.throw(f"KES {money(doc.amount)} is not what payee row #{line.idx} of {claim} pays "
+                     f"(KES {money(line.amount)}): a payee is paid its whole line.")
     if not sending:
         _check_others(line, (B2B, doc.name))
         return
@@ -879,7 +949,7 @@ def check_supplier_request(doc) -> None:
 def check_b2c_row(parent, row) -> None:
     """A B2C Payment Disbursement row that pays a casual payee (phone) line of an Expense Claim
     (its claim_payee). The row's own validate calls it, on every save and at the send (submit):
-    the row pays the line's claim on its claimant, to the line's phone, at most its amount, and the
+    the row pays the line's claim on its claimant, to the line's phone, its whole amount, and the
     line is not paid or on its way by another payout. At the send, under the claim's lock: the
     claim still payable, the phone still no employee's, and the payee caps (the disbursement's rows
     to such payees counted together for the day's cap)."""
@@ -904,9 +974,9 @@ def check_b2c_row(parent, row) -> None:
                      f"{parent.get('company') or 'no company'}.")
     if normalize_msisdn(row.get("partyb")) != line.phone:
         frappe.throw(f"Row #{row.idx}: the phone is not payee row #{line.idx}'s of {line.parent} ({describe(line)}).")
-    if flt(row.get("allocated_amount")) > flt(line.amount) + 0.001:
-        frappe.throw(f"Row #{row.idx}: KES {money(row.allocated_amount)} is more than payee row #{line.idx} of "
-                     f"{line.parent} pays (KES {money(line.amount)}).")
+    if abs(flt(row.get("allocated_amount")) - flt(line.amount)) > 0.001:
+        frappe.throw(f"Row #{row.idx}: KES {money(row.allocated_amount)} is not what payee row #{line.idx} of "
+                     f"{line.parent} pays (KES {money(line.amount)}): a payee is paid its whole line.")
     twice = [r.idx for r in parent.get("references") or [] if cstr(r.get("claim_payee")).strip() == name]
     if len(twice) > 1:
         frappe.throw(f"Rows {', '.join(f'#{i}' for i in twice)} pay the same payee row #{line.idx} of {line.parent}.")
@@ -1193,14 +1263,15 @@ def make_payouts(docs, states, b2b_settings=None, b2c_settings=None, phones_only
 
 
 def _check_left(doc, picked) -> None:
-    """The lines to pay fit in what the claim has left to pay, its payouts on their way counted
-    (money_out.owed.employee_doc_left_to_pay, under the claim's lock)."""
+    """The lines to pay fit in what the claim has left to pay, its payouts on their way and its
+    other unpaid payee lines counted (money_out.owed.employee_doc_left_to_pay, under the claim's
+    lock); the lines being paid are their own share."""
     total = flt(sum(flt(line.amount) for line in picked), 2)
     if not total:
         return
     from .owed import employee_doc_left_to_pay
 
-    result = employee_doc_left_to_pay(CLAIM, doc.name)
+    result = employee_doc_left_to_pay(CLAIM, doc.name, exclude_payees=[line.name for line in picked])
     left = flt(result.get("left") if isinstance(result, dict) else result, 2)
     if total > left + 0.001:
         frappe.throw(f"{doc.name} has KES {money(left)} left to pay, less than its payees' KES {money(total)}: check "

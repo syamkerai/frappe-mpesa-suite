@@ -446,7 +446,7 @@ def _counting(env, *, salaries=True):
     env.monkeypatch.setattr(env.salary_access, "can_see_salaries", lambda user=None: salaries)
 
 
-@pytest.mark.parametrize("doctype", ["Employee", "Payroll Entry", "Salary Slip", "Expense Claim", "Employee Advance"])
+@pytest.mark.parametrize("doctype", ["Employee", "Payroll Entry", "Salary Slip"])
 def test_salary_payouts_are_not_counted_for_who_may_not_see_them(env, doctype):
     _counting(env, salaries=False)
     data = _hooked(env, doctype, BASES[doctype])
@@ -455,6 +455,20 @@ def test_salary_payouts_are_not_counted_for_who_may_not_see_them(env, doctype):
     for source in salary:
         assert data["non_standard_fieldnames"][source] == "name", source
         assert counted(env.schema, data, source, 16)[1] == {"name": "DOC-1"}  # matches no record
+
+
+@pytest.mark.parametrize("doctype, field", [("Expense Claim", "expense_claim"), ("Employee Advance", "employee_advance")])
+def test_claim_and_advance_payouts_are_counted_for_who_reads_them_without_seeing_salaries(env, doctype, field):
+    # plan C.8: a claim's or advance's payouts are not salary data (salary_access shows them to who
+    # reads the claim), so its Connections count them like any source the user can read
+    assert doctype not in env.connections.EMPLOYEE_DOCUMENTS
+    _counting(env, salaries=False)
+    data = _hooked(env, doctype, BASES[doctype])
+    assert data["non_standard_fieldnames"][B2B] == field
+    assert counted(env.schema, data, B2B, 16)[1] == {field: "DOC-1"}
+    assert data["non_standard_fieldnames"].get(B2C_REQUEST, "reference_name") != "name"
+    env.frappe.denied = {B2B}  # a payout DocType the user cannot read is still not counted
+    assert _hooked(env, doctype, BASES[doctype])["non_standard_fieldnames"][B2B] == "name"
 
 
 def test_the_salary_rule_hides_nothing_from_who_may_see_salaries_or_outside_employee_documents(env):

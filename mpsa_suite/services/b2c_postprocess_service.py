@@ -93,7 +93,15 @@ def _mark_booked(disbursement_name: str, ref) -> bool:
     """Booked means a *submitted* entry: a draft does not reduce what the document owes,
     so the payout keeps blocking a second payout (and keeps being re-checked) until then."""
     b2c_request = ref.b2c_disbursement_request
-    submitted = booked_docstatus(disbursement_name, ref) == 1
+    status = booked_docstatus(disbursement_name, ref)
+    if status is None:
+        # the entry made carries the receipt but books nothing on the document (an Expense Claim or
+        # Employee Advance that could take none of it: payment_entry_service): say where it is
+        elsewhere = entry_carrying_receipt(ref)
+        if elsewhere:
+            _mark_booked_elsewhere(ref, *elsewhere)
+            return False
+    submitted = status == 1
     if b2c_request and _has_field("accounting_booked"):
         frappe.db.set_value(
             B2C_REQUEST_DOCTYPE,

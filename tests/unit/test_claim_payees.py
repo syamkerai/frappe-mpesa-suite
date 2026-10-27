@@ -95,7 +95,13 @@ def env(monkeypatch):
         env.drafts, env.problem, env.left = [], None, 1_000_000
         ed = importlib.import_module("mpsa_suite.money_out.employee_documents")
         monkeypatch.setattr(ed, "payable_problem", lambda doc: env.problem, raising=False)
-        monkeypatch.setattr(env.owed, "employee_doc_left_to_pay", lambda dt, dn: _dict(left=env.left), raising=False)
+        env.left_asked = []
+
+        def left_to_pay(dt, dn, exclude_payees=()):
+            env.left_asked.append((dt, dn, sorted(exclude_payees)))
+            return _dict(left=env.left)
+
+        monkeypatch.setattr(env.owed, "employee_doc_left_to_pay", left_to_pay, raising=False)
         cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
         monkeypatch.setattr(cp.pa, "alert", lambda message, doc, *a, **kw: env.alerts.append((doc.name, message)))
         schedule = importlib.import_module("mpsa_suite.money_out.schedule")
@@ -255,6 +261,9 @@ def test_a_phone_that_is_not_safaricom_is_warned_not_refused(env):
     ({"payee_type": TILL, "payee_name": " "}, "enter the Payee Name"),
     ({"payee_type": "Cash"}, "Pay To must be"),
     ({"payee_type": PAYBILL, "shortcode": "522522", "account_number": "0123"}, "KCB Bank's bank paybill: pick Pay To Bank"),
+    # final review: a bank paybill shipped disabled (not checked yet) is no merchant's paybill either
+    ({"payee_type": PAYBILL, "shortcode": "400400", "account_number": "0123"},
+     "400400 is Old Bank's bank paybill, switched off in M-Pesa Bank Paybills: an M-Pesa Manager checks"),
 ])
 def test_bad_line_details_are_refused(env, kw, msg):
     with raises(env, msg):
@@ -388,6 +397,20 @@ def test_an_employees_destination_is_never_a_payee(env, line, whose):
         validate(env, claim(env, [line], store=False))
 
 
+def test_an_employees_bank_account_is_never_paid_as_a_merchants_paybill(env):
+    # final review: a bank or Sacco paybill not on M-Pesa Bank Paybills (or the account number of a bank
+    # account) credits the employee's bank account all the same: compared with every employee's
+    line = payee(payee_type=PAYBILL, shortcode="777777", account_number="01-0099-12345")  # EMP-1's Bank A/C No.
+    with raises(env, "Row #1: the account number 01-0099-12345 is the claimant's own bank account number. An "
+                     "employee is paid by reimbursing the claim"):
+        validate(env, claim(env, [line], store=False))
+    env.frappe.db.table("Employee")["EMP-2"]["bank_ac_no"] = "PARK77"
+    with raises(env, "is an employee's bank account number"):
+        validate(env, claim(env, [payee(payee_type=PAYBILL, shortcode="647647", account_number="park-77")],
+                            store=False))
+    validate(env, claim(env, [payee(payee_type=PAYBILL, shortcode="647647", account_number="PARK-78")], store=False))
+
+
 def test_an_employee_is_not_named_when_refused(env):
     with pytest.raises(env.frappe.ValidationError) as refused:
         validate(env, claim(env, [payee(payee_type=PHONE, phone="0733000222")], store=False))
@@ -404,6 +427,21 @@ def test_a_rejected_claim_pays_no_payee_and_its_lines_are_cancelled(env):
     lines = [payee(payee_type=PHONE, phone="0722000111", amount=99999)]
     validate(env, claim(env, lines, store=False, approval_status="Rejected"))
     assert lines[0].status == "Cancelled"
+
+
+def test_the_approval_of_payees_is_a_named_users_never_the_shared_administrators(env):
+    # final review (decision 1): approving the claim approves its payees' unverified destinations
+    doc = claim(env, [payee()], store=False)
+    doc._action = "submit"
+    env.frappe.session.user = "Administrator"
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        validate(env, doc, docstatus=1)
+    validate(env, claim(env, [payee()], store=False), docstatus=0)  # a draft's save by anyone
+    rejected = claim(env, [payee()], store=False, approval_status="Rejected")
+    rejected._action = "submit"
+    validate(env, rejected, docstatus=1)  # a rejection approves nobody
+    env.frappe.session.user = "approver@example.com"
+    validate(env, doc, docstatus=1)
 
 
 def test_a_draft_or_its_approval_starts_its_lines_afresh_whatever_was_copied_or_typed(env):
@@ -467,6 +505,60 @@ def test_an_employees_phone_as_the_account_number_is_refused(env, line, refused)
 
 
 # ---------------------------------------------------------------- a B2B request for a merchant line
+# ---------------------------------------------------------------- what the payees hold of the claim
+def test_the_lines_no_counted_payout_represents_are_held_back_from_the_claim(env):
+    # final review: the claim's approved merchants and casual payees not paid yet are theirs: what the
+    # claim has left for the employee (owed.left_to_pay) takes them off, unless a payout owed counts
+    # already represents them (a B2B request, drafts too, or a sent B2C row)
+    lines = [payee("LN-1", 1), payee("LN-2", 2, PAYBILL, amount=1500), payee("LN-3", 3, PHONE, amount=1000),
+             payee("LN-4", 4, PHONE, phone="0711 000 334", amount=700), payee("LN-5", 5, BANK, amount=1200),
+             payee("LN-6", 6, shortcode="835812", amount=300), payee("LN-7", 7, shortcode="835813", amount=400),
+             payee("LN-8", 8, shortcode="835814", amount=600)]
+    claim(env, lines)
+    env.frappe.db.table(LINE)["LN-8"]["status"] = "Cancelled"
+    request(env, lines[1], "MB2B-2")  # a draft B2B: counted by owed.b2b_open
+    disbursement(env, [(lines[2], {})], "MPESA-B2C-3")  # a draft B2C: owed counts it once it is sent
+    disbursement(env, [(lines[3], {})], "MPESA-B2C-4", docstatus=1)  # sent: counted
+    request(env, lines[4], "MB2B-5", docstatus=1, status="Failed")  # failed: counted no more
+    request(env, lines[5], "MB2B-6", docstatus=2, status="Unknown")  # cancelled by a manager: counted no more
+    request(env, lines[6], "MB2B-7", docstatus=1, status="Paid")  # paid: counted (or booked on the claim)
+    parts = env.cp.unpaid_lines("HR-EXP-1")
+    assert [(p.kind, p.line, p.amount) for p in parts] == [
+        ("payee", "LN-1", 2000), ("payee", "LN-3", 1000), ("payee", "LN-5", 1200), ("payee", "LN-6", 300)]
+    assert parts[0].label == "payee row #1 (Shell Kilimani) 2,000 not paid yet"
+    # the lines a payout pays are its own share
+    assert [p.line for p in env.cp.unpaid_lines("HR-EXP-1", exclude_lines=["LN-1", "LN-3"])] == ["LN-5", "LN-6"]
+    env.frappe.db.table(CLAIM)["HR-EXP-1"]["docstatus"] = 2
+    assert env.cp.unpaid_lines("HR-EXP-1") == []  # a cancelled claim pays nobody
+    assert env.cp.unpaid_lines("HR-EXP-2") == []  # a claim with no payee lines: nothing read
+
+
+@pytest.mark.parametrize("payout, counted", [
+    (dict(doctype=B2B, state="Queued", docstatus=0, status="Not Initiated"), True),
+    (dict(doctype=B2B, state="Queued", docstatus=1, status=None), True),
+    (dict(doctype=B2B, state="In Flight", docstatus=1, status="Unknown"), True),
+    (dict(doctype=B2B, state="Paid", docstatus=2, status="Paid"), True),
+    (dict(doctype=B2B, state="Failed", docstatus=1, status="Failed"), False),
+    (dict(doctype=B2B, state="In Flight", docstatus=2, status="Initiated"), False),
+    (dict(doctype=B2C, state="Queued", parent_docstatus=0, request=None, request_docstatus=0), False),
+    (dict(doctype=B2C, state="In Flight", parent_docstatus=1, request=None, request_docstatus=0), True),
+    (dict(doctype=B2C, state="Failed", parent_docstatus=1, request="R", request_docstatus=1), False),
+    (dict(doctype=B2C, state="In Flight", parent_docstatus=2, request="R", request_docstatus=1), True),
+    (dict(doctype=B2C, state="In Flight", parent_docstatus=2, request="R", request_docstatus=2), False),
+    (dict(doctype=B2C, state="Paid", parent_docstatus=2, request="R", request_docstatus=2), True),
+])
+def test_a_payout_holds_its_line_when_owed_counts_it(env, payout, counted):
+    assert env.cp.counted_in_left_to_pay(_dict(payout)) is counted
+
+
+def test_the_drafts_fit_in_what_the_claim_leaves_besides_its_other_payees(env):
+    lines = [payee("LN-1", 1), payee("LN-2", 2, PAYBILL, amount=1500)]
+    claim(env, lines)
+    env.cp.pay_payees("HR-EXP-1")
+    # the lines being paid are their own share of what the claim has left
+    assert env.left_asked == [(CLAIM, "HR-EXP-1", ["LN-1", "LN-2"])]
+
+
 def b2b_doc(env, line, **kw):
     return _dict(request(env, line, **kw))
 
@@ -486,7 +578,10 @@ def test_a_draft_takes_the_lines_destination_and_the_claims_employee_and_company
     ({"supplier": "ACME"}, "clear Supplier"),
     ({"employee_mpesa_account": "MEA-1"}, "clear Employee M-Pesa Account"),
     ({"salary_slip": "SAL-1"}, "clear Salary Slip"),
-    ({"amount": 2500}, "KES 2,500 is more than payee row #1 of HR-EXP-1 pays \\(KES 2,000\\)"),
+    ({"amount": 2500}, "KES 2,500 is not what payee row #1 of HR-EXP-1 pays \\(KES 2,000\\)"),
+    # final review: never part of it either (the line would show Paid, its rest reimbursed to the employee)
+    ({"amount": 1000}, "KES 1,000 is not what payee row #1 of HR-EXP-1 pays \\(KES 2,000\\): a payee is paid its "
+                       "whole line"),
 ])
 def test_a_request_pays_its_line_only(env, kw, msg):
     line = payee()
@@ -635,7 +730,8 @@ def phone_line(name="LN-1", idx=1, **kw):
     ({"reference_name": "HR-EXP-2"}, "its document must be Expense Claim HR-EXP-1"),
     ({"party": "EMP-2"}, "the party is the claimant, EMP-1"),
     ({"partyb": "254711000999"}, "the phone is not payee row #1's"),
-    ({"allocated_amount": 2500}, "KES 2,500 is more than payee row #1"),
+    ({"allocated_amount": 2500}, "KES 2,500 is not what payee row #1"),
+    ({"allocated_amount": 500}, "KES 500 is not what payee row #1 .* a payee is paid its whole line"),
 ])
 def test_a_row_pays_its_line_only(env, extra, msg):
     line = phone_line()
@@ -1255,6 +1351,23 @@ def test_the_payee_line_doctype_freezes_its_details_and_lets_the_server_write_it
     assert fields["bank_paybill"]["options"] == BANK_PAYBILL
     assert fields["destination_key"]["search_index"] == 1
     assert set(env.cp.LINE_FIELDS) - {"parent", "parenttype"} <= set(fields) | {"name", "idx"}
+
+
+def test_the_line_names_its_payout_and_supplier_account_without_linking_them():
+    # A submitted claim's line is docstatus 1: a Link or Dynamic Link from it would stop its payout (and the
+    # supplier account) being cancelled or deleted (Frappe's back-link checks), and an amend copying a stale
+    # value would fail "Could not find" / "Cannot link cancelled document" before validate clears it.
+    data = _doctype("m_pesa_claim_payee")
+    fields = {f["fieldname"]: f for f in data["fields"]}
+    for name in ("payout_name", "supplier_account"):
+        assert fields[name]["fieldtype"] == "Data" and "options" not in fields[name], name
+        assert fields[name]["read_only"] and fields[name]["no_copy"], name
+    linked = {f["options"] for f in data["fields"] if f["fieldtype"] in ("Link", "Dynamic Link")}
+    assert linked == {"DocType", TYPE, BANK_PAYBILL}  # none is submittable
+    assert data["modified"] > "2026-10-27 21:00:00"  # newer than WP4's: the migrate changes the field types
+    js = (APP / "public" / "js" / "expense_claim_payees.js").read_text(encoding="utf-8")
+    assert "get_form_link(line.payout_doctype, line.payout_name, true)" in js
+    assert 'get_form_link("Supplier M-Pesa Account", line.supplier_account, true)' in js
 
 
 @pytest.mark.parametrize("folder", ["mpesa_b2b_payment_request", "b2c_payment_disbursement_reference"])

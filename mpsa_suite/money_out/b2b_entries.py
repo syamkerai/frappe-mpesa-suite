@@ -30,7 +30,7 @@ import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, nowdate
 
 from ..money_in import common as money_in_common
-from ..permissions import ADMIN_ROLES, FINANCE_ROLES, require
+from ..permissions import ADMIN_ROLES, FINANCE_ROLES, require, require_named_user
 from . import owed, statement
 
 B2B = statement.B2B
@@ -780,6 +780,7 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
         if doc.status != "Paid" or not receipt:
             frappe.throw("Only a Paid request with an M-Pesa receipt gets an entry.")
         if cint(doc.docstatus) == 2:
+            require_named_user()  # a named manager books money paid after its request was cancelled
             require(ADMIN_ROLES)
         entries = receipt_entries(receipt, for_update=True)
         if entries:
@@ -887,7 +888,7 @@ def _move_employee_document(doc, dt, dn) -> None:
     if old == dn and cstr(doc.get(field)).strip() == dn:
         return
     if old:
-        require(ADMIN_ROLES)
+        _check_move(doc, old)
         doc.add_comment("Comment", f"Make Entry by {frappe.session.user} moved this payment from {old} to {dn}.")
     doc.db_set({f: (dn if f == field else None) for f in fields}, update_modified=False)
 
@@ -901,12 +902,27 @@ def _move_salary(doc, slip) -> None:
     if old == slip:
         return
     if old:
-        require(ADMIN_ROLES)
+        _check_move(doc, old)
         doc.add_comment("Comment", f"Make Entry by {frappe.session.user} moved this payment from {old} to {slip}.")
     values = {"salary_slip": slip}
     if frappe.get_meta(B2B).has_field("payroll_entry"):
         values["payroll_entry"] = frappe.db.get_value(owed.SLIP, slip, "payroll_entry")
     doc.db_set(values, update_modified=False)
+
+
+def _check_move(doc, old) -> None:
+    """Moving a Paid payout off the document (or supplier) it paid: a named M-Pesa Manager only,
+    never the shared Administrator login (the move frees that document to be paid again). A payout
+    of an Expense Claim's payee line, or of a payment schedule line, stays on its document: the
+    line's status follows it, and moved it would leave the line Paid and the document owing."""
+    require_named_user()
+    require(ADMIN_ROLES)
+    if cstr(doc.get("claim_payee")).strip():
+        frappe.throw(f"{doc.name} paid a payee of {old} (Expense Claim payee {doc.claim_payee}): its entry is made on "
+                     f"{old}, never moved to another document.")
+    if cstr(doc.get("schedule_line")).strip():
+        frappe.throw(f"{doc.name} paid a line of M-Pesa Payment Schedule {doc.get('payment_schedule') or ''}".rstrip()
+                     + f" for {old}: its entry is made on {old}, never moved to another document.")
 
 
 def _journal_account(doc, account, cost_center) -> str:
@@ -948,7 +964,7 @@ def _move_request(doc, dt, dn, supplier) -> None:
             moved.append(f"supplier {doc.supplier} to {supplier}")
         values["supplier"] = supplier
     if moved:
-        require(ADMIN_ROLES)
+        _check_move(doc, old_dn or doc.supplier)
         doc.add_comment("Comment", f"Make Entry by {frappe.session.user} moved this payment from {'; '.join(moved)}.")
     if values:
         doc.db_set(values, update_modified=False)

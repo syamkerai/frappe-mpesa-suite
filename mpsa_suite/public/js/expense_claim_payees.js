@@ -184,6 +184,16 @@ const mpsa_payees = {
 		const s = this.state(frm);
 		const notes = (s.suggestions || []).filter((x) => x.line === cdn).map((x) => e(x.message));
 		const line = (s.lines || []).find((l) => l.name === cdn);
+		// the payout and the supplier account are plain names on the line (a link would stop them being
+		// cancelled or deleted while the claim is submitted): linked here
+		if (line && line.payout_doctype && line.payout_name) {
+			notes.push(`${__("Payout")}: ${frappe.utils.get_form_link(line.payout_doctype, line.payout_name, true)}`);
+		}
+		if (line && line.supplier_account) {
+			notes.push(
+				`${__("Approved Supplier Account")}: ${frappe.utils.get_form_link("Supplier M-Pesa Account", line.supplier_account, true)}`
+			);
+		}
 		if (line && line.status === "Paid" && line.name_note) notes.push(e(line.name_note));
 		field.$wrapper.html(notes.map((n) => `<p class="text-muted">${n}</p>`).join(""));
 	},

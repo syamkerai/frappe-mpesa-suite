@@ -51,6 +51,8 @@ mpsa_employee_pay.headline = function (frm, r) {
 		money(r.left),
 	]);
 	if (r.drafts_planned > 0) text += " · " + __("drafts and planned {0}", [money(r.drafts_planned)]);
+	// the claim's merchants and casual payees not paid yet: held back from the employee's share
+	if (r.payees > 0) text += " · " + __("for payees {0}", [money(r.payees)]);
 	const drafts = (r.drafts || []).map((d) => mpsa_employee_pay.link(d.doctype, d.name));
 	if (drafts.length) text += "<br>" + __("Waiting to be sent: {0}", [drafts.join(", ")]);
 	if (r.problem && r.left > 0) text += "<br>" + e(r.problem);

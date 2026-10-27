@@ -21,7 +21,7 @@ from frappe.utils import flt, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, claim_payees, send_confirm
+from mpsa_suite.money_out import b2b, claim_payees, employee_documents, owed, send_confirm
 from mpsa_suite.money_out.test_b2b_documents import _account, _settings
 
 SETTINGS = "TESTB2BDOCS"
@@ -29,7 +29,9 @@ CLAIM, LINE, TYPE = "Expense Claim", "M-Pesa Claim Payee", "Expense Claim Type"
 B2B, DISB, ROW, REQ, PE = (b2b.B2B_DOCTYPE, "B2C Payment Disbursement", "B2C Payment Disbursement Reference",
                            "B2C Disbursement Request", "Payment Entry")
 FUEL, TRAVEL = "_T Payee Fuel", "_T Payee Travel"
-BANK = "_T-PAYEE-BANK"
+# M-Pesa Bank Paybill codes are letters, digits and dashes (money_out.bank_paybills.validate_row), and
+# its paybill is on no other row: not a shipped bank's, nor the one test_payee_accounts moves KCB to
+BANK, BANK_PAYBILL_NUMBER = "T-PAYEE-BANK", "599811"
 APPROVER, PREPARER, PAYER = ("_t_cp_approver@example.com", "_t_cp_preparer@example.com",
                              "_t_cp_payer@example.com")
 CLAIMANT_PHONE, COLLEAGUE_PHONE = "0722000771", "0722000772"
@@ -90,8 +92,8 @@ def _bank_paybill() -> str:
     """A bank paybill of the tests' own (the shipped list is not relied on)."""
     if not frappe.db.exists("M-Pesa Bank Paybill", BANK):
         doc = frappe.get_doc({"doctype": "M-Pesa Bank Paybill", "code": BANK, "institution_name": "_T Payee Bank",
-                              "institution_type": "Bank", "paybill": "522599", "receiver_name": "_T Bank Paybill AC",
-                              "enabled": 1})
+                              "institution_type": "Bank", "paybill": BANK_PAYBILL_NUMBER,
+                              "receiver_name": "_T Bank Paybill AC", "enabled": 1})
         doc.flags.mpsa_seed = True
         doc.insert(ignore_permissions=True)
     return BANK
@@ -107,6 +109,7 @@ class TestClaimPayees(IntegrationTestCase):
         _user(APPROVER, "Expense Approver")
         _user(PREPARER, "HR User")
         _user(PAYER, "M-Pesa Payer")
+        cls.manager = t.manager()  # cancels a request that may have paid, having checked the statement
         cls.claimant = _employee("_T Payee Claimant", CLAIMANT_PHONE)
         cls.colleague = _employee("_T Payee Colleague", COLLEAGUE_PHONE)
         expense = _account("_T Payee Fuel Expense", "Expense", "Profit and Loss")
@@ -238,7 +241,7 @@ class TestClaimPayees(IntegrationTestCase):
         ])
         lines = list(self._lines(claim.name).values())
         self.assertEqual([(line.shortcode, line.account_number) for line in lines],
-                         [("835811", None), ("647647", "park-77"), ("522599", "0123456789")])
+                         [("835811", None), ("647647", "park-77"), (BANK_PAYBILL_NUMBER, "0123456789")])
         made = self._pay(claim.name)
         self.assertEqual((len(made["b2b"]), made["b2c"], made["total"]), (3, None, 6500))
         for name in made["b2b"]:
@@ -246,7 +249,7 @@ class TestClaimPayees(IntegrationTestCase):
             self.assertEqual((request.docstatus, request.status, request.employee, request.expense_claim),
                              (1, "Initiated", self.claimant, claim.name))
         names = dict(zip(made["b2b"], ("835811 - _T SHELL KILIMANI", "647647 - _T NAIROBI COUNTY",
-                                       "522599 - _T Bank Paybill AC")))
+                                       f"{BANK_PAYBILL_NUMBER} - _T Bank Paybill AC")))
         for name, receiver in names.items():
             self._b2b_result(name, receiver)
         for line in self._lines(claim.name).values():
@@ -306,9 +309,12 @@ class TestClaimPayees(IntegrationTestCase):
             self.assertRaisesRegex(frappe.ValidationError, "never paid twice", send_confirm.send_for_test,
                                    frappe.get_doc(B2B, copy.name))
         post.assert_not_called()
-        # and no new copy is saved while the line is on its way
-        self.assertRaisesRegex(frappe.ValidationError, "never paid twice",
-                               frappe.copy_doc(frappe.get_doc(B2B, second)).insert, ignore_permissions=True)
+        # and no new draft copy is saved while the line is on its way. In a bench test frappe.copy_doc keeps
+        # docstatus (in_test), and a copy inserted as submitted would be a submit: make it the draft Duplicate makes.
+        again = frappe.copy_doc(frappe.get_doc(B2B, second), ignore_no_copy=False)
+        again.docstatus = 0
+        again.status = "Not Initiated"
+        self.assertRaisesRegex(frappe.ValidationError, "never paid twice", again.insert, ignore_permissions=True)
 
     def test_a_project_claim_books_its_project(self):
         project = frappe.db.get_value("Project", {"project_name": "_T Payee Project"}, "name") or frappe.get_doc(
@@ -408,6 +414,72 @@ class TestClaimPayees(IntegrationTestCase):
         line = amended.mpesa_payees[0]
         self.assertEqual((line.status, line.payout_doctype, line.payout_name), ("Draft", None, None))
         self.assertEqual(line.expense_detail, amended.expenses[0].name)
+
+    # ------------------------------------------------------------ the payees' share is never the employee's
+    def test_a_claims_unpaid_payees_are_never_offered_to_its_employee(self):
+        # final review: the claim's approved merchants and casual payees not paid yet hold their share of what
+        # it owes; Pay employee, the headline and every check on a payout to the employee leave it to them
+        claim = self._claim([
+            {"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811", "amount": 3000},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Jane Wanjiku", "phone": "0711000381", "amount": 2000},
+        ], amount=10000)
+        with _as(PREPARER):
+            status = employee_documents.document_status(CLAIM, claim.name)
+        self.assertEqual((status["owed"], status["left"], status["payees"]), (10000, 5000, 5000))
+        made = self._pay(claim.name)  # the till's draft request is counted; the phones' draft batch is not yet
+        left = owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False)
+        self.assertEqual(([p.kind for p in left.parts], left.left), (["b2b", "payee"], 5000))
+        self._send_b2c(made["b2c"], {"254711000381": ("Paid", "254711000381 - JANE WANJIKU")})
+        left = owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False)
+        self.assertEqual((left.owed, [p.kind for p in left.parts], left.left), (8000, ["b2b"], 5000))
+
+    # ------------------------------------------------------------ cancel and amend
+    def test_a_claim_whose_payee_payouts_failed_or_were_deleted_is_cancelled_and_amended(self):
+        # final review: a payee line names its payout by a plain name (a link from the submitted claim's line
+        # stopped the payout being deleted or cancelled), and failed payouts and drafts no longer hold the
+        # claim's cancel, the only way to correct a mistyped phone or till
+        claim = self._claim([
+            {"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811", "amount": 2000},
+            {"payee_type": "Paybill", "payee_name": "_T Nairobi County", "shortcode": "647647",
+             "account_number": "park-77", "amount": 1500},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Jane Wanjiku", "phone": "0711000391", "amount": 1000},
+        ], amount=5000)
+        made = self._pay(claim.name)
+        till, paybill = made["b2b"]
+        frappe.delete_doc(B2B, paybill)  # a draft its line names is deleted (no "is linked with Expense Claim")
+        self._send_b2b(till)
+        self._b2b_result(till, None, paid=False)
+        self._send_b2c(made["b2c"], {"254711000391": ("Failed", None)})  # the phone was mistyped
+        frappe.get_doc(CLAIM, claim.name).cancel()  # not "linked with B2C Disbursement Request ..."
+        cancelled = frappe.get_doc(CLAIM, claim.name)
+        self.assertEqual([line.status for line in cancelled.mpesa_payees], ["Cancelled"] * 3)
+        amended = frappe.copy_doc(cancelled)
+        amended.update({"amended_from": claim.name, "docstatus": 0})
+        amended.mpesa_payees[2].phone = "0711000392"  # corrected
+        amended.insert()
+        self.assertEqual([(line.status, line.payout_doctype, line.payout_name) for line in amended.mpesa_payees],
+                         [("Draft", None, None)] * 3)
+        # the old failed payout is never sent again: its claim is cancelled
+        failed = frappe.db.get_value(ROW, {"parent": made["b2c"]}, "b2c_disbursement_request")
+        module = "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request"
+        with patch(f"{module}.make_b2c_payment_request") as send, _as(PAYER):
+            self.assertRaises(frappe.ValidationError, frappe.get_doc(REQ, failed).retry_failed_payment)
+        send.assert_not_called()
+
+    def test_a_manager_cancels_a_payee_lines_unknown_request(self):
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811",
+                              "amount": 2000}])
+        name = self._pay(claim.name)["b2b"][0]
+        self._send_b2b(name)
+        frappe.db.set_value(B2B, name, "status", "Unknown")  # no answer from M-Pesa
+        with _as(self.manager):  # having checked the statement
+            frappe.get_doc(B2B, name).cancel()  # not "linked with Expense Claim ... at Row: 1"
+        self.assertEqual(frappe.db.get_value(B2B, name, "docstatus"), 2)
+        claim_payees.on_payout_result(B2B, name)
+        # it may still have paid: its line stays on its way, and its money is not offered to the employee
+        line = next(iter(self._lines(claim.name).values()))
+        self.assertEqual(line.status, "In Flight")
+        self.assertEqual(owed.employee_doc_left_to_pay(CLAIM, claim.name, for_update=False).left, 8000)
 
     # ------------------------------------------------------------ what a claim may not pay
     def test_an_employees_phone_and_a_type_without_payees_are_refused(self):

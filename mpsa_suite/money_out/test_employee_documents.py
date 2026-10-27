@@ -34,6 +34,7 @@ EMPACC = party_accounts.EMPLOYEE_ACCOUNT
 SUITE = "M-Pesa Suite Settings"
 HR, ACCOUNTS, APPROVER = "_t_claims_hr@example.com", "_t_claims_accounts@example.com", "_t_claims_approver@example.com"
 CLERK, PAYER = "_t_claims_clerk@example.com", "_t_claims_payer@example.com"
+BOOKS = "_t_claims_books@example.com"  # an Accounts Manager with no HR role (Trident's System Managers hold it)
 PHONE = "254722000777"
 CLAIM_TYPE = "_T Claims Travel"
 SUITE_VALUES = dict(book_payout_charges=1, reconcile_payout_lines=1, payout_lines_from=None, allow_one_off_b2b=0,
@@ -108,8 +109,14 @@ class TestEmployeeDocuments(IntegrationTestCase):
         _named(APPROVER, "Accounts User", "Expense Approver")
         _named(CLERK, "Accounts User")
         _named(PAYER, "M-Pesa Payer")
+        _named(BOOKS, "Accounts Manager")
         cls.payable = _account("_T Claims Payable", "Liability", "Balance Sheet", "Payable")
         cls.advances = _account("_T Claims Advances", "Asset", "Balance Sheet", "Receivable")
+        # HRMS v15 fetches an advance's account from the company on every save
+        # (company.default_employee_advance_account, no fetch_if_empty), replacing the one the
+        # fixture gives, and then requires it to be Receivable. Point the company at the fixture's
+        # (v16 fetches from the employee only when empty, so this is harmless there).
+        frappe.db.set_value("Company", t.COMPANY, "default_employee_advance_account", cls.advances)
         cls.expense = _account("_T Claims Travel Expense", "Expense", "Profit and Loss")
         cls.cost_center = frappe.db.get_value("Company", t.COMPANY, "cost_center")
         if not frappe.db.exists("Expense Claim Type", CLAIM_TYPE):
@@ -308,6 +315,39 @@ class TestEmployeeDocuments(IntegrationTestCase):
                                   "remarks": "Allowance", "employee": self.bank_employee}).insert()
         self.assertRaisesRegex((frappe.PermissionError, frappe.ValidationError), "paid by an M-Pesa Manager",
                                self._send, B2B, req.name)
+
+    def test_a_draft_payment_entry_on_the_claim_refuses_its_b2c_send(self):
+        # final review: HRMS's Make Payment Entry (Bank) left as a draft until the transfer clears. Prepare and
+        # B2B already refused ("Nothing is left to pay"); the B2C send now does too, as it reads the same parts.
+        claim = self._claim(self.phone_employee, 5000)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+        entry = frappe.get_doc({"doctype": PE, "payment_type": "Pay", "company": t.COMPANY, "posting_date": nowdate(),
+                                "party_type": "Employee", "party": self.phone_employee, "paid_from": self.gl,
+                                "paid_to": self.payable, "paid_amount": 5000, "received_amount": 5000,
+                                "source_exchange_rate": 1, "target_exchange_rate": 1, "reference_no": "BANK-T1",
+                                "reference_date": nowdate(), "cost_center": self.cost_center,
+                                "references": [{"reference_doctype": EC, "reference_name": claim,
+                                                "allocated_amount": 5000}]})
+        entry.insert()  # a draft
+        self.assertRaisesRegex(frappe.ValidationError, f"less draft Payment Entry {entry.name}", self._send, DISB,
+                               out["name"])
+        self.assertEqual(frappe.db.get_value(DISB, out["name"], "docstatus"), 0)
+
+    def test_an_accounts_manager_without_an_hr_role_gets_no_salary_data(self):
+        # final review (decision D4): Get References for Salary Slips (net pay and phone of every employee of a
+        # payroll), and a B2B request to an employee for no claim (it copies their bank account), are refused
+        with _as(BOOKS):
+            doc = frappe.new_doc(DISB)
+            doc.update({"company": t.COMPANY, "party_type": "Employee", "transaction_to_pay_against": "Salary Slip"})
+            self.assertRaisesRegex(frappe.PermissionError, "salaries are shown only",
+                                   doc.get_outstanding_reference_documents,
+                                   {"transaction_to_pay_against": "Salary Slip", "payroll_entry": "HR-PRUN-T-1",
+                                    "company": t.COMPANY, "party_type": "Employee"})
+            request = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
+                                      "remarks": "Allowance", "employee": self.bank_employee})
+            self.assertRaisesRegex(frappe.PermissionError, "salaries are shown only", request.insert)
+            self.assertFalse(request.get("employee_mpesa_account"))  # nothing of the employee's was read
 
     # ------------------------------------------------------------ the list, the cancel, who sees it
     def test_pay_by_mpesa_on_the_list_prepares_one_b2c_batch_and_a_b2b_request(self):
