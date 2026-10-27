@@ -215,11 +215,15 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
-| `money_out.payroll.from_payroll_entry` | FINANCE_ROLES + read the Payroll Entry + create a schedule | roles:FINANCE_ROLES, perm |
+| `money_out.payroll.from_payroll_entry` | FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule | roles:FINANCE_ROLES, via:require_salary_reader, perm |
+| `money_out.payroll.from_salary_slip` | PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip | via:require_salary_preparer, perm |
+| `money_out.payroll.from_salary_slips` | PREPARE_ROLES who may see salaries + create a schedule + read each Salary Slip | via:require_salary_preparer, perm |
+| `money_out.payroll.payroll_salary_totals` | Who may see salaries + read the Payroll Entry | via:require_salary_reader, perm |
 | `money_out.payroll.payroll_status` | Read the Payroll Entry | perm |
+| `money_out.payroll.salary_slip_status` | Who may see salaries + read the Salary Slip | via:require_salary_reader, perm |
 | `money_out.schedule.close_schedule` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
 | `money_out.schedule.confirm_payment` | PAYOUT_ROLES, the user the summary was made for | roles:PAYOUT_ROLES |
-| `money_out.schedule.from_payroll_entry` | FINANCE_ROLES + read the Payroll Entry + create a schedule | via:from_payroll_entry |
+| `money_out.schedule.from_payroll_entry` | FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule | via:from_payroll_entry |
 | `money_out.schedule.move_date` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
 | `money_out.schedule.plan_again` | FINANCE_ROLES + write the schedule | roles:FINANCE_ROLES, perm |
 | `money_out.schedule.prepare_payment` | PAYOUT_ROLES + read the schedule | roles:PAYOUT_ROLES, perm |

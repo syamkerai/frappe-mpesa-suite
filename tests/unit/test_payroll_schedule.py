@@ -642,7 +642,7 @@ def test_a_b2b_salary_counts_b2c_payouts_on_their_way_not_paid_ones(env):
 
 # ---------------------------------------------------------------- the Payroll Entry's button
 def test_one_schedule_per_payroll_with_the_excluded_and_their_reasons(env):
-    env.frappe.session.user, env.frappe.user_roles = ACCOUNTS, {"Accounts User"}
+    env.frappe.session.user, env.frappe.user_roles = ACCOUNTS, {"Accounts User", "HR User"}  # sees salaries
     env.frappe.db.table(SLIP)["SAL-5"] = dict(env.frappe.db.table(SLIP)["SAL-1"], name="SAL-5", employee="EMP-5",
                                               employee_name="Held", status="Withheld")
     env.frappe.db.table("Employee")["EMP-5"] = {"name": "EMP-5", "employee_name": "Held", "status": "Active",
@@ -666,7 +666,7 @@ def test_one_schedule_per_payroll_with_the_excluded_and_their_reasons(env):
 
 
 def test_a_payroll_paid_partly_by_bank_or_not_submitted_is_refused(env):
-    env.frappe.user_roles = {"Accounts User"}
+    env.frappe.user_roles = {"Accounts User", "HR User"}
     env.je("ACC-JV-1", "CHQ-1", [{"account": "Payroll Payable - AIL", "debit_in_account_currency": 100,
                                   "reference_type": PAYROLL, "reference_name": "PAY-1"}], voucher_type="Bank Entry")
     with pytest.raises(env.frappe.ValidationError, match="already has a bank or cash entry not made by M-Pesa \\(ACC-JV-1\\)"):
@@ -682,7 +682,7 @@ def test_a_payroll_paid_partly_by_bank_or_not_submitted_is_refused(env):
 
 
 def test_amounts_are_what_is_left_in_whole_shillings_and_a_missing_shortcode_excludes(env):
-    env.frappe.user_roles = {"Accounts User"}
+    env.frappe.user_roles = {"Accounts User", "HR User"}
     env.request("MB2B-0", status="Paid", amount=20000, salary_slip="SAL-1", employee="EMP-1", supplier=None)
     answer = env.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS)  # no B2C shortcode
     lines = [r for r in env.frappe.db.table(LINE).values() if r["parent"] == answer["name"]]

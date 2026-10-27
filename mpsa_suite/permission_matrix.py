@@ -267,9 +267,21 @@ ENDPOINTS = {
     "mpsa_suite.money_out.b2b.salary_left": ("Read the Salary Slip", ("perm",)),
     "mpsa_suite.money_out.payroll.payroll_status": ("Read the Payroll Entry", ("perm",)),
     "mpsa_suite.money_out.payroll.from_payroll_entry": (
-        "FINANCE_ROLES + read the Payroll Entry + create a schedule", ("roles:FINANCE_ROLES", "perm")),
+        "FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule",
+        ("roles:FINANCE_ROLES", "via:require_salary_reader", "perm")),
     "mpsa_suite.money_out.schedule.from_payroll_entry": (
-        "FINANCE_ROLES + read the Payroll Entry + create a schedule", ("via:from_payroll_entry",)),
+        "FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule", ("via:from_payroll_entry",)),
+    # Round 4: salaries from Salary Slips (one-off, or the list's selected slips), and their headlines
+    "mpsa_suite.money_out.payroll.from_salary_slip": (
+        "PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip",
+        ("via:require_salary_preparer", "perm")),
+    "mpsa_suite.money_out.payroll.from_salary_slips": (
+        "PREPARE_ROLES who may see salaries + create a schedule + read each Salary Slip",
+        ("via:require_salary_preparer", "perm")),
+    "mpsa_suite.money_out.payroll.salary_slip_status": (
+        "Who may see salaries + read the Salary Slip", ("via:require_salary_reader", "perm")),
+    "mpsa_suite.money_out.payroll.payroll_salary_totals": (
+        "Who may see salaries + read the Payroll Entry", ("via:require_salary_reader", "perm")),
     "mpsa_suite.utils.utils.get_mode_of_payment_account": ("Write B2C Payment Disbursement", ("perm",)),
     # Money out
     "mpsa_suite.money_out.api.check_b2c_status": ("PAYOUT_ROLES or ADMIN_ROLES + read request", ("roles:PAYOUT_OR_ADMIN", "perm")),
@@ -324,7 +336,11 @@ ENDPOINTS = {
 
 # Helpers named by "via:" and the evidence their own body must show.
 HELPERS = {
-    "_check_payment_row_parent": ("mpsa_suite.mpsa_suite.api.sales_invoice", ("perm",)),
+    # round 4, salaries from Salary Slips (money_out.payroll)
+    "require_salary_preparer": ("mpsa_suite.money_out.payroll",
+                                ("roles:PREPARE_ROLES", "via:require_salary_reader", "perm")),
+    "require_salary_reader": ("mpsa_suite.money_out.payroll", ("via:can_see_salaries",)),
+    "_check_payment_row_parent":("mpsa_suite.mpsa_suite.api.sales_invoice", ("perm",)),
     "_check_can_prepare": (_D + "b2c_payment_disbursement.b2c_payment_disbursement", ("perm",)),
     "_check_can_push": ("mpsa_suite.www.mpesa.stkpush", ("perm",)),
     "_run": ("mpsa_suite.sandbox_lab.api", ("perm", "via:require_lab")),
