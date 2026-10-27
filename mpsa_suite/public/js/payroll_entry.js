@@ -115,10 +115,13 @@ frappe.ui.form.on("Payroll Entry", {
 					__("left {0} ({1} of {2} slips)", [kes(r.left), r.slips_left, r.slips]),
 				];
 				if (flt(r.other_paid) > 0) parts.push(__("paid outside M-Pesa {0}", [kes(r.other_paid)]));
-				// every schedule naming its slips: the payroll's own, one-off salaries, selected slips
-				const links = (r.schedules || []).map(
-					(name) =>
-						`<a href="/app/m-pesa-payment-schedule/${encodeURIComponent(name)}">${frappe.utils.escape_html(name)}</a>`
+				// every schedule naming its slips: the payroll's own, one-off salaries, selected slips;
+				// links only for who may read the schedule (not HR), plain names for the rest
+				const can_open = frappe.model.can_read("M-Pesa Payment Schedule");
+				const links = (r.schedules || []).map((name) =>
+					can_open
+						? `<a href="/app/m-pesa-payment-schedule/${encodeURIComponent(name)}">${frappe.utils.escape_html(name)}</a>`
+						: frappe.utils.escape_html(name)
 				);
 				let html = `${__("M-Pesa")}: ${parts.join(" · ")}`;
 				if (links.length) html += `<br>${__("Schedules: {0}", [links.join(", ")])}`;

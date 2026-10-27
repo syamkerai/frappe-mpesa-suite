@@ -16,7 +16,9 @@ frappe.ui.form.on("Salary Slip", {
 				if (flags.can_prepare && r.can_prepare && r.payable >= 1 && !(r.problems || []).length) {
 					frm.add_custom_button(__("Pay by M-Pesa"), () => mpsa_salary_slip.pay(frm, r), __("M-Pesa"));
 				}
-				for (const name of r.schedules || []) {
+				// HR sees the headline but may not read the schedule: its names stay text there
+				const can_open = frappe.model.can_read("M-Pesa Payment Schedule");
+				for (const name of can_open ? r.schedules || [] : []) {
 					frm.add_custom_button(
 						__("Schedule {0}", [name]),
 						() => frappe.set_route("Form", "M-Pesa Payment Schedule", name),
