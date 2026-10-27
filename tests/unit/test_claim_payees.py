@@ -735,6 +735,9 @@ def test_a_payees_own_retry_is_checked_like_a_send(env):
 
 
 def test_both_retry_buttons_check_a_payee_line_before_anything_is_sent(retry, monkeypatch):  # noqa: F811
+    # the claim's and the employee's own retry checks (WP3) are tested in test_employee_documents.py
+    monkeypatch.setattr(importlib.import_module("mpsa_suite.money_out.employee_documents"), "check_b2c_retry",
+                        lambda doc: None)
     cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
     seen = []
 
@@ -1074,7 +1077,10 @@ def test_a_payee_claims_batch_counts_its_other_payouts_in_the_amount(payout, mon
         payout.disbursement("D-NEW", {"allocated_amount": 500}).validate_no_double_payout()
 
 
-def test_a_payee_claims_retry_counts_its_other_payouts_in_the_amount(retry):  # noqa: F811
+def test_a_payee_claims_retry_counts_its_other_payouts_in_the_amount(retry, monkeypatch):  # noqa: F811
+    # the claim's and the employee's own retry checks (WP3) are tested in test_employee_documents.py
+    monkeypatch.setattr(importlib.import_module("mpsa_suite.money_out.employee_documents"), "check_b2c_retry",
+                        lambda doc: None)
     request = retry.failed(amount=1000, doctype=CLAIM, reference="HR-EXP-1")
     retry.others = [{"parent": "MPESA-B2C-2", "allocated_amount": 800, "request_status": "Paid"}]
     retry.owed = 1500

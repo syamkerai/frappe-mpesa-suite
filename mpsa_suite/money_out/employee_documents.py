@@ -6,9 +6,11 @@ Account; in KES; in a workflow state M-Pesa Suite Settings lists as payable, whe
 Workflow on the DocType and the list is set; and still owing by HRMS's own reading (a claim's
 sanctioned amount plus taxes, less its advances and what was reimbursed; an advance's
 advance_amount less paid_amount). Every pay path asks it: the form buttons and the list's Pay by
-M-Pesa, a B2C row or request that pays the document, a B2B request naming it. What is left to pay
-counts every payout of the document on its way, whoever it pays (owed.employee_doc_left_to_pay),
-under the document's lock.
+M-Pesa, a B2C row that pays the document (a B2C request made by hand may not), a B2B request
+naming it, the retry of a failed B2C payout. A payout of the document pays its own employee,
+except a payee of the claim (money_out.claim_payees). What is left to pay counts every payout of
+the document on its way, whoever it pays (owed.employee_doc_left_to_pay), under the document's
+lock.
 
 The buttons only prepare a draft, for what is left in whole shillings: a B2C Payment Disbursement
 of one row to the employee's approved phone (or, while M-Pesa Suite Settings lets B2C pay phones
@@ -256,12 +258,26 @@ def _sent_already(row) -> bool:
     return bool(status) and status != "Failed"
 
 
+def not_its_employee(dt: str, dn: str, employee, party_type, party) -> str | None:
+    """Why a payout of the claim or advance may not pay ``party``: it pays the document's own
+    employee (Party Type Employee). A merchant or another person is paid on a claim as a payee of
+    the claim (claim_payees), which books it to the claimant all the same."""
+    if party_type == "Employee" and party == employee:
+        return None
+    who = party if party_type == "Employee" else f"{party_type or 'no party type'} {party or ''}".strip()
+    message = f"{dn} belongs to {employee}, not {who}: an {dt} is paid to its own employee."
+    if dt == EXPENSE_CLAIM:
+        message += " Pay a merchant or another person as a payee of the claim."
+    return message
+
+
 def check_b2c_row(row) -> None:
     """A B2C Payment Disbursement row (its validate, also at submit). A row paying a claim or
-    advance pays one that may be paid, of the row's employee. A row paying an employee goes, while
-    M-Pesa Suite Settings says so, to a phone approved on one of the employee's accounts, and names
-    the approved account it pays (for the name check after payment). A payment schedule's row is
-    its line's (schedule.check_b2c_row); a payee of a claim is not called here (claim_payees)."""
+    advance pays one that may be paid, to its own employee (Party Type Employee, whatever party
+    type the row was given). A row paying an employee goes, while M-Pesa Suite Settings says so,
+    to a phone approved on one of the employee's accounts, and names the approved account it pays
+    (for the name check after payment). A payment schedule's row is its line's
+    (schedule.check_b2c_row); a payee of a claim is not called here (claim_payees)."""
     if _sent_already(row):
         return
     dt, dn = getattr(row, "reference_doctype", None), cstr(getattr(row, "reference_name", None)).strip()
@@ -271,8 +287,10 @@ def check_b2c_row(row) -> None:
         problem = payable_problem(values, dt)
         if problem:
             frappe.throw(f"Row #{row.idx}: {problem}")
-        if party_type == "Employee" and party and values.employee != party:
-            frappe.throw(f"Row #{row.idx}: {dn} belongs to {values.employee}, not {party}.")
+        # booked to the document's employee whoever is paid (payment_entry_service): so paid to them
+        problem = not_its_employee(dt, dn, values.employee, party_type, party)
+        if problem:
+            frappe.throw(f"Row #{row.idx}: {problem}")
     if party_type != "Employee" or not party or getattr(row, "mpesa_schedule_line", None):
         return
     acc = _approved_phone(party, getattr(row, "partyb", None))
@@ -285,12 +303,44 @@ def check_b2c_row(row) -> None:
 
 def check_b2c_request(doc) -> None:
     """A B2C Disbursement Request made by hand (not by its disbursement's job or a payment
-    schedule, whose rows were checked): the claim or advance it pays may be paid, an employee is
-    paid to an approved phone (as a disbursement row is), and nobody sends a payout to themselves."""
+    schedule, whose rows were checked). It never pays an Expense Claim or Employee Advance: no
+    amount check or lock guards it, and nothing counts it against the document while it is on its
+    way (owed.b2c_open lists disbursement rows), so they are paid by a disbursement (Pay employee
+    (phone)). An employee is paid to an approved phone (as a disbursement row is), and nobody
+    sends a payout to themselves."""
     flags = getattr(doc, "flags", None) or frappe._dict()
     if flags.get("mpesa_from_disbursement") or flags.get("mpesa_from_schedule"):
         return
-    dt, dn = doc.get("reference_doctype"), cstr(doc.get("reference_name")).strip()
+    dt = doc.get("reference_doctype")
+    if dt in DOCTYPES:
+        frappe.throw(f"An {dt} is paid by a B2C Payment Disbursement (Pay employee (phone) on the {dt}), not by a "
+                     "B2C Disbursement Request made by hand.")
+    if doc.get("party_type") == "Employee" and doc.get("party"):
+        problem = phone_lock_problem(doc.party, doc.get("phone_number"))
+        if problem:
+            frappe.throw(problem)
+        if cint(doc.get("docstatus")) == 1:  # being sent
+            problem = employee_accounts.own_payment_problem(doc.party)
+            if problem:
+                frappe.throw(problem, frappe.PermissionError)
+
+
+def _row_claim_payee(doc) -> str | None:
+    """The claim payee (claim_payees) of the disbursement row a B2C request pays, or None."""
+    ref = cstr(getattr(doc, "b2c_payment_disbursement_reference", None)).strip()
+    if not ref or not frappe.get_meta(DISB_ROW).has_field("claim_payee"):
+        return None
+    return cstr(frappe.db.get_value(DISB_ROW, ref, "claim_payee")).strip() or None
+
+
+def check_b2c_retry(doc) -> None:
+    """A failed B2C payout sent again (Retry on the request or on its disbursement), under the
+    document's lock: what its send checked is checked again, since the claim, the phone account
+    or the payer may have changed since. The claim or advance it pays may still be paid; an
+    employee is paid only to an approved phone that can be paid now while M-Pesa Suite Settings
+    says so (a payee of the claim is claim_payees'); nobody pays themselves."""
+    dt, dn = getattr(doc, "reference_doctype", None), cstr(getattr(doc, "reference_name", None)).strip()
+    party = getattr(doc, "party", None) if getattr(doc, "party_type", None) == "Employee" else None
     employees = set()
     if dt in DOCTYPES and dn:
         values = read_document(dt, dn)
@@ -298,16 +348,16 @@ def check_b2c_request(doc) -> None:
         if problem:
             frappe.throw(problem)
         employees.add(values.employee)
-    if doc.get("party_type") == "Employee" and doc.get("party"):
-        employees.add(doc.party)
-        problem = phone_lock_problem(doc.party, doc.get("phone_number"))
-        if problem:
-            frappe.throw(problem)
-    if cint(doc.get("docstatus")) == 1:  # being sent
-        for employee in sorted(e for e in employees if e):
-            problem = employee_accounts.own_payment_problem(employee)
+    if party:
+        employees.add(party)
+        if not _row_claim_payee(doc):
+            problem = phone_lock_problem(party, getattr(doc, "phone_number", None))
             if problem:
-                frappe.throw(problem, frappe.PermissionError)
+                frappe.throw(problem)
+    for employee in sorted(e for e in employees if e):
+        problem = employee_accounts.own_payment_problem(employee)
+        if problem:
+            frappe.throw(problem, frappe.PermissionError)
 
 
 def check_not_own_b2c(doc) -> None:
@@ -431,7 +481,7 @@ def document_status(doctype: str, name: str) -> dict:
     values = read_document(doctype, name)
     if not values:
         frappe.throw(f"{doctype} {name} not found")
-    result = owed.employee_doc_left_to_pay(doctype, name)
+    result = owed.employee_doc_left_to_pay(doctype, name, for_update=False)  # a display: no lock
     sent = [p for p in result.parts if p.kind in ("b2b", "b2c")]
     status = {
         "owed": result.owed,
@@ -452,12 +502,13 @@ def document_status(doctype: str, name: str) -> dict:
 
 # ---------------------------------------------------------------- preparing payouts (drafts only)
 def _payable(doctype: str, name: str) -> tuple:
-    """(values, whole shillings left): the document may be paid now and has something left."""
+    """(values, whole shillings left): the document may be paid now and has something left (read
+    under its lock, held until the draft is saved)."""
     values = read_document(doctype, name)
     problem = payable_problem(values, doctype)
     if problem:
         frappe.throw(problem)
-    result = owed.employee_doc_left_to_pay(doctype, name)
+    result = owed.employee_doc_left_to_pay(doctype, name, for_update=True)
     amount = whole_shillings(result.left)
     if amount < 1:
         frappe.throw(f"Nothing is left to pay by M-Pesa. {owed.explain(name, result)}")
@@ -620,7 +671,8 @@ def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_setti
     _check_doctype(doctype)
     if isinstance(names, str):
         names = frappe.parse_json(names)
-    names = list(dict.fromkeys(cstr(n).strip() for n in names or [] if cstr(n).strip()))
+    # in name order: each document's lock is taken in turn and held to the end (as a disbursement's submit)
+    names = sorted({cstr(n).strip() for n in names or [] if cstr(n).strip()})
     if not names:
         frappe.throw(f"Tick the {doctype}s to pay.")
     if len(names) > BULK_LIMIT:

@@ -25,7 +25,7 @@ import pytest
 
 import b2b_fixture
 import fake_frappe
-from test_payroll_schedule import B2B, DISB, EMPACC, LINE, PAYER, PHONE, REQ, ROW, SETTINGS, SLIP, Row
+from test_payroll_schedule import B2B, DISB, EMPACC, PAYER, PHONE, REQ, ROW, SETTINGS, SLIP, Row
 from test_payroll_schedule import env as payroll_env  # noqa: F401 (the fixture this one extends)
 
 EC, EA = "Expense Claim", "Employee Advance"
@@ -157,6 +157,18 @@ def test_left_to_pay_counts_every_payout_of_the_claim_under_its_lock(env):
     assert env.owed.employee_doc_left_to_pay(EC, "HR-EXP-1", exclude_request="MB2B-OPEN").left == 3500
     with pytest.raises(env.frappe.ValidationError, match="not an Expense Claim or Employee Advance"):
         env.owed.employee_doc_left_to_pay("Purchase Invoice", "PINV-1")
+
+
+def test_left_to_pay_takes_the_claims_lock_by_default_and_the_headline_does_not(env):
+    env.owed.employee_doc_left_to_pay(EC, "HR-EXP-1")  # as a preparation calls it (WP4's payees too)
+    assert env.locks == ["b2c-pay:Expense Claim:HR-EXP-1"]
+    assert ("row", EC, "HR-EXP-1", True) in env.log  # the document row last, a locking read (R4)
+    env.locks.clear()
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User"}
+    env.ed.document_status(EC, "HR-EXP-1")  # the form's headline decides nothing
+    assert env.locks == []
+    env.ed.prepare_b2b(EC, "HR-EXP-1")  # a preparation reads under it
+    assert env.locks == ["b2c-pay:Expense Claim:HR-EXP-1"]
 
 
 def test_a_paid_b2b_stops_counting_once_its_entry_is_allocated_to_the_claim(env):
@@ -459,6 +471,22 @@ def test_the_b2c_row_pays_a_payable_claim_of_its_employee(env):
         row_of(env).validate()
 
 
+@pytest.mark.parametrize("party_type, party", [("Supplier", "ACME"), ("Customer", "CUST-1"), (None, "EMP-1")])
+def test_a_b2c_row_paying_a_claim_pays_its_employee_whatever_party_type_it_was_given(env, party_type, party):
+    # booked to the claim's employee as their reimbursement (payment_entry_service), so paid to them:
+    # a supplier row would pay an unapproved number and mark the claim paid
+    claim(env, "HR-EXP-2", employee="EMP-1")
+    with pytest.raises(env.frappe.ValidationError, match="Row #1: HR-EXP-2 belongs to EMP-1, not .*: an Expense Claim "
+                                                         "is paid to its own employee. Pay a merchant or another "
+                                                         "person as a payee of the claim"):
+        row_of(env, party_type=party_type, party=party, partyb="0733000000").validate()
+    advance(env, "HR-EAD-2", employee="EMP-1", advance_amount=3000)
+    with pytest.raises(env.frappe.ValidationError, match="Row #1: HR-EAD-2 belongs to EMP-1, not Supplier ACME: an "
+                                                         "Employee Advance is paid to its own employee.$"):
+        row_of(env, party_type="Supplier", party="ACME", reference_doctype=EA, reference_name="HR-EAD-2").validate()
+    row_of(env, party="EMP-1", partyb="0733000000").validate()  # its own employee (the lock is off)
+
+
 def test_the_b2c_row_names_the_approved_phone_it_pays(env):
     claim(env, "HR-EXP-2", employee="EMP-2")
     row = row_of(env)
@@ -467,6 +495,32 @@ def test_the_b2c_row_names_the_approved_phone_it_pays(env):
     row = row_of(env, partyb="0733000000")
     row.validate()  # the setting is off: a typed number is still paid, and names no account
     assert (row.partyb, row.payee_account) == ("254733000000", None)
+
+
+def test_the_rows_approved_account_is_a_plain_name_set_again_on_every_save():
+    import json
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parents[2] / "mpsa_suite" / "mpsa_suite" / "doctype"
+            / "b2c_payment_disbursement_reference" / "b2c_payment_disbursement_reference.json")
+    fields = {f["fieldname"]: f for f in json.loads(path.read_text(encoding="utf-8"))["fields"]}
+    # not a link: Frappe refuses a link to a cancelled (submittable) account before any validate
+    # runs, so a stale account would block the save, amend and Send via M-Pesa of the row
+    assert fields["payee_account"]["fieldtype"] == "Data" and "options" not in fields["payee_account"]
+    assert fields["payee_account"]["no_copy"] == 1 and fields["payee_account_doctype"]["no_copy"] == 1
+
+
+def test_a_stale_approved_account_on_a_row_is_replaced_or_refused_plainly(env):
+    claim(env, "HR-EXP-2", employee="EMP-2")
+    row = row_of(env, partyb=PHONE, payee_account_doctype=EMPACC, payee_account="MEA-OLD")  # amended copy
+    row.validate()
+    assert row.payee_account == "MEA-2"
+    lock_on(env)
+    env.frappe.db.table(EMPACC)["MEA-2"]["docstatus"] = 2  # cancelled since: the number is not approved now
+    row = row_of(env, partyb=PHONE, payee_account_doctype=EMPACC, payee_account="MEA-2")
+    with pytest.raises(env.frappe.ValidationError, match=f"Row #1: {PHONE} is not a phone approved for EMP-2"):
+        row.validate()
+    assert row.payee_account is None
 
 
 def test_with_the_lock_on_an_employee_is_paid_by_b2c_only_to_an_approved_phone(env):
@@ -495,8 +549,7 @@ def test_a_row_paying_a_payee_of_the_claim_is_left_to_claim_payees(env, monkeypa
 
 def test_a_b2c_request_made_by_hand_is_held_to_the_same_rules(env):
     lock_on(env)
-    claim(env, "HR-EXP-2", employee="EMP-2")
-    req = fake_frappe._dict(reference_doctype=EC, reference_name="HR-EXP-2", party_type="Employee", party="EMP-2",
+    req = fake_frappe._dict(reference_doctype=SLIP, reference_name="SAL-2", party_type="Employee", party="EMP-2",
                             phone_number="254733000000", docstatus=0, flags=fake_frappe._dict())
     with pytest.raises(env.frappe.ValidationError, match="is not a phone approved for EMP-2"):
         env.ed.check_b2c_request(req)
@@ -510,6 +563,22 @@ def test_a_b2c_request_made_by_hand_is_held_to_the_same_rules(env):
     env.ed.check_b2c_request(req)
 
 
+@pytest.mark.parametrize("dt, dn, employee", [(EC, "HR-EXP-2", "EMP-2"), (EC, "HR-EXP-2", "EMP-1"),
+                                              (EA, "HR-EAD-1", "EMP-1")])
+def test_a_b2c_request_made_by_hand_never_pays_a_claim_or_advance(env, dt, dn, employee):
+    # nothing would count it against the claim while on its way, nor cap it: another payout of the
+    # claim could pass, or it could pay more than the claim owes, or pay another employee
+    claim(env, "HR-EXP-2", employee="EMP-1")
+    advance(env)
+    req = fake_frappe._dict(reference_doctype=dt, reference_name=dn, party_type="Employee", party=employee,
+                            phone_number=PHONE, amount=100000, docstatus=0, flags=fake_frappe._dict())
+    with pytest.raises(env.frappe.ValidationError, match=f"An {dt} is paid by a B2C Payment Disbursement \\(Pay "
+                                                         "employee \\(phone\\)"):
+        env.ed.check_b2c_request(req)
+    req.flags.mpesa_from_disbursement = True  # a disbursement row's payout: its row was checked
+    env.ed.check_b2c_request(req)
+
+
 def test_nobody_sends_a_b2c_payout_of_their_own_claim(env):
     claim(env, "HR-EXP-2", employee="EMP-2")
     env.frappe.db.table("Employee")["EMP-2"]["user_id"] = PAYER
@@ -518,6 +587,65 @@ def test_nobody_sends_a_b2c_payout_of_their_own_claim(env):
         env.ed.check_not_own_b2c(doc)
     doc.flags.mpesa_from_schedule = True  # Pay Selected checked it
     env.ed.check_not_own_b2c(doc)
+
+
+def failed_b2c(env, monkeypatch, claim_payee=None, **kw):
+    """A failed B2C payout of HR-EXP-2 to EMP-2's approved phone, from row R-R1; what it sends lands in env.resent."""
+    module = importlib.import_module(
+        "mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request.b2c_disbursement_request")
+    env.setdefault("resent", [])
+    monkeypatch.setattr(module, "make_b2c_payment_request", lambda name: env.resent.append(name))
+    values = {"name": "B2C-R1", "docstatus": 1, "status": "Failed", "amount": 3000, "reference_doctype": EC,
+              "reference_name": "HR-EXP-2", "party_type": "Employee", "party": "EMP-2", "phone_number": PHONE,
+              "b2c_payment_disbursement": "MPESA-B2C-R", "b2c_payment_disbursement_reference": "R-R1", **kw}
+    env.frappe.db.table(REQ)["B2C-R1"] = dict(values)
+    env.frappe.db.table(ROW)["R-R1"] = {"name": "R-R1", "parent": "MPESA-B2C-R", "parenttype": DISB,
+                                        "mpesa_schedule_line": None, "claim_payee": claim_payee}
+    request = object.__new__(module.B2CDisbursementRequest)
+    request.__dict__.update(values, flags=fake_frappe._dict())
+    request.reload = lambda: None
+    request.db_set = lambda changes, *a, **k: request.__dict__.update(changes)
+    return request
+
+
+def test_a_retry_checks_the_claim_the_approved_phone_and_the_payer_again(env, monkeypatch):
+    lock_on(env)
+    claim(env, "HR-EXP-2", employee="EMP-2", total_sanctioned_amount=3000, grand_total=3000)
+    # the claimant is an M-Pesa Payer and presses Retry on the payout of their own claim
+    env.frappe.db.table("Employee")["EMP-2"]["user_id"] = PAYER
+    with pytest.raises(env.frappe.PermissionError, match="You are EMP-2"):
+        failed_b2c(env, monkeypatch).retry_failed_payment()
+    env.frappe.db.table("Employee")["EMP-2"]["user_id"] = None
+    # a manager cancelled the phone account since the failure (the number was given to someone else)
+    env.frappe.db.table(EMPACC)["MEA-2"]["docstatus"] = 2
+    with pytest.raises(env.frappe.ValidationError, match=f"{PHONE} is not a phone approved for EMP-2"):
+        failed_b2c(env, monkeypatch).retry_failed_payment()
+    env.frappe.db.table(EMPACC)["MEA-2"]["docstatus"] = 1
+    # the claim is no longer approved
+    claim(env, "HR-EXP-2", employee="EMP-2", total_sanctioned_amount=3000, grand_total=3000,
+          approval_status="Rejected")
+    with pytest.raises(env.frappe.ValidationError, match="HR-EXP-2 is not approved"):
+        failed_b2c(env, monkeypatch).retry_failed_payment()
+    assert env.resent == [] and env.frappe.db.table(REQ)["B2C-R1"]["status"] == "Failed"
+    claim(env, "HR-EXP-2", employee="EMP-2", total_sanctioned_amount=3000, grand_total=3000)
+    request = failed_b2c(env, monkeypatch)
+    request.retry_failed_payment()
+    assert env.resent == ["B2C-R1"] and request.status == "Not Initiated"
+    assert "b2c-pay:Expense Claim:HR-EXP-2" in env.locks
+
+
+def test_a_retry_of_a_claim_payee_leaves_its_phone_to_claim_payees_and_any_payout_keeps_the_rules(env, monkeypatch):
+    lock_on(env)
+    claim(env, "HR-EXP-2", employee="EMP-2", total_sanctioned_amount=3000, grand_total=3000)
+    with pytest.raises(env.frappe.ValidationError, match="is not a phone approved for EMP-2"):
+        failed_b2c(env, monkeypatch, phone_number="254733000000").retry_failed_payment()
+    failed_b2c(env, monkeypatch, claim_payee="CP-1", phone_number="254733000000").retry_failed_payment()
+    assert env.resent == ["B2C-R1"]
+    # a salary payout by hand is held to the phone lock and self-pay too
+    env.frappe.db.table("Employee")["EMP-2"]["user_id"] = PAYER
+    with pytest.raises(env.frappe.PermissionError, match="You are EMP-2"):
+        failed_b2c(env, monkeypatch, reference_doctype=SLIP, reference_name="SAL-2",
+                   amount=30000).retry_failed_payment()
 
 
 def test_get_references_takes_the_approved_phone(env):
@@ -664,18 +792,28 @@ def test_a_claim_is_not_cancelled_while_a_payout_of_it_is_paid_or_on_its_way(env
 
 
 # ---------------------------------------------------------------- not salaries
-def test_claim_and_advance_payouts_are_not_salaries(env):
-    salary = importlib.import_module("mpsa_suite.money_out.salary_access")
-    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User"}
+def readers(env, monkeypatch, perms):
+    """frappe.permissions.get_valid_perms: ``perms`` {doctype: roles given read (level 0)}."""
+    permissions = types.ModuleType("frappe.permissions")
+    permissions.get_valid_perms = lambda doctype, user: [
+        {"role": role, "read": 1, "permlevel": 0, "if_owner": 0}
+        for role in perms.get(doctype, ()) if role in env.frappe.user_roles]
+    monkeypatch.setitem(sys.modules, "frappe.permissions", permissions)
+
+
+# HRMS's own: HR Manager, HR User and Expense Approver read claims; advances only Expense Approver
+# (and every Employee their own, which does not count)
+HRMS_READERS = {EC: ("HR Manager", "HR User", "Expense Approver", "Employee"), EA: ("Expense Approver", "Employee")}
+
+
+def claim_payouts(env, monkeypatch):
+    columns = b2b_fixture.COLUMNS
+    monkeypatch.setitem(columns, REQ, columns[REQ] + ("party_type", "party", "owner"))
     env.request("MB2B-1")  # a supplier payment
     env.request("MB2B-SAL", supplier=None, employee="EMP-1", salary_slip="SAL-1")
     env.request("MB2B-EXP", supplier=None, employee="EMP-1", expense_claim="HR-EXP-1")
+    env.request("MB2B-ADV", supplier=None, employee="EMP-1", employee_advance="HR-EAD-1")
     env.request("MB2B-NODOC", supplier=None, employee="EMP-1")
-    condition = salary.query_conditions("other@example.com", B2B)
-    shown = [r[0] for r in env.frappe.db.sql(f"SELECT name FROM `tab{B2B}` WHERE {condition} ORDER BY name")]
-    assert shown == ["MB2B-1", "MB2B-EXP"]
-    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", expense_claim="HR-EXP-1")) is True
-    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", salary_slip="SAL-1")) is False
     db = env.frappe.db
     db.table(DISB)["D-EXP"] = {"name": "D-EXP", "docstatus": 1, "party_type": "Employee",
                                "transaction_to_pay_against": EC}
@@ -685,13 +823,62 @@ def test_claim_and_advance_payouts_are_not_salaries(env):
                               "reference_doctype": EC}
     db.table(ROW)["R-SAL"] = {"name": "R-SAL", "parent": "D-SAL", "parenttype": DISB, "party_type": "Employee",
                               "reference_doctype": SLIP}
-    condition = salary.query_conditions("other@example.com", DISB)
-    assert [r[0] for r in env.frappe.db.sql(f"SELECT name FROM `tab{DISB}` WHERE {condition} ORDER BY name")] == [
-        "D-EXP"]
+    for name, dt in (("B2C-EXP", EC), ("B2C-SAL", SLIP)):
+        db.table(REQ)[name] = {"name": name, "docstatus": 1, "status": "Paid", "party_type": "Employee",
+                               "party": "EMP-1", "reference_doctype": dt, "reference_name": "X"}
+
+
+def shown(env, salary, doctype):
+    condition = salary.query_conditions("other@example.com", doctype)
+    return [r[0] for r in env.frappe.db.sql(f"SELECT name FROM `tab{doctype}` WHERE {condition} ORDER BY name")]
+
+
+def test_claim_and_advance_payouts_are_shown_to_accounts_roles_who_read_them(env, monkeypatch):
+    salary = importlib.import_module("mpsa_suite.money_out.salary_access")
+    claim_payouts(env, monkeypatch)
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User", "Expense Approver"}
+    readers(env, monkeypatch, HRMS_READERS)
+    assert salary.reads_documents() == (EC, EA) and not salary.can_see_salaries()
+    assert shown(env, salary, B2B) == ["MB2B-1", "MB2B-ADV", "MB2B-EXP"]
+    assert shown(env, salary, DISB) == ["D-EXP"]
+    assert shown(env, salary, REQ) == ["B2C-EXP"]
+    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", expense_claim="HR-EXP-1")) is True
+    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", salary_slip="SAL-1")) is False
     assert salary.is_salary_line({"party_type": "Employee", "reference_doctype": EA}) is False
     assert salary.is_salary_line({"party_type": "Employee", "reference_doctype": None}) is True
     assert salary.has_salaries(fake_frappe._dict(doctype=DISB, party_type="Employee", transaction_to_pay_against=EC,
                                                  references=[{"party_type": "Employee", "reference_doctype": EC}])) is False
+    # the site gave Accounts User read on claims only: advances stay hidden like salaries
+    env.frappe.user_roles = {"Accounts User"}
+    readers(env, monkeypatch, {**HRMS_READERS, EC: (*HRMS_READERS[EC], "Accounts User")})
+    assert salary.reads_documents() == (EC,)
+    assert shown(env, salary, B2B) == ["MB2B-1", "MB2B-EXP"]
+    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", employee_advance="HR-EAD-1")) is False
+
+
+@pytest.mark.parametrize("roles", [{"Accounts User"}, {"M-Pesa Viewer"}, {"Accounts Manager", "Employee"}])
+def test_claim_payouts_stay_hidden_from_who_cannot_read_claims(env, monkeypatch, roles):
+    # HRMS gives Accounts roles and M-Pesa Viewer no read on claims; an Employee reads only their own
+    salary = importlib.import_module("mpsa_suite.money_out.salary_access")
+    claim_payouts(env, monkeypatch)
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, roles
+    readers(env, monkeypatch, HRMS_READERS)
+    assert salary.reads_documents() == ()
+    assert shown(env, salary, B2B) == ["MB2B-1"]
+    assert shown(env, salary, DISB) == []
+    assert shown(env, salary, REQ) == []
+    for doc in (fake_frappe._dict(doctype=B2B, employee="EMP-1", expense_claim="HR-EXP-1", owner="hr@example.com"),
+                fake_frappe._dict(doctype=REQ, party_type="Employee", reference_doctype=EC, owner="hr@example.com"),
+                fake_frappe._dict(doctype=DISB, party_type="Employee", transaction_to_pay_against=EA,
+                                  references=[{"party_type": "Employee", "reference_doctype": EA}],
+                                  owner="hr@example.com")):
+        assert salary.has_permission(doc) is False
+    assert salary.has_permission(fake_frappe._dict(doctype=B2B, supplier="ACME", owner="hr@example.com")) is True
+    # its creator still sees it
+    assert salary.has_permission(fake_frappe._dict(doctype=B2B, employee="EMP-1", expense_claim="HR-EXP-1",
+                                                   owner=PREPARER)) is True
+    hidden = salary.report_condition("l.")
+    assert "COALESCE(l.reference_doctype, '') IN ('Expense Claim', 'Employee Advance')" in hidden
 
 
 # ---------------------------------------------------------------- a new site

@@ -20,9 +20,10 @@ guards and the job and send of a scheduled B2C payout.
 
 An Expense Claim or Employee Advance (HRMS) reads like an invoice (employee_doc_left_to_pay):
 HRMS's own outstanding (a claim's grand_total less what was reimbursed, an advance's
-advance_amount less what was paid) less every payout of it on its way, whoever it pays: B2C rows
-and requests naming it, B2B requests with its expense_claim or employee_advance, draft entries
-and planned lines.
+advance_amount less what was paid) less every payout of it on its way, whoever it pays: B2C
+disbursement rows and Paid requests naming it (a B2C request made by hand may not pay one:
+employee_documents.check_b2c_request), B2B requests with its expense_claim or employee_advance,
+draft entries and planned lines.
 
 B2B and B2C share the per-document lock "b2c-pay:<doctype>:<name>", so a B2B request and a B2C
 disbursement for one invoice cannot both pass. Lock order (R4): the document lock, the payout
@@ -458,12 +459,16 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, ex
 
 
 def employee_doc_left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
-                             for_update: bool = False):
+                             for_update: bool = True):
     """left_to_pay of an Expense Claim or Employee Advance: HRMS's outstanding (utils.payouts.owed)
     less every payout of it on its way, whoever it pays (a merchant or casual payee of a claim
-    too): B2C rows and requests naming it, B2B requests with its link, draft entries and planned
-    lines. ``for_update``: under the document's lock, the one B2C, B2B and the schedule take,
-    payouts first and the document row last (R4)."""
+    too): B2C disbursement rows and Paid B2C requests naming it, B2B requests with its link, draft
+    entries and planned lines. _dict(owed, parts, left), as left_to_pay.
+
+    By default under the document's lock (held until commit), the one B2C, B2B and the schedule
+    take, with locking reads, payouts first and the document row last (R4): what a check that
+    prepares or sends a payout needs. ``for_update=False`` only for a display that decides
+    nothing (the form's headline), or a draft's save that is checked again at its send."""
     if dt not in EMPLOYEE_DOC_FIELDS:
         frappe.throw(f"{dt} is not an Expense Claim or Employee Advance.")
     with doc_lock(dt, dn) if for_update else contextlib.nullcontext():

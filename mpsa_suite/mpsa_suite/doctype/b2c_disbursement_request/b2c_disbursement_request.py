@@ -137,8 +137,11 @@ class B2CDisbursementRequest(Document):
                 frappe.throw(f"{self.name} was paid from a payment schedule: plan its line again (Plan Again) and "
                              "pay it with Pay Selected.")
             self.validate_still_owed()
-            from ....money_out import claim_payees
+            from ....money_out import claim_payees, employee_documents
 
+            # what the send checked, again: the claim may no longer be payable, the approved phone
+            # may be cancelled or on hold, and nobody resends a payout to themselves
+            employee_documents.check_b2c_retry(self)
             # an Expense Claim's payee: not paid since by another payout, and the send's checks (last:
             # it marks the payee line In Flight)
             claim_payees.check_retry(self.name)

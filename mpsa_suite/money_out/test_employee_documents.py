@@ -4,8 +4,9 @@
 Named users only, each with the roles a site gives that job: an HR Manager prepares a phone
 payout (reads claims, makes B2C payouts), an Accounts User who is also an HR User prepares a bank
 one (reads claims, makes B2B requests), an Expense Approver who is also an Accounts User prepares
-an advance's (HRMS lets only the Employee and the Expense Approver read advances), an Accounts
-User alone sees claim payouts but no salary, and an M-Pesa Payer sends with Send via M-Pesa
+an advance's (HRMS lets only the Employee and the Expense Approver read advances) and sees claim
+payouts but no salary, an Accounts User alone (who reads no claims) sees neither, and an M-Pesa
+Payer sends with Send via M-Pesa
 (send_confirm.send_for_test). Claims and advances are real HRMS documents (inserted and submitted
 as test data), paid from the shortcode TESTB2BDOCS. Nothing reaches Safaricom: B2B post() and the
 B2C connector are replaced and Results are written as the callbacks write them; commits made by
@@ -333,15 +334,59 @@ class TestEmployeeDocuments(IntegrationTestCase):
         with _as(HR):
             self.assertRaisesRegex(frappe.ValidationError, out["name"], frappe.get_doc(EC, claim).cancel)
 
-    def test_claim_payouts_are_shown_to_accounts_but_salaries_are_not(self):
+    def test_claim_payouts_are_shown_to_accounts_roles_who_read_claims_but_salaries_are_not(self):
         claim = self._claim(self.bank_employee, 900)
         with _as(ACCOUNTS):
             out = employee_documents.prepare_b2b(EC, claim)
             salary = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 700,
                                      "remarks": "Allowance", "employee": self.bank_employee}).insert()
-        with _as(CLERK):
+        both = [out["name"], salary.name]
+        # Accounts User + Expense Approver: HRMS lets the Expense Approver read claims
+        with _as(APPROVER):
             self.assertFalse(salary_access.can_see_salaries())
             self.assertTrue(frappe.has_permission(B2B, "read", doc=out["name"]))
             self.assertFalse(frappe.has_permission(B2B, "read", doc=salary.name))
-            listed = frappe.get_list(B2B, filters={"name": ["in", [out["name"], salary.name]]}, pluck="name")
-            self.assertEqual(listed, [out["name"]])
+            self.assertEqual(frappe.get_list(B2B, filters={"name": ["in", both]}, pluck="name"), [out["name"]])
+        # Accounts User alone reads no claims (HRMS's defaults): the claim's payout stays hidden too
+        with _as(CLERK):
+            self.assertFalse(frappe.has_permission(B2B, "read", doc=out["name"]))
+            self.assertEqual(frappe.get_list(B2B, filters={"name": ["in", both]}, pluck="name"), [])
+
+    # ------------------------------------------------------------ who a claim's B2C payout pays
+    def test_a_claim_row_pays_its_employee_and_a_cancelled_phone_account_never_blocks_the_draft(self):
+        from mpsa_suite.money_out.test_b2b_documents import _supplier
+
+        frappe.db.set_single_value(SUITE, "b2c_approved_phones_only", 0)  # a new site has it on
+        frappe.clear_document_cache(SUITE, SUITE)
+        supplier, _account_name = _supplier()
+        claim = self._claim(self.phone_employee, 1500)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+            doc = frappe.get_doc(DISB, out["name"])
+            doc.references[0].party_type, doc.references[0].party = "Supplier", supplier
+            self.assertRaisesRegex(frappe.ValidationError, f"{claim} belongs to {self.phone_employee}, not Supplier",
+                                   doc.save)
+        # the employee's phone account is cancelled after the draft was made (the number changed)
+        frappe.db.set_value(EMPACC, self.phone_account, "docstatus", 2)
+        with _as(HR):
+            doc = frappe.get_doc(DISB, out["name"])
+            doc.save()  # not "Cannot link cancelled document": the row's account is a name, set again
+            self.assertFalse(doc.references[0].payee_account)
+        frappe.db.set_single_value(SUITE, "b2c_approved_phones_only", 1)
+        frappe.clear_document_cache(SUITE, SUITE)
+        with _as(HR):
+            doc = frappe.get_doc(DISB, out["name"])
+            self.assertRaisesRegex(frappe.ValidationError, "is not a phone approved", doc.save)
+
+    def test_a_b2c_request_made_by_hand_never_pays_a_claim(self):
+        claim = self._claim(self.phone_employee, 1100)
+        with _as(HR):
+            out = employee_documents.prepare_b2c(EC, claim)
+            row = frappe.get_doc(DISB, out["name"]).references[0]
+            request = frappe.get_doc({"doctype": REQ, "amount": 1100, "phone_number": PHONE, "remarks": "Claim",
+                                      "mpesa_settings": SETTINGS, "payment_provider": "Mpesa", "currency": "KES",
+                                      "b2c_payment_disbursement": out["name"],
+                                      "b2c_payment_disbursement_reference": row.name,
+                                      "reference_doctype": EC, "reference_name": claim, "party_type": "Employee",
+                                      "party": self.phone_employee})
+            self.assertRaisesRegex(frappe.ValidationError, "is paid by a B2C Payment Disbursement", request.insert)
