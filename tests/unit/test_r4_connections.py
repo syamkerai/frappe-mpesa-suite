@@ -463,6 +463,9 @@ def test_claim_and_advance_payouts_are_counted_for_who_reads_them_without_seeing
     # reads the claim), so its Connections count them like any source the user can read
     assert doctype not in env.connections.EMPLOYEE_DOCUMENTS
     _counting(env, salaries=False)
+    # reads it only as an Employee: its payouts stay hidden, as on the payout lists
+    assert _hooked(env, doctype, BASES[doctype])["non_standard_fieldnames"][B2B] == "name"
+    env.monkeypatch.setattr(env.salary_access, "reads_documents", lambda user=None: (doctype,))
     data = _hooked(env, doctype, BASES[doctype])
     assert data["non_standard_fieldnames"][B2B] == field
     assert counted(env.schema, data, B2B, 16)[1] == {field: "DOC-1"}

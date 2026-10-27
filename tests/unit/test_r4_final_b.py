@@ -117,8 +117,13 @@ def test_every_submitted_record_that_links_an_account_is_ignored_on_cancel(payee
             if (field.get("fieldtype") == "Link" and field.get("options") in (SUP, EMP)
                     and field.get("fieldname") != "amended_from"):
                 linking[meta["name"]] = meta
-    assert set(linking) == {B2B, "M-Pesa Claim Payee"}, "a new link to a payee account: add it to CANCEL_IGNORES"
-    assert linking[B2B].get("is_submittable") and linking["M-Pesa Claim Payee"].get("istable")
+    assert set(linking) == {B2B}, "a new link to a payee account: add it to CANCEL_IGNORES"
+    assert linking[B2B].get("is_submittable")
+    # a claim's payee row names its approved account in a Data field (no back-link), so the claim
+    # is ignored only for rows saved before that field stopped being a Link
+    claim_payee = json.loads((APP / "mpsa_suite" / "doctype" / "m_pesa_claim_payee" / "m_pesa_claim_payee.json")
+                             .read_text(encoding="utf-8"))
+    assert {f["fieldname"]: f["fieldtype"] for f in claim_payee["fields"]}["supplier_account"] == "Data"
     migrate = (APP / "mpsa_suite" / "migrate.py").read_text(encoding="utf-8")
     claims_table = migrate.split('"Expense Claim": [', 1)[1].split("]", 1)[0]
     assert '"options": "M-Pesa Claim Payee"' in claims_table  # the payees table is the claim's
