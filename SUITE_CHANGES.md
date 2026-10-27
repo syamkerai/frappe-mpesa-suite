@@ -482,7 +482,9 @@ docs/r4_notes/VERIFY_COUNTING.md, VERIFY_READS.md, VERIFY_SENDS.md. What users n
   document).
 - **Reads:**
   - A B2B draft names an invoice, order, claim or advance only for who may read it, when the link
-    is new or changed; saving or amending a colleague's request is not refused.
+    is new or changed; saving or amending a colleague's request is not refused. This includes M-Pesa
+    Payers: one who prepares a request for a Purchase Invoice needs read on it (an Accounts role,
+    or the invoice shared with them).
   - Get References on a B2C disbursement needs read on what it lists and lists only the documents
     the user may read: an Expense Approver no longer sees every claim and advance with phones.
   - Salary Slip rows are refused before the slip is read, so net pay cannot be probed.
@@ -520,10 +522,10 @@ docs/r4_notes/VERIFY_COUNTING.md, VERIFY_READS.md, VERIFY_SENDS.md. What users n
   - Payment Entry's STK button is not hidden from non-collectors (the server checks Payment Entry
     submit).
 
-Tests: 2756 unit tests pass at a06a073e (`python -m pytest tests/unit -q`). Bench, full `run-tests
---app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 499 tests at a06a073e,
-all pass on both versions. This is the first run of `test_claim_payees` (merchant and casual
-payees) on a real site: its setUpClass failed at every earlier head.
+Tests: 2807 unit tests pass at bf64a9d4 (`python -m pytest tests/unit -q`). Bench, full `run-tests
+--app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 508 tests at bf64a9d4,
+all pass on both versions, the verification tests included. `test_claim_payees` (merchant and
+casual payees) first ran on a real site in this round: its setUpClass had failed at every earlier head.
 
 ## Phase 1 — Foundation (this change)
 
