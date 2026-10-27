@@ -5,12 +5,15 @@ account. When M-Pesa confirms a salary paid by B2B (to the employee's bank paybi
 (to the employee's phone, from a payment schedule), this entry clears it:
 
 - Bank Entry, the receipt as Cheque No, posted and dated on the M-Pesa completion date (R6);
-- Dr the Payroll Entry's payroll payable account, reference the Payroll Entry, its cost center,
-  for what the salary still had on the payable (its net pay less what was paid before); party
-  Employee only when Payroll Settings books payroll per employee (as the accrual does);
+- Dr the Payroll Entry's payroll payable account, reference the Payroll Entry, for what the
+  salary still had on the payable (its net pay less what was paid before); party Employee only
+  when Payroll Settings books payroll per employee (as the accrual does);
 - M-Pesa pays whole shillings, so the difference (under KES 1; at most 0.50 with rounded totals)
   goes to the company's Round Off account and cost center;
 - Cr the payout's own M-Pesa GL (Working for B2B, Utility for B2C), with its Bank Account.
+Both the payable and the M-Pesa rows take one cost center (handover F5, as every other payout
+entry and HRMS's own bank entry): the Payroll Entry's, else the payout shortcode's (Mpesa
+Settings), else the company's default (common.payout_cost_center).
 
 The payable row is tagged with the payout (Journal Entry Account mpesa_b2b_payment_request or
 b2c_payment_disbursement), so salary_slip_paid, which counts the Paid payout itself, does not
@@ -63,9 +66,11 @@ def split(net_pay, before, amount) -> tuple:
     return amount, 0.0, f"KES {owed.money(amount)} is more than the KES {owed.money(rest)} it had left"
 
 
-def build(slip_name, amount, receipt, date, gl, bank_account, remark, before, tag_field, tag_value) -> tuple:
+def build(slip_name, amount, receipt, date, gl, bank_account, remark, before, tag_field, tag_value,
+          settings=None) -> tuple:
     """(Journal Entry, problem) clearing the salary of ``slip_name`` paid by ``amount`` from ``gl``.
-    ``problem``: the slip had less left than was paid, a possible double payment."""
+    ``problem``: the slip had less left than was paid, a possible double payment. ``settings``: the
+    payout's Mpesa Settings (its cost center when the Payroll Entry has none)."""
     slip = owed.read_slip(slip_name)
     if not slip:
         frappe.throw(f"Salary Slip {slip_name} not found")
@@ -81,9 +86,9 @@ def build(slip_name, amount, receipt, date, gl, bank_account, remark, before, ta
     payable, round_off, problem = split(slip.get("net_pay"), before, amount)
     if problem:
         problem = f"{slip_name}: {problem}. Check that {slip.employee} was not paid twice."
-    import erpnext
+    from .common import payout_cost_center
 
-    cost_center = payroll.cost_center or erpnext.get_default_cost_center(company)
+    cost_center = payroll.cost_center or payout_cost_center(settings, company)
     je = frappe.new_doc(JE)
     je.voucher_type = "Bank Entry"
     je.company = company
@@ -112,7 +117,7 @@ def build(slip_name, amount, receipt, date, gl, bank_account, remark, before, ta
                                ("debit_in_account_currency" if round_off > 0 else "credit_in_account_currency"):
                                    abs(round_off)})
     je.append("accounts", {"account": gl, "credit_in_account_currency": flt(amount, 2), "bank_account": bank_account,
-                           "user_remark": remark})
+                           "cost_center": cost_center, "user_remark": remark})
     return je, problem
 
 
@@ -130,7 +135,8 @@ def for_b2b(doc, bank_account, gl, date, slip=None) -> tuple:
     receipt = cstr(doc.transaction_id).strip()
     text = remark_text("B2B", doc.name, receipt, name, values.get("employee_name") or doc.employee)
     return build(name, flt(doc.amount), receipt, date, gl, bank_account, text,
-                 paid_before(values, exclude_b2b=doc.name), "mpesa_b2b_payment_request", doc.name)
+                 paid_before(values, exclude_b2b=doc.name), "mpesa_b2b_payment_request", doc.name,
+                 settings=doc.get("mpesa_settings"))
 
 
 def for_b2c(disbursement, ref, submit: bool = False) -> str:
@@ -151,7 +157,7 @@ def for_b2c(disbursement, ref, submit: bool = False) -> str:
     text = remark_text("B2C", request, receipt, ref.reference_name, slip.get("employee_name") or ref.party)
     je, problem = build(ref.reference_name, flt(p.amount) or flt(ref.allocated_amount), receipt, p.date, gl,
                         bank_account, text, paid_before(slip, exclude_b2c=request), "b2c_payment_disbursement",
-                        disbursement.name)
+                        disbursement.name, settings=p.get("mpesa_settings"))
     je.flags.ignore_permissions = True
     je.insert(ignore_permissions=True)
     if submit:

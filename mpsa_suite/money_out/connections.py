@@ -27,6 +27,10 @@ How Frappe counts a Connection (frappe/desk/notifications.py, read on the v15 an
 So while Frappe counts (``get_open_count``), a source the user cannot read, and on the employee
 documents (``EMPLOYEE_DOCUMENTS``) a salary DocType for who may not see salaries
 (money_out.salary_access), is counted on ``name``: no count, rather than one the list then hides.
+On an Expense Claim or Employee Advance (salary_access.EMPLOYEE_DOCUMENTS) the payouts are not
+salaries (plan C.8): they are counted for who may see salaries or reads that DocType by a role of
+their own (salary_access.reads_documents, the rule its lists follow), whether or not
+``EMPLOYEE_DOCUMENTS`` still names it.
 The form's Connections themselves are built once for every user (frappe.desk.form.meta caches
 them) and keep every link.
 """
@@ -181,7 +185,11 @@ def _count_hidden(doctype: str | None):
     while Frappe counts."""
     if not counting():
         return lambda source: False
-    shows_salaries = doctype not in EMPLOYEE_DOCUMENTS or salary_access.can_see_salaries()
+    if doctype in salary_access.EMPLOYEE_DOCUMENTS:
+        # a claim's or advance's payouts: hidden only from who the list hides them from
+        shows_salaries = salary_access.can_see_salaries() or doctype in salary_access.reads_documents()
+    else:
+        shows_salaries = doctype not in EMPLOYEE_DOCUMENTS or salary_access.can_see_salaries()
     return lambda source: (not shows_salaries and source in salary_access.DOCTYPES) or not frappe.has_permission(
         source, "read")
 

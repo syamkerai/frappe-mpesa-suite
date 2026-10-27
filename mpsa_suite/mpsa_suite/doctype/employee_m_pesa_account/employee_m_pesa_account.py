@@ -33,7 +33,7 @@ class EmployeeMPesaAccount(Document):
         party_accounts.refuse_default_edit(self)
 
     def before_cancel(self):
-        self.is_default = 0
+        party_accounts.before_cancel(self)
 
     def on_cancel(self):
         party_accounts.after_cancel(self)

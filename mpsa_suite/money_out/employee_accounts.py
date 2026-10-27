@@ -61,9 +61,9 @@ def apply_destination(doc) -> None:
     if not doc.employee_mpesa_account:
         doc.employee_mpesa_account = pa.pick_account(ACCOUNT_DOCTYPE, doc.employee, B2B_TYPES)
         if not doc.employee_mpesa_account:
-            problems = pa.unusable_reasons(ACCOUNT_DOCTYPE, doc.employee, B2B_TYPES)
-            if problems and all(problems):
-                frappe.throw(problems[0])
+            problem = pa.pick_problem(ACCOUNT_DOCTYPE, doc.employee, B2B_TYPES)
+            if problem:
+                frappe.throw(problem)
             frappe.throw(
                 f"Pick the employee's approved bank, paybill or till account. {doc.employee} has none that can be "
                 f"paid by B2B yet: {pa.PROFILES[ACCOUNT_DOCTYPE].add_hint}"

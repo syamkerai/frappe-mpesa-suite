@@ -31,7 +31,7 @@ class SupplierMPesaAccount(Document):
         supplier_accounts.refuse_default_edit(self)
 
     def before_cancel(self):
-        self.is_default = 0
+        supplier_accounts.before_cancel(self)
 
     def on_cancel(self):
         supplier_accounts.after_cancel(self)

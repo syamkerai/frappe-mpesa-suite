@@ -228,6 +228,8 @@ class TestEmployeePayouts(_Base):
             self.assertRaisesRegex(frappe.ValidationError, "B2B pays a bank, paybill or till account", req.insert)
 
     def test_an_employee_line_is_not_paid_before_its_day(self):
+        # a payment to an employee for no claim or advance is salary data: planned by who may see salaries
+        frappe.get_doc("User", PREPARER).add_roles("HR User")
         with _as(PREPARER):
             doc = frappe.get_doc({"doctype": SCHEDULE, "title": "T employee", "company": t.COMPANY,
                                   "b2b_settings": SETTINGS, "lines": [{
@@ -556,3 +558,88 @@ class TestPayroll(_Base):
         self.assertEqual(frappe.db.get_value(JE, entry, "docstatus"), 1)
         self.assertEqual(owed.slip_left_to_pay(slips[0]).left, 0)
         self.assertEqual(frappe.db.get_value(EMPACC, paybill.name, "name_mismatch"), 0)  # 888886, Test Sacco
+
+    # ------------------------------------------------------------ final review (area B)
+    def _bank_entry(self, pe, rows=None):
+        """HRMS's Make Bank Entry as its make_journal_entry saves it (v15 and v16): a draft Bank Entry
+        debiting the payroll payable (reference the Payroll Entry; party Employee per employee when
+        Payroll Settings books payroll per employee) and crediting the payment account."""
+        center = frappe.db.get_value(PAYROLL, pe, "cost_center")
+        rows = rows or [{"account": self.payable, "debit_in_account_currency": 100, "reference_type": PAYROLL,
+                         "reference_name": pe, "cost_center": center}]
+        je = frappe.new_doc(JE)
+        je.update({"voucher_type": "Bank Entry", "company": t.COMPANY, "posting_date": nowdate(),
+                   "cheque_no": "_T-SAL-BANK", "cheque_date": nowdate(), "user_remark": "Payment of salaries",
+                   "party_not_required": 0 if any(r.get("party") for r in rows) else 1})
+        for row in rows:
+            je.append("accounts", row)
+        je.append("accounts", {"account": self.gl, "bank_account": self.bank_account, "cost_center": center,
+                               "credit_in_account_currency": flt(sum(flt(r["debit_in_account_currency"]) for r in rows))})
+        je.save(ignore_permissions=True)
+        return je
+
+    def _payable_rows(self, pe, *employees):
+        center = frappe.db.get_value(PAYROLL, pe, "cost_center")
+        return [{"account": self.payable, "debit_in_account_currency": 10, "reference_type": PAYROLL,
+                 "reference_name": pe, "party_type": "Employee", "party": employee, "cost_center": center}
+                for employee in employees]
+
+    def test_hrms_bank_entry_is_refused_while_mpesa_pays_salaries_of_the_payroll(self):
+        """HRMS's Make Bank Entry debits the net pay of every slip and knows nothing of M-Pesa: refused while
+        a schedule plans (or M-Pesa pays) salaries of the payroll, or it would pay them twice."""
+        pe, _ = self._payroll()
+        answer, _lines = self._make_schedule(pe)  # plans the bank and the phone salaries
+        self.assertRaisesRegex(frappe.ValidationError, "pay a payroll either through M-Pesa or through Make Bank "
+                                                       "Entry, or split it into separate Payroll Entries",
+                               self._bank_entry, pe)
+        # booked per employee: only the rows of the employees M-Pesa pays are refused
+        self.employee_wise(1)
+        bank, none = self.employees["_T Pay Bank"], self.employees["_T Pay None"]
+        self.assertRaisesRegex(frappe.ValidationError, f"M-Pesa pays the salaries of {bank} on {pe}",
+                               self._bank_entry, pe, self._payable_rows(pe, bank, none))
+        self.assertEqual(self._bank_entry(pe, self._payable_rows(pe, none)).docstatus, 0)
+        # closed, the schedule plans nothing: the whole payroll may go through the bank
+        self.employee_wise(0)
+        with _as(PREPARER):
+            schedule.close_schedule(answer["name"])
+        self.assertEqual(self._bank_entry(pe).docstatus, 0)
+
+    def test_a_salary_paid_by_mpesa_stops_hrms_bank_entry_once_booked_too(self):
+        pe, _slips, request, _b2c = self._whole_payroll(employee_wise=0)
+        self.assertTrue(frappe.db.get_value(B2B, request, "journal_entry"))  # booked: HRMS hides its button only
+        self.assertRaisesRegex(frappe.ValidationError, f"M-Pesa pays salaries of {pe}", self._bank_entry, pe)
+
+    def test_who_may_not_see_salaries_cannot_plan_a_salary_on_a_schedule(self):
+        """D4: an Accounts User without an HR role may make schedules, but not salary lines: refused before
+        the slip or the employee's account is read, so the message names no amount and no destination."""
+        _pe, slips = self._payroll()
+        accounts_only = "_t_pay_accounts_only@example.com"
+        _user(accounts_only, ("Accounts User",))
+        bank = self.employees["_T Pay Bank"]
+
+        def schedule_doc(amount, document=True):
+            line = {"planned_date": nowdate(), "party_type": "Employee", "party": bank, "amount": amount}
+            if document:
+                line.update(reference_doctype=SLIP, reference_name=slips[0])
+            return frappe.get_doc({"doctype": SCHEDULE, "title": "_T salary", "company": t.COMPANY,
+                                   "b2b_settings": SETTINGS, "b2c_settings": SETTINGS, "lines": [line]})
+
+        for doc in (schedule_doc(1000000), schedule_doc(1), schedule_doc(1, document=False)):
+            with _as(accounts_only), self.assertRaises(frappe.PermissionError) as refused:
+                doc.insert()
+            text = str(refused.exception)
+            self.assertIn("a salary line", text)
+            for secret in ("50,000", "50000", "247247", self.accounts["_T Pay Bank"]):
+                self.assertNotIn(secret, text)
+        with _as(PREPARER):  # Accounts User and HR Manager: may see salaries
+            doc = schedule_doc(100).insert()
+        self.assertTrue(doc.lines[0].destination.startswith("247247 / "))
+
+    def test_the_salary_entry_puts_both_rows_on_the_payrolls_cost_center(self):
+        """Handover F5 for salaries paid from a schedule: the payable and the M-Pesa rows on one cost center."""
+        pe, _slips, request, _b2c = self._whole_payroll(employee_wise=1)
+        center = frappe.db.get_value(PAYROLL, pe, "cost_center")
+        round_off = frappe.db.get_value("Company", t.COMPANY, "round_off_account")
+        rows = frappe.get_all(JEA, filters={"parent": frappe.db.get_value(B2B, request, "journal_entry")},
+                              fields=["account", "cost_center"])
+        self.assertEqual({r.cost_center for r in rows if r.account != round_off}, {center})

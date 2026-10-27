@@ -408,3 +408,105 @@ class TestPayeeAccounts(IntegrationTestCase):
         self.assertEqual(frappe.db.get_value(B2B, request.name, ["status", "receiver_name_mismatch"]), ("Paid", 0))
         # a till's Result names no one: nothing is checked, nothing blocked
         self.assertEqual(frappe.db.get_value(EMP, till, ["name_mismatch", "last_receiver_name"]), (0, None))
+
+    # ------------------------------------------------------------ final review (area B): cancel, amend, approve
+    def _paid_b2b(self, doctype: str, account: str) -> str:
+        """A Paid B2B request naming the account: a paid (or failed) request stays submitted."""
+        tag = frappe.generate_hash(length=8).upper()
+        values = ({"supplier": self.supplier, "supplier_mpesa_account": account} if doctype == SUP
+                  else {"employee": self.other_employee, "employee_mpesa_account": account})
+        acc = frappe.db.get_value(doctype, account, ["shortcode", "account_number"], as_dict=True)
+        doc = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 100, "company": t.COMPANY,
+                              "command_id": "BusinessPayBill", "receiver_shortcode": acc.shortcode,
+                              "account_reference": acc.account_number, "status": "Paid", "docstatus": 1,
+                              "transaction_id": f"T{tag}", "remarks": "T paid", "owner": PREPARER,
+                              "creation": now_datetime(), "modified": now_datetime(), **values})
+        doc.name = f"_T-MB2B-{tag}"
+        doc.db_insert()
+        return doc.name
+
+    def _amend(self, doctype: str, account: str, user: str):
+        """What the desk's Amend makes (frappe.model.copy_doc with from_amend: every field copied, the
+        no-copy ones too), saved by ``user``."""
+        with _as(user):
+            amended = frappe.copy_doc(frappe.get_doc(doctype, account))  # ignore_no_copy, as Amend copies
+            amended.docstatus = 0
+            amended.amended_from = account
+            amended.insert()
+        return amended
+
+    def test_an_account_paid_by_b2b_is_cancelled_amended_and_approved_again(self):
+        """Before: Frappe refused the cancel (LinkExistsError: linked with Mpesa B2B Payment Request), so a
+        compromised number stayed payable and "cancel and amend" could not be followed (v15 and v16)."""
+        cases = (
+            (SUP, "_T-MSA-PAYEE-RA", PREPARER, dict(supplier=self.supplier, account_type=PAYBILL, shortcode="888885",
+                                                     account_number="TP-5", expected_name=SUPPLIER)),
+            (EMP, "_T-MEA-PAYEE-RA", HR, dict(employee=self.other_employee, account_type=BANK, bank_paybill="KCB",
+                                              shortcode="522522", account_number="1234567890130",
+                                              expected_name="KCB Paybill AC", account_holder_name="Test Name")),
+        )
+        for doctype, name, maker, values in cases:
+            # blocked since it was paid: its bank paybill changed, or M-Pesa paid another name
+            account = _approved(doctype, name, is_default=1, needs_reapproval=1, name_mismatch=1,
+                                last_receiver_name="999999 - SOMEONE ELSE",
+                                reapproval_reason="Blocked for the test: cancel and amend it.", **values)
+            paid = self._paid_b2b(doctype, account)
+            with _as(MANAGER):
+                frappe.get_doc(doctype, account).cancel()
+            self.assertEqual(frappe.db.get_value(doctype, account, "docstatus"), 2, doctype)
+            self.assertEqual(frappe.db.get_value(B2B, paid, ["docstatus", "status"]), (1, "Paid"))  # left as it was
+            amended = self._amend(doctype, account, maker)
+            self.assertEqual((amended.needs_reapproval, amended.name_mismatch, amended.last_receiver_name),
+                             (0, 0, None))  # the old block is not copied into the new account
+            approved = t.send_as(MANAGER, frappe.get_doc(doctype, amended.name))
+            self.assertEqual((approved.docstatus, approved.approved_by, approved.entered_by), (1, MANAGER, maker))
+            acc = party_accounts.get_account(doctype, approved.name)
+            party = acc.get(party_accounts.profile(doctype).party_field)
+            self.assertIsNone(party_accounts.usable_problem(acc, party, doctype), doctype)
+            # the only approved account of the party again: payments that name none go to it
+            self.assertEqual(party_accounts.pick_account(doctype, party, party_accounts.B2B_TYPES), approved.name)
+
+    def test_an_account_approved_by_who_entered_it_is_blocked_by_migrate_until_approved_again(self):
+        """Handover F3 (Trident MSA-00002, entered and approved with the shared Administrator login): the
+        upgrade blocks such accounts; cancel, amend and a named manager approval make one payable again."""
+        till = _approved(SUP, "_T-MSA-PAYEE-SELF", supplier=self.supplier, account_type=TILL, shortcode="777774",
+                         expected_name=SUPPLIER, is_default=1, owner="Administrator", entered_by=None,
+                         approved_by="Administrator")
+        named = _approved(SUP, "_T-MSA-PAYEE-NAMED", supplier=self.supplier, account_type=TILL, shortcode="777775",
+                          expected_name=SUPPLIER)
+        blocked = party_accounts.block_unchecked_approvals()
+        self.assertGreaterEqual(blocked[SUP], 1)
+        self.assertEqual(frappe.db.get_value(SUP, till, ["needs_reapproval", "reapproval_reason"]),
+                         (1, party_accounts.SELF_APPROVED))
+        self.assertEqual(frappe.db.get_value(SUP, named, "needs_reapproval"), 0)
+        self.assertIsNone(supplier_accounts.pick_account(self.supplier))  # the blocked default is not skipped
+        with _as(PREPARER), self.assertRaisesRegex(frappe.ValidationError, "is blocked: Approved by the person"):
+            frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 100, "company": t.COMPANY,
+                            "supplier": self.supplier, "remarks": "T blocked"}).insert()
+        self.assertEqual(party_accounts.block_unchecked_approvals()[SUP], 0)  # once per account
+        with _as(MANAGER):
+            frappe.get_doc(SUP, till).cancel()
+        self.assertEqual(supplier_accounts.pick_account(self.supplier), named)  # the only one left: the default
+        amended = self._amend(SUP, till, PREPARER)
+        approved = t.send_as(MANAGER, frappe.get_doc(SUP, amended.name))
+        self.assertEqual((approved.docstatus, approved.needs_reapproval, approved.approved_by), (1, 0, MANAGER))
+        self.assertIsNone(supplier_accounts.usable_problem(supplier_accounts.get_account(approved.name),
+                                                           self.supplier))
+
+    def test_a_new_default_on_hold_is_waited_for_not_skipped(self):
+        """Plan B.4: a supplier moved to a new paybill (the default, in its hold period). A request that names
+        no account is refused with the hold, never filled with the old paybill; the payer may name it."""
+        old = _approved(SUP, "_T-MSA-PAYEE-OLD", supplier=self.supplier, account_type=PAYBILL, shortcode="888886",
+                        account_number="TP-6", expected_name=SUPPLIER)
+        new = _approved(SUP, "_T-MSA-PAYEE-NEW", supplier=self.supplier, account_type=PAYBILL, shortcode="888887",
+                        account_number="TP-7", expected_name=SUPPLIER, is_default=1,
+                        active_from=add_days(now_datetime(), 1))
+        self.assertIsNone(supplier_accounts.pick_account(self.supplier))
+        with _as(PREPARER):
+            self.assertRaisesRegex(frappe.ValidationError, f"{new} is on hold until", frappe.get_doc({
+                "doctype": B2B, "mpesa_settings": SETTINGS, "amount": 100, "company": t.COMPANY,
+                "supplier": self.supplier, "remarks": "T hold"}).insert)
+            request = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 100, "company": t.COMPANY,
+                                      "supplier": self.supplier, "supplier_mpesa_account": old,
+                                      "remarks": "T named"}).insert()
+        self.assertEqual(request.receiver_shortcode, "888886")

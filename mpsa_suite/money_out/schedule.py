@@ -249,6 +249,8 @@ def validate_schedule(doc) -> None:
     for name, old in stored.items():
         if name not in kept and (old.status != PLANNED or _sent(old)):
             frappe.throw(_left_planned(old, "deleted"))
+        if name not in kept:
+            _check_salary_visibility(doc, old)
     _check_planned_amounts(doc)
     doc.update(totals(doc.lines, doc.closed))
 
@@ -297,9 +299,26 @@ def _check_pay_from(doc) -> None:
             frappe.throw(f"Mpesa Settings {settings} pays for {company}, not {doc.company}.")
 
 
+def _check_salary_visibility(doc, row) -> None:
+    """A salary line (a Salary Slip, or an employee paid for no claim or advance) is added, changed,
+    kept or removed only by who may see salaries (decision D4; the Payroll Entry and Salary Slip
+    builders check it themselves): checked before the slip or the employee's account is read, so
+    the refusal names no amount and no destination."""
+    from . import salary_access
+
+    flags = getattr(doc, "flags", None) or {}
+    if flags.get("mpesa_from_payroll") or not salary_access.is_salary_line(row):
+        return
+    if not salary_access.can_see_salaries():
+        from .payroll import SALARIES_HIDDEN
+
+        frappe.throw(f"Row {row.idx}: a salary line. {SALARIES_HIDDEN}", frappe.PermissionError)
+
+
 def _check_line(doc, row, changed: bool = True) -> str | None:
     """Throws what makes the line unpayable whatever the day; returns a problem that may clear by
     its Pay On (an account still in its hold period, a hold, a switch), shown on the line."""
+    _check_salary_visibility(doc, row)
     try:
         daraja.whole_shillings(row.amount)
     except ValueError as e:
