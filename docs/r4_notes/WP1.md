@@ -9,11 +9,11 @@ F3 and F6; `docs/ROLES_AND_PERMISSIONS.md` G17 to G21, decisions D5 and D6.
 - **Role sets** (`permissions.py`): `PAYOUT_ROLES` = M-Pesa Manager, M-Pesa Payer;
   `ADMIN_ROLES` = M-Pesa Manager; `SALARY_ROLES` = M-Pesa Manager, M-Pesa Payer, HR Manager,
   HR User. `CONFIG_ROLES`, `COLLECT_ROLES`, `FINANCE_ROLES` and `PREPARE_ROLES` unchanged.
-- **DocType rights** (`permission_matrix.py` and the JSON): System Manager is PREPARE
-  (`rwcadRepmh`: no submit or cancel) on B2C Disbursement Request, B2C Payment Disbursement,
-  Mpesa B2B Payment Request, Mpesa Reversal Request, Supplier and Employee M-Pesa Account. Full
-  rights on the settings DocTypes stay. The generated part of `docs/ROLES_AND_PERMISSIONS.md` is
-  regenerated.
+- **DocType rights** (`permission_matrix.py` and the JSON; tightened by the review fixes below):
+  System Manager reads only (`rRep`) B2C Disbursement Request, B2C Payment Disbursement, Mpesa B2B
+  Payment Request, Mpesa Reversal Request, M-Pesa Payment Schedule and Supplier M-Pesa Account,
+  and has no row on Employee M-Pesa Account. Full rights on the settings DocTypes stay. The
+  generated part of `docs/ROLES_AND_PERMISSIONS.md` is regenerated.
 - **Named login**: `permissions.require_named_user()` runs first in the `before_submit` of the
   four payouts, in both B2C retries, in Pay Selected (`prepare_payment`, `confirm_payment`), in
   Receiver Name Confirmed (`party_accounts.confirm_receiver_name`) and in Send via M-Pesa. The
@@ -72,6 +72,73 @@ F3 and F6; `docs/ROLES_AND_PERMISSIONS.md` G17 to G21, decisions D5 and D6.
   The first save on install posts nothing.
 - `boot.py`: the flags follow the new sets, so System Manager gets no `can_pay`, `can_approve`,
   `can_prepare` or `can_see_salaries`. Only the docstring changed.
+
+## Review fixes (branch r4-fix-wp1, on c507634)
+- **System Manager is configuration only** (decision 1): read only (`rRep`, the matrix's `READ`)
+  on the four payouts, M-Pesa Payment Schedule and Supplier M-Pesa Account; no DocPerm at all on
+  Employee M-Pesa Account (employees' salary phones and bank accounts: no list, form, report,
+  export or `accounts_for_employee`). The six JSONs' System Manager rows changed, Employee M-Pesa
+  Account's was removed; all seven `modified` are 2026-10-27 22:00 (migrate re-imports the
+  DocPerms; Frappe replaces a DocType's DocPerm rows on import). Settings, Mpesa Settings, the
+  bank paybills, API clients, webhooks and C2B URLs keep their rows.
+- **Prepare endpoints** `schedule.move_date`, `plan_again`, `close_schedule` and
+  `payroll.from_payroll_entry` check `PREPARE_ROLES` (was `FINANCE_ROLES`, which holds System
+  Manager); their DocPerm checks stay. The ENDPOINTS / HELPERS rows say so.
+- **Administrator in the statement checks**: Plan Again of a line whose payout may have been paid
+  (`schedule._named_manager`, used by `plan_again` and `_check_b2c_not_paid`) and the maybe-paid
+  branches of the B2B and B2C requests' `before_cancel` call `require_named_user()` before the
+  manager check: `require()` lets Administrator through and `frappe.get_roles("Administrator")`
+  holds M-Pesa Manager. With the setting on, the shared login gets "Use your own login".
+- **M-Pesa Suite Settings alerts**: `notify_role`, `b2c_approved_phones_only`,
+  `allow_claim_payees`, `claim_payee_max_amount` and `claim_payee_daily_cap` are watched;
+  Currency values read "0", "5,000", "12,500.50". The alert goes to the Notify Role before the
+  save and the one after it (`party_accounts.alert(..., roles=[old, new])`): on_update reads the
+  new one from the database, so a save that also changed the role used to alert only the new one.
+- **Send via M-Pesa summary of bank accounts**: for a "Bank Account (via Bank Paybill)" on either
+  account DocType (and for a B2B request paying one), the destination names the bank (its M-Pesa
+  Bank Paybill row's institution name, else the ERPNext Bank) and each row carries
+  `account_holder` (`account_holder_name`), shown under the destination by `mpsa_send.js`.
+- **M-Pesa Payments Due** (`m_pesa_payments_due.js`): Pay Selected shows for
+  `frappe.boot.mpsa.can_pay`, Move Date and Plan Again for `can_prepare` with write on the
+  schedule; Refresh Balances stays on the finance roles. The hard-coded payer roles (with System
+  Manager) are gone.
+- **Bench tests**:
+  - `money_in/test_fix2_b2c2.py`, `test_fix_b2creq.py`: retries run as `t.payer()` (made in
+    `setUpClass`); new tests: the shared Administrator login is refused for both retries
+    (`require_named_user` unchanged). These were the 22 errors at c507634.
+  - `money_out/test_payment_schedule.py`: the not-due console submit reloads the request before
+    its second submit (the refused first submit left `modified` changed in memory only, hence
+    TimestampMismatchError: the bench FAIL at c507634); the send-began cancel and Plan Again run
+    as a named M-Pesa Manager, and Administrator is refused for both.
+  - `money_out/test_b2b_documents.py`: maybe-paid cancels as `t.manager()`, Administrator refused;
+    new: Send via M-Pesa on a direct B2C Payment Disbursement (summary from its real rows, plain
+    submit refused, the queued `create_b2c_request` job run as the payer makes and submits the B2C
+    request) and on a direct B2C Disbursement Request.
+  - `tests/test_roles_permissions.py`: System Manager reads but creates, writes and deletes no
+    payout, schedule or supplier account, has no access to Employee M-Pesa Account, and is refused
+    by `accounts_for_employee`, Move Date, Plan Again, Close Schedule and the payroll schedule;
+    `confirm_send` through `/api/method` is refused for another user and before 5 seconds (the
+    token is kept).
+  - `mpesa_reversal_request/test_mpesa_reversal_request.py`: Make Reversal's user gets no token;
+    another payer sends it with Send via M-Pesa.
+  - `m_pesa_suite_settings/test_m_pesa_suite_settings.py`: a save that changes the Notify Role and
+    the casual-payee switches alerts the old and the new role.
+- **Unit**: `test_send_confirm.py` (bank rows for suppliers, employees and approvals; the new
+  watched settings, Currency, the old and new Notify Role; AST: no Administrator comparison in
+  `schedule.py`, `_named_manager` starts with `require_named_user()`, each maybe-paid
+  `require(ADMIN_ROLES)` follows it), `test_schedule.py` (System Manager refused by the three
+  schedule endpoints; Administrator refused by Plan Again), `test_fix_payroll.py` (Administrator
+  refused by the B2C cancel and Plan Again), `test_money_out_flow.py` (B2B cancel),
+  `test_payroll_schedule.py` (System Manager refused by the payroll schedule), and the new
+  `test_r4_send_gates_js.py` (node: the Payments Due buttons per role and flag, the account holder
+  in the Send via M-Pesa summary). 2284 unit tests pass (2252 at c507634). The bench tests are
+  written, not run here.
+- **Migration**: a site whose own rules (Custom DocPerm) give System Manager more on these
+  DocTypes keeps them until Check Permissions > Reset; the server checks above refuse it anyway
+  for the schedule endpoints, sends and approvals. Give whoever must prepare payouts an Accounts or
+  HR role.
+- **Not here**: the Third-party account warning that `validate_account` shows only at the
+  submit (WP2's `party_accounts`); docs other than this note and `ROLES_AND_PERMISSIONS.md`.
 
 ## Settings added
 None. This work package uses `refuse_administrator_payouts`, which WP0 added (on by default and

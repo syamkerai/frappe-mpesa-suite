@@ -83,6 +83,7 @@ class B2CDisbursementRequest(Document):
         if status == "Not Initiated" and self.get("send_started_on"):
             from ....money_out.schedule import B2C_INTERRUPTED
 
+            require_named_user()  # a named manager: the shared login checked no statement
             require(ADMIN_ROLES)
             self.status = "Status Unknown"
             self.error_message = B2C_INTERRUPTED
@@ -90,6 +91,7 @@ class B2CDisbursementRequest(Document):
         if status in ("Not Initiated", "Failed"):
             return
         if status in ("Initiated", "Status Unknown"):
+            require_named_user()
             require(ADMIN_ROLES)
             return
         frappe.throw(f"{self.name} paid a salary from a payment schedule ({status}): it is the record of that payment "

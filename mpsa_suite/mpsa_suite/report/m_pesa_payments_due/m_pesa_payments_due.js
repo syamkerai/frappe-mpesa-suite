@@ -5,8 +5,10 @@
 // Confirm button that stays disabled for 5 seconds (the server refuses earlier too). Nothing is
 // paid automatically, and no line can be sent before its Pay On.
 const MPSA_SCHEDULE = "mpsa_suite.money_out.schedule";
+// Refresh Balances: permissions.FINANCE_ROLES (balance queries). Pay Selected, Move Date and Plan
+// Again follow frappe.boot.mpsa (boot.py), the roles the server accepts: never System Manager alone,
+// and no Pay Selected for the shared Administrator login.
 const MPSA_DUE_FINANCE = ["System Manager", "M-Pesa Manager", "Accounts Manager", "Accounts User"];
-const MPSA_DUE_PAYERS = ["System Manager", "M-Pesa Manager", "M-Pesa Payer"]; // permissions.PAYOUT_ROLES
 
 frappe.query_reports["M-Pesa Payments Due"] = {
 	filters: [
@@ -65,12 +67,17 @@ frappe.query_reports["M-Pesa Payments Due"] = {
 	},
 
 	onload(report) {
-		if (frappe.user.has_role(MPSA_DUE_PAYERS)) {
+		const mpsa = frappe.boot.mpsa || {};
+		if (mpsa.can_pay) {
+			// PAYOUT_ROLES, a named login
 			report.page.add_inner_button(__("Pay Selected"), () => mpsa_due.pay(report));
 		}
-		if (frappe.user.has_role(MPSA_DUE_FINANCE)) {
+		if (mpsa.can_prepare && frappe.model.can_write("M-Pesa Payment Schedule")) {
+			// PREPARE_ROLES, and the schedule's write right the server checks too
 			report.page.add_inner_button(__("Move Date"), () => mpsa_due.move(report));
 			report.page.add_inner_button(__("Plan Again"), () => mpsa_due.plan_again(report));
+		}
+		if (frappe.user.has_role(MPSA_DUE_FINANCE)) {
 			report.page.add_inner_button(__("Refresh Balances"), () => mpsa_due.refresh_balances(report));
 		}
 	},

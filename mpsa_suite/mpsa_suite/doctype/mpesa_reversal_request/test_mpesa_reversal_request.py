@@ -39,3 +39,45 @@ class TestMpesaReversalRequest(IntegrationTestCase):
         finally:
             frappe.set_user("Administrator")
             frappe.db.rollback()  # the users and the switch
+
+    def test_send_via_mpesa_sends_a_reversal_another_payer_made(self):
+        """Round 4: Make Reversal's user gets no Send via M-Pesa token (maker-checker); another payer
+        presses it and confirms, and the submit sends the reversal (send_reversal, replaced here)."""
+        from unittest.mock import patch
+
+        from mpsa_suite.money_in import testing as t
+        from mpsa_suite.money_out import send_confirm
+        from mpsa_suite.mpsa_suite.doctype.mpesa_reversal_request import (
+            mpesa_reversal_request as module,
+        )
+
+        t.bootstrap()  # the shortcode TESTC2B, which reverses (use_reversal)
+        maker, payer = t.named_user("_t-rev-maker@example.com", "M-Pesa Payer"), t.payer()
+        register = frappe.get_doc({"doctype": "Mpesa C2B Payment Register", "transid": "TREV" + frappe.generate_hash(
+            length=6).upper(), "transamount": 700, "businessshortcode": t.SHORTCODE, "full_name": "TEST PAYER"})
+        register.name = f"_T-C2B-REV-{frappe.generate_hash(length=6)}"
+        register.db_insert()
+        frappe.db.set_single_value("M-Pesa Suite Settings", "schedule_maker_checker", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        try:
+            frappe.set_user(maker)  # as Make Reversal makes it (money_out.api.make_reversal), from TESTC2B
+            name = frappe.get_doc({"doctype": "Mpesa Reversal Request", "c2b_register": register.name,
+                                   "mpesa_settings": t.SETTINGS, "reason": "Paid twice",
+                                   "remarks": "Reversal"}).insert().name
+            found = send_confirm.prepare_send("Mpesa Reversal Request", name)
+            self.assertIsNone(found["token"])
+            self.assertIn("another person must send it", found["problems"][0])
+            frappe.set_user(payer)
+            found = send_confirm.prepare_send("Mpesa Reversal Request", name)
+            self.assertTrue(found["token"])
+            self.assertEqual((found["rows"][0]["receiver"], found["total"]), ("TEST PAYER", 700.0))
+            frappe.set_user("Administrator")
+            with patch.object(module, "send_reversal") as send:
+                t.send_as(payer, frappe.get_doc("Mpesa Reversal Request", name))
+            send.assert_called_once_with(name)
+            self.assertEqual(frappe.db.get_value("Mpesa Reversal Request", name, ["docstatus", "status"]),
+                             (1, "Not Initiated"))
+        finally:
+            frappe.set_user("Administrator")
+            frappe.db.rollback()  # the users, the register, the reversal and the switch
+            frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")

@@ -679,6 +679,9 @@ def test_a_payroll_paid_partly_by_bank_or_not_submitted_is_refused(env):
     env.frappe.user_roles = {"M-Pesa Payer"}
     with pytest.raises(env.frappe.PermissionError):
         env.payroll.from_payroll_entry("PAY-1")
+    env.frappe.user_roles = {"System Manager"}  # configures, does not prepare (decision 1)
+    with pytest.raises(env.frappe.PermissionError):
+        env.payroll.from_payroll_entry("PAY-1")
 
 
 def test_amounts_are_what_is_left_in_whole_shillings_and_a_missing_shortcode_excludes(env):

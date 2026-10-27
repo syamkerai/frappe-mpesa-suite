@@ -48,7 +48,7 @@ from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..permissions import ADMIN_ROLES, FINANCE_ROLES, PAYOUT_ROLES, require, require_named_user
+from ..permissions import ADMIN_ROLES, PAYOUT_ROLES, PREPARE_ROLES, require, require_named_user
 from ..wallet import accounts as wallet_accounts
 from ..wallet import balances
 from . import employee_accounts, owed, party_accounts, send_confirm, supplier_accounts
@@ -1500,8 +1500,9 @@ def _lines_by_schedule(names) -> dict:
 @frappe.whitelist(methods=["POST"])
 def move_date(lines, date) -> dict:
     """Move planned lines to another day, today or later (Accounts). Each move is noted on the
-    schedule with the old and new day, and makes the mover the line's last changer."""
-    require(FINANCE_ROLES)
+    schedule with the old and new day, and makes the mover the line's last changer. Who prepares
+    payouts (PREPARE_ROLES), not System Manager: a moved line is payable on its new day."""
+    require(PREPARE_ROLES)
     names = _names(lines)
     if not names:
         frappe.throw("Tick the lines to move.")
@@ -1537,8 +1538,9 @@ def move_date(lines, date) -> dict:
 def plan_again(line, date=None) -> dict:
     """Plan a failed line again, to be paid with Pay Selected like a new one. An Unknown line may
     have been paid: a manager checks the statement and cancels its request first. A line whose
-    request was cancelled after its send began is planned again by a manager only."""
-    require(FINANCE_ROLES)
+    request was cancelled after its send began is planned again by a manager only, by name (the
+    shared Administrator login holds every role but checked no statement: decision 1)."""
+    require(PREPARE_ROLES)
     parent = frappe.db.get_value(LINE, line, "parent")
     if not parent:
         frappe.throw(f"Payment schedule line {line} not found.")
@@ -1561,9 +1563,7 @@ def plan_again(line, date=None) -> dict:
                                       for_update=True)
         if request and (request.status == "Paid" or (cint(request.docstatus) == 1 and request.status != "Failed")):
             frappe.throw(f"{row.request} is {request.status}: row {row.idx} is not planned again.")
-        user = frappe.session.user
-        if (request and cancelled_mid_send(request) and user != "Administrator"
-                and not set(ADMIN_ROLES) & set(frappe.get_roles(user))):
+        if request and cancelled_mid_send(request) and not _named_manager():
             frappe.throw(f"M-Pesa may have paid row {row.idx}: {row.request} was cancelled after its send began. A "
                          "manager checks the statement, then plans it again.")
     values = {"status": PLANNED, "request": None, "receipt": None, "paid_on": None, "entry_status": None,
@@ -1580,6 +1580,14 @@ def plan_again(line, date=None) -> dict:
         f"after {_payout(row) or 'it'} failed: {row.last_problem or 'no reason given'}.")
     update_totals(parent, bump=True)
     return {"line": line, "status": PLANNED}
+
+
+def _named_manager() -> bool:
+    """True for an M-Pesa Manager (ADMIN_ROLES), who has checked the statement before planning a
+    line whose payout may have been paid. The shared Administrator login holds every role but names
+    nobody: refused ("Use your own login") while M-Pesa Suite Settings refuses it (decision 1)."""
+    require_named_user()
+    return bool(set(ADMIN_ROLES) & set(frappe.get_roles(frappe.session.user)))
 
 
 def _check_b2c_not_paid(row) -> None:
@@ -1608,8 +1616,7 @@ def _check_b2c_not_paid(row) -> None:
     if status == "Failed" or (cint(request.docstatus) == 2 and b2c_never_sent(request)):
         return
     if cint(request.docstatus) == 2:
-        user = frappe.session.user
-        if user == "Administrator" or set(ADMIN_ROLES) & set(frappe.get_roles(user)):
+        if _named_manager():
             return  # a manager cancelled it as not paid, having checked the statement
         frappe.throw(f"M-Pesa may have paid row {row.idx}: {payout} was cancelled while it was {status}. An M-Pesa "
                      "Manager checks the statement, then plans it again.")
@@ -1622,7 +1629,7 @@ def _check_b2c_not_paid(row) -> None:
 @frappe.whitelist(methods=["POST"])
 def close_schedule(name) -> dict:
     """Close the schedule: its planned lines are cancelled; lines already sent carry on."""
-    require(FINANCE_ROLES)
+    require(PREPARE_ROLES)
     frappe.has_permission(SCHEDULE, "write", doc=name, throw=True)
     schedule = _header(name, for_update=True)
     if not schedule:

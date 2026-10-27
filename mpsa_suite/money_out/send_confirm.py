@@ -242,10 +242,26 @@ def _b2c_charge(amount) -> float | None:
         return None
 
 
-def _row(receiver, destination, amount=None, charge=None, document=None, party=None, expected_name=None) -> dict:
+def _row(receiver, destination, amount=None, charge=None, document=None, party=None, expected_name=None,
+         account_holder=None) -> dict:
     return {"receiver": receiver, "party": party, "expected_name": expected_name, "destination": destination,
+            "account_holder": cstr(account_holder).strip() or None,
             "amount": flt(amount, 2) if amount is not None else None,
             "charge": flt(charge, 2) if charge is not None else None, "document": document}
+
+
+def _bank_destination(acc, shortcode, number) -> str | None:
+    """A bank account paid through its bank's paybill, named by its bank (the M-Pesa Bank Paybill
+    row's name, else the ERPNext Bank it links); None for any other destination. Supplier and
+    Employee M-Pesa Accounts both hold this type (round 4)."""
+    from . import party_accounts as pa
+
+    if not acc or not (acc.get("account_type") == pa.BANK or acc.get("bank") or acc.get("bank_paybill")):
+        return None
+    paybill = cstr(acc.get("bank_paybill")).strip()
+    bank = frappe.db.get_value(pa.BANK_PAYBILL, paybill, "institution_name") if paybill else None
+    return _("{0} (bank paybill {1}), account {2}").format(cstr(bank or acc.get("bank")).strip() or _("Bank"),
+                                                          shortcode, number)
 
 
 def _b2b_rows(doc) -> list:
@@ -259,21 +275,20 @@ def _b2b_rows(doc) -> list:
         account = doc.get("supplier_mpesa_account")
     else:
         party_type = party = account_doctype = account = None
-    fields = ["expected_name"] + (["bank"] if account_doctype == EMPLOYEE_ACCOUNT else [])
+    fields = ["expected_name", "account_type", "bank_paybill", "bank", "account_holder_name"]
     acc = frappe.db.get_value(account_doctype, account, fields, as_dict=True) if account else None
     shortcode, number = cstr(doc.get("receiver_shortcode")).strip(), cstr(doc.get("account_reference")).strip()
     if doc.get("command_id") == daraja.B2B_BUY_GOODS:
         destination = _("Till {0}").format(shortcode)
-    elif acc and acc.get("bank"):
-        destination = _("{0} (bank paybill {1}), account {2}").format(acc.bank, shortcode, number)
     else:
-        destination = _("Paybill {0}, account {1}").format(shortcode, number)
+        destination = _bank_destination(acc, shortcode, number) or _("Paybill {0}, account {1}").format(shortcode,
+                                                                                                     number)
     if not account:
         destination += " " + _("(a number not saved on a supplier)")
     document = next((f"{_(dt)} {doc.get(f)}" for f, dt in B2B_DOCUMENTS if cstr(doc.get(f)).strip()), None)
     receiver = _party_name(party_type, party) if party else _("Not saved on a supplier")
     return [_row(receiver, destination, doc.get("amount"), None, document, party,
-                 acc.get("expected_name") if acc else None)]
+                 acc.get("expected_name") if acc else None, acc.get("account_holder_name") if acc else None)]
 
 
 def _b2c_rows(doc) -> list:
@@ -313,13 +328,11 @@ def _account_rows(doc) -> list:
         destination = _("M-Pesa phone {0}").format(mask(doc.get("phone")))
     elif doc.get("account_type") == pa.TILL:
         destination = _("Till {0}").format(doc.get("shortcode"))
-    elif doc.get("bank"):
-        destination = _("{0} (bank paybill {1}), account {2}").format(doc.bank, doc.get("shortcode"),
-                                                                      doc.get("account_number"))
     else:
-        destination = _("Paybill {0}, account {1}").format(doc.get("shortcode"), doc.get("account_number"))
+        destination = _bank_destination(doc, doc.get("shortcode"), doc.get("account_number")) or _(
+            "Paybill {0}, account {1}").format(doc.get("shortcode"), doc.get("account_number"))
     return [_row(_party_name(p.party_type, party), destination, party=party, expected_name=doc.get("expected_name"),
-                 document=_(doc.get("account_type") or ""))]
+                 document=_(doc.get("account_type") or ""), account_holder=doc.get("account_holder_name"))]
 
 
 ROWS = {B2B: _b2b_rows, B2C: _b2c_rows, B2C_REQUEST: _b2c_request_rows, REVERSAL: _reversal_rows,

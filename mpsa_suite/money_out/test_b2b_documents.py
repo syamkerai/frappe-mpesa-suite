@@ -8,11 +8,14 @@ run in the test. Each test is rolled back: commits made by the code under test (
 Integration Request log, the sweep) are replaced for the whole test, so nothing one test does is
 seen by the next. Requests are made with the test company: ERPNext's v15 test setup makes
 another company the site default. Requests are prepared as Administrator and sent by a named
-M-Pesa Payer with Send via M-Pesa (t.send_as), as the form does: Administrator may not send.
+M-Pesa Payer with Send via M-Pesa (t.send_as), as the form does: Administrator may not send, nor
+cancel one that may have been paid (a named M-Pesa Manager does). The B2C payouts' Send via
+M-Pesa (a direct B2C Payment Disbursement and its jobs, a direct B2C Disbursement Request) is
+here too: the shortcode is also a B2C one.
 Unit coverage is in tests/unit/test_b2b_owed.py and tests/unit/test_b2b_entries.py.
 """
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import frappe
 from frappe.utils import add_days, add_to_date, flt, getdate, now_datetime, nowdate
@@ -25,6 +28,7 @@ SETTINGS, SHORTCODE = "TESTB2BDOCS", "600777"
 B2B, PE, JE, BT = b2b.B2B_DOCTYPE, "Payment Entry", "Journal Entry", "Bank Transaction"
 PI, PO = "Purchase Invoice", "Purchase Order"
 DISB, DISB_ROW = "B2C Payment Disbursement", "B2C Payment Disbursement Reference"
+B2C_REQ, B2C_PHONE = "B2C Disbursement Request", "254708374149"
 SUPPLIER = "_T B2B Docs Supplier"
 BUYING = "_Test M-Pesa KES Buying"
 CHARGES = "_Test M-Pesa Charges"
@@ -129,6 +133,7 @@ class TestB2BDocuments(IntegrationTestCase):
         cls.expense = _account(EXPENSE, "Expense", "Profit and Loss")
         cls.cost_center = frappe.get_cached_value("Company", t.COMPANY, "cost_center")
         cls.payer = t.payer()  # sends the requests (Send via M-Pesa)
+        cls.manager = t.manager()  # cancels one that may have been paid, having checked the statement
         # Requests an interrupted run committed would show as earlier payouts to the test supplier
         # (it exists only for these tests).
         frappe.db.delete(B2B, {"supplier": cls.supplier})
@@ -695,12 +700,24 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual((row.status, row.transaction_id, row.entry_status or None), ("Initiated", None, None))
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
 
+    def _cancel_as_manager(self, name):
+        """An M-Pesa Manager cancels the request, having checked the statement."""
+        frappe.set_user(self.manager)
+        try:
+            frappe.get_doc(B2B, name).cancel()
+        finally:
+            frappe.set_user("Administrator")
+
     def test_a_cancelled_request_that_may_have_paid_cannot_be_deleted(self):
         pi = self._invoice(10000)
         req = self._request(4000, send=False, purchase_invoice=pi.name)
         self._send(req, answer=(None, "unknown"))  # no answer from M-Pesa
-        req = frappe.get_doc(B2B, req.name)
-        req.cancel()  # an admin checked the statement
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        # not by the shared Administrator login (decision 1): it holds every role but checked nothing
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", frappe.get_doc(B2B, req.name).cancel)
+        self.assertEqual(frappe.db.get_value(B2B, req.name, "docstatus"), 1)
+        self._cancel_as_manager(req.name)  # an admin checked the statement
         self.assertRaisesRegex(frappe.ValidationError, "is the record of that payment", frappe.delete_doc, B2B,
                                req.name)
         self.assertTrue(frappe.db.exists(B2B, req.name))
@@ -711,13 +728,103 @@ class TestB2BDocuments(IntegrationTestCase):
     def test_a_manager_can_cancel_an_initiated_request_whose_result_never_came(self):
         pi = self._invoice(10000)
         req = self._request(4000, purchase_invoice=pi.name)
-        frappe.get_doc(B2B, req.name).cancel()  # Administrator, after checking the statement
+        self._cancel_as_manager(req.name)  # after checking the statement
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 10000)
         with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
             self._pay(req.name)  # the Result comes after all: recorded, never booked
         self.assertEqual(self._state(req.name).entry_status, "Needs Checking")
         self.assertEqual(len(self._alerts(alert, "M-Pesa paid this after the request was cancelled")), 1)
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
+
+    # ------------------------------------------------------------ Send via M-Pesa on the B2C payouts
+    def _b2c_disbursement(self, pi: str, amount):
+        """A direct B2C Payment Disbursement to the supplier's phone for ``pi``: a saved draft, made
+        as Pay Selected makes one (money_out.schedule._pay_b2c_group), prepared by Administrator."""
+        doc = frappe.get_doc({
+            "doctype": DISB, "naming_series": "MPESA-B2C-.YYYY.-", "company": t.COMPANY, "posting_date": nowdate(),
+            "payment_type": "Mpesa Disbursement", "party_type": "Supplier", "transaction_to_pay_against": PI,
+            "mode_of_payment": f"Mpesa-{SETTINGS}", "paid_from": self.gl, "paid_from_account_currency": "KES",
+            "paid_to": frappe.db.get_value(PI, pi, "credit_to"), "paid_to_account_currency": "KES",
+            "paid_amount": amount, "source_exchange_rate": 1, "target_exchange_rate": 1,
+            "references": [{"reference_doctype": PI, "reference_name": pi, "party_type": "Supplier",
+                            "party": self.supplier, "allocated_amount": amount, "partyb": B2C_PHONE,
+                            "currency": "KES", "exchange_rate": 1}]})
+        doc.insert()
+        return doc
+
+    def test_send_via_mpesa_sends_a_b2c_disbursement_and_its_jobs_make_the_payouts(self):
+        """The real rows in the summary, a plain submit refused, then the submit inside the deliberate
+        step: its job (create_b2c_request, run as the payer, as the queue runs it) makes and submits
+        the B2C request inside its own, and that request is sent (the send is replaced)."""
+        from mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request import (
+            b2c_disbursement_request as req_module,
+        )
+        from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import (
+            b2c_payment_disbursement as disb,
+        )
+        from mpsa_suite.utils.phone import mask
+
+        pi = self._invoice(5000)
+        doc = self._b2c_disbursement(pi.name, 1500)
+        frappe.set_user(self.payer)
+        try:
+            summary = send_confirm.prepare_send(DISB, doc.name)
+            self.assertRaisesRegex(frappe.ValidationError, "Send via M-Pesa", frappe.get_doc(DISB, doc.name).submit)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertTrue(summary["token"])
+        self.assertEqual(summary["problems"], [])
+        self.assertEqual([(r["receiver"], r["destination"], r["amount"], r["document"]) for r in summary["rows"]],
+                         [(SUPPLIER, f"M-Pesa phone {mask(B2C_PHONE)}", 1500.0, f"{PI} {pi.name}")])
+        self.assertEqual(summary["total"], 1500.0)
+
+        with patch("frappe.enqueue") as enqueue:
+            t.send_as(self.payer, doc)
+        self.assertEqual(frappe.db.get_value(DISB, doc.name, ["docstatus", "status"]), (1, "Initiated"))
+        jobs = [c for c in enqueue.call_args_list if c.args and str(c.args[0]).endswith("create_b2c_request")]
+        self.assertEqual(len(jobs), 1)
+        sent = Mock()
+        frappe.set_user(self.payer)  # a queued job runs as who queued it
+        try:
+            with patch.object(req_module, "make_b2c_payment_request", sent):
+                for job in jobs:
+                    disb.create_b2c_request(job.kwargs["ref"], job.kwargs["settings"], job.kwargs["b2c_disbursement"])
+        finally:
+            frappe.set_user("Administrator")
+        request = frappe.db.get_value(DISB_ROW, {"parent": doc.name}, "b2c_disbursement_request")
+        self.assertTrue(request)
+        row = frappe.db.get_value(B2C_REQ, request, ["docstatus", "amount", "phone_number", "owner"], as_dict=True)
+        self.assertEqual((row.docstatus, flt(row.amount), row.phone_number, row.owner),
+                         (1, 1500, B2C_PHONE, self.payer))
+        sent.assert_called_once_with(request)
+
+    def test_send_via_mpesa_sends_a_direct_b2c_request(self):
+        from mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request import (
+            b2c_disbursement_request as req_module,
+        )
+        from mpsa_suite.utils.phone import mask
+
+        pi = self._invoice(5000)
+        doc = self._b2c_disbursement(pi.name, 1500)
+        req = frappe.get_doc({"doctype": B2C_REQ, "amount": 1500, "currency": "KES", "mpesa_settings": SETTINGS,
+                              "reference_doctype": PI, "reference_name": pi.name, "party_type": "Supplier",
+                              "party": self.supplier, "phone_number": B2C_PHONE, "b2c_payment_disbursement": doc.name,
+                              "b2c_payment_disbursement_reference": doc.references[0].name})
+        req.insert()
+        sent = Mock()
+        with patch.object(req_module, "make_b2c_payment_request", sent):
+            frappe.set_user(self.payer)
+            try:
+                summary = send_confirm.prepare_send(B2C_REQ, req.name)
+            finally:
+                frappe.set_user("Administrator")
+            self.assertTrue(summary["token"])
+            self.assertEqual([(r["receiver"], r["destination"], r["amount"]) for r in summary["rows"]],
+                             [(SUPPLIER, f"M-Pesa phone {mask(B2C_PHONE)}", 1500.0)])
+            sent.assert_not_called()
+            t.send_as(self.payer, req)
+        self.assertEqual(frappe.db.get_value(B2C_REQ, req.name, "docstatus"), 1)
+        sent.assert_called_once_with(req.name)
 
     # ------------------------------------------------------------ B2B and B2C see each other
     def test_open_b2c_payout_counts_against_a_b2b_request(self):

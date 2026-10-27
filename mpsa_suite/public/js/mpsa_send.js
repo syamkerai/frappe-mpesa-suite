@@ -70,7 +70,12 @@ mpsa_send.summary_html = (r) => {
 		if (row.expected_name) {
 			who += `<br><span class="text-muted small">${__("Name on the approved account: {0}", [e(row.expected_name)])}</span>`;
 		}
-		html += `<tr><td>${who}</td><td><b>${e(row.destination || "")}</b></td>`;
+		let where = `<b>${e(row.destination || "")}</b>`;
+		// a bank account: whose it is (the bank's name above is the paybill's, not the holder's)
+		if (row.account_holder) {
+			where += `<br><span class="text-muted small">${__("Account holder: {0}", [e(row.account_holder)])}</span>`;
+		}
+		html += `<tr><td>${who}</td><td>${where}</td>`;
 		if (!account) {
 			const charge = row.charge === null || row.charge === undefined ? "" : kes(row.charge);
 			html += `<td class="text-right">${kes(row.amount)}</td><td class="text-right">${charge}</td>`;

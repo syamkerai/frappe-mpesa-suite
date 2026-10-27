@@ -44,37 +44,40 @@ ROLES = (SM, MM, MP, MC, MV, AM, AU, HM, HU, SU, PM, PU)
 SUITE_ROLES = (MM, MP, MC, MV)
 
 ALL = "rwcsxadRepmh"
-# Prepares money-out documents but does not send them (decision D1): no submit or cancel. System
-# Manager too, on the payouts and payee accounts (decision 1, 2026-10-27: only named payers send,
-# only an M-Pesa Manager approves; System Manager keeps the settings).
+# Prepares money-out documents but does not send them (decision D1): no submit or cancel.
 PREPARE = "rwcadRepmh"
+# System Manager on the payouts, their schedule and Supplier M-Pesa Account: it configures the suite
+# and reads, but neither prepares, sends nor approves (decision 1, 2026-10-27: only named payers send,
+# only an M-Pesa Manager approves). It has no row at all on Employee M-Pesa Account (salary data).
+READ = "rRep"
 
 # DocType -> {role: rights}. "Role@1" is that role's row at permission level 1.
 # Child tables (istable) take their parent's permissions and are not listed.
 DOCTYPES = {
     "B2C Disbursement Request": {
-        SM: PREPARE, MM: ALL,
+        SM: READ, MM: ALL,
         AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         AU: "rwcRepmh", HU: "rwcRepmh",
         MV: "rRep",
     },
     "B2C Payment Disbursement": {
-        SM: PREPARE, MM: ALL,
+        SM: READ, MM: ALL,
         AM: PREPARE, HM: PREPARE,
         MP: "rwsRp",
         MV: "rRep",
     },
     # payouts Phase 2: Accounts prepare and move lines; a Payer pays them (maker-checker in schedule.py)
     "M-Pesa Payment Schedule": {
-        SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rwcdRepmh", AU: "rwcdRepmh",
+        SM: READ, MM: "rwcdRepmh", AM: "rwcdRepmh", AU: "rwcdRepmh",
         MP: "rRep", MV: "rRep",
     },
     # payouts Phase 3: HR proposes an employee's payee account; an M-Pesa Manager approves it (submit;
     # never who entered it, party_accounts.approve). Salary data (D4): no Accounts roles, no Viewer, and
-    # no Payer either (Phase 3 review: the payer sees the destination on the line it pays).
+    # no Payer either (Phase 3 review: the payer sees the destination on the line it pays), nor System
+    # Manager (decision 1, 2026-10-27).
     "Employee M-Pesa Account": {
-        SM: PREPARE, MM: ALL,
+        MM: ALL,
         HM: "rwcaRepmh", HU: "rwcaRep",
     },
     # Round 4: the banks' paybills that payee bank accounts are paid through. Public numbers: read by who
@@ -87,7 +90,7 @@ DOCTYPES = {
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
-        SM: PREPARE, MM: ALL, MP: ALL,
+        SM: READ, MM: ALL, MP: ALL,
         AM: PREPARE,
         AU: "rwcdRep",
         MV: "rRep",
@@ -115,7 +118,7 @@ DOCTYPES = {
     "Mpesa Match Log": {SM: "rwcdRep", MM: "rwcdRep", AM: "rRep", AU: "rRep", MV: "rRep"},
     "Mpesa Payment Intent": {SM: "rwcdRepmh", MM: "rwcdRepmh", AM: "rRep", AU: "rRep", MV: "rRep", MC: "rRep"},
     "Mpesa Public Key Certificate": {SM: "rwcdpmh", MM: "rwc"},
-    "Mpesa Reversal Request": {SM: PREPARE, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
+    "Mpesa Reversal Request": {SM: READ, MM: ALL, MP: ALL, AM: PREPARE, AU: "rRep", MV: "rRep"},
     "Mpesa Sandbox Test Run": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     # Below M-Pesa Manager: pick a shortcode in a Link field only. Balances: Payments Due's Refresh
     # Balances; transaction status: the C2B register list (both FINANCE_ROLES, no read needed).
@@ -130,7 +133,7 @@ DOCTYPES = {
     # Shipped by upstream under this app's folder; the payments app owns the same DocType.
     "Payment Gateway": {SM: "rwcd"},
     "Supplier M-Pesa Account": {
-        SM: PREPARE, MM: ALL,
+        SM: READ, MM: ALL,
         AM: PREPARE,
         AU: "rwcaRepmh", MP: "rwcaRepmh", PM: "rwcaRepmh",
         MV: "rRep", PU: "rRep",
@@ -288,10 +291,10 @@ ENDPOINTS = {
         "PREPARE_ROLES + read each claim / advance + create the payouts", ("roles:PREPARE_ROLES", "perm")),
     "mpsa_suite.money_out.payroll.payroll_status": ("Read the Payroll Entry", ("perm",)),
     "mpsa_suite.money_out.payroll.from_payroll_entry": (
-        "FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule",
-        ("roles:FINANCE_ROLES", "via:require_salary_reader", "perm")),
+        "PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule",
+        ("roles:PREPARE_ROLES", "via:require_salary_reader", "perm")),
     "mpsa_suite.money_out.schedule.from_payroll_entry": (
-        "FINANCE_ROLES who may see salaries + read the Payroll Entry + create a schedule", ("via:from_payroll_entry",)),
+        "PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule", ("via:from_payroll_entry",)),
     # Round 4: salaries from Salary Slips (one-off, or the list's selected slips), and their headlines
     "mpsa_suite.money_out.payroll.from_salary_slip": (
         "PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip",
@@ -316,9 +319,9 @@ ENDPOINTS = {
         "As prepare_send, and the user the summary was made for", ("via:_sendable",)),
     "mpsa_suite.money_out.schedule.prepare_payment": ("PAYOUT_ROLES + read the schedule", ("roles:PAYOUT_ROLES", "perm")),
     "mpsa_suite.money_out.schedule.confirm_payment": ("PAYOUT_ROLES, the user the summary was made for", ("roles:PAYOUT_ROLES",)),
-    "mpsa_suite.money_out.schedule.move_date": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
-    "mpsa_suite.money_out.schedule.plan_again": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
-    "mpsa_suite.money_out.schedule.close_schedule": ("FINANCE_ROLES + write the schedule", ("roles:FINANCE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.move_date": ("PREPARE_ROLES + write the schedule", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.plan_again": ("PREPARE_ROLES + write the schedule", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.schedule.close_schedule": ("PREPARE_ROLES + write the schedule", ("roles:PREPARE_ROLES", "perm")),
     # Expense Claim payees (round 4): drafts only, an M-Pesa Payer sends them (Send via M-Pesa)
     "mpsa_suite.money_out.claim_payees.pay_payees": ("PREPARE_ROLES + read the Expense Claim", ("roles:PREPARE_ROLES", "perm")),
     "mpsa_suite.money_out.claim_payees.retry_payees": ("PREPARE_ROLES + read the Expense Claim", ("roles:PREPARE_ROLES", "perm")),
@@ -390,7 +393,7 @@ HELPERS = {
     "accounts_for": ("mpsa_suite.money_out.party_accounts", ("perm",)),
     # the roles are the account DocType's profile.default_roles
     "make_default": ("mpsa_suite.money_out.party_accounts", ("roles:default_roles", "perm")),
-    "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:FINANCE_ROLES", "perm")),
+    "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:PREPARE_ROLES", "perm")),
     "_sendable": ("mpsa_suite.money_out.send_confirm", ("roles:PAYOUT_ROLES", "roles:ADMIN_ROLES", "perm")),
 }
 
@@ -440,7 +443,7 @@ def render_markdown(role_sets: dict) -> str:
                  "to an employee, their status queries) are shown only to `SALARY_ROLES`, to a role a site gave "
                  "read on Salary Slip (the employee's own role aside), and to whoever created them, whatever the "
                  "DocType rights above: " + ", ".join(SALARY_DOCTYPES) + ". Employee M-Pesa Account is closed to "
-                 "other roles by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those "
+                 "other roles, System Manager included, by its rights above. M-Pesa Payments Due and B2C Disbursement Summary leave those "
                  "rows out for everyone else. One rule for all of them, in `money_out/salary_access.py` "
                  "(`has_permission`, `query_conditions`, `report_condition`, `visible`), registered once in "
                  "hooks.py. HRMS is a required app since payouts Phase 3, so HR User and HR Manager exist on "

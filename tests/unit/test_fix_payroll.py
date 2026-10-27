@@ -335,6 +335,26 @@ def test_only_a_manager_cancels_a_scheduled_payout_that_may_have_reached_m_pesa(
     assert doc.status == kept
 
 
+@pytest.mark.parametrize("values", [{"status": "Initiated"}, {"status": "Status Unknown"}, {"send_started_on": NOW}])
+def test_the_shared_administrator_login_does_not_cancel_a_payout_that_may_have_reached_m_pesa(env, monkeypatch,
+                                                                                               values):
+    # decision 1: require() lets Administrator through, so a named manager is asked for first
+    env.frappe.session.user, env.frappe.user_roles = "Administrator", {"System Manager", "M-Pesa Manager"}
+    doc = b2c_request_doc(env, monkeypatch, **values)
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        doc.before_cancel()
+
+
+def test_the_shared_administrator_login_does_not_plan_again_a_line_whose_payout_may_have_been_paid(env):
+    sending_line(env, {"name": "B2C-1", "docstatus": 2, "status": "Initiated"})
+    env.schedule.sync_b2c_line("ROW-1")
+    line_of(env, "L2")["b2c_request"] = "B2C-1"
+    env.frappe.session.user, env.frappe.user_roles = "Administrator", {"System Manager", "M-Pesa Manager"}
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        env.schedule.plan_again("L2")
+    assert line_of(env, "L2")["status"] != "Planned"
+
+
 def test_a_paid_scheduled_payout_is_never_cancelled_or_deleted(env, monkeypatch):
     env.frappe.session.user, env.frappe.user_roles = "boss@example.com", {"System Manager"}
     doc = b2c_request_doc(env, monkeypatch, status="Paid")

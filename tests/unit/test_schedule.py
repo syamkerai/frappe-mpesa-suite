@@ -971,6 +971,31 @@ def test_a_line_whose_request_was_cancelled_mid_send_is_planned_again_by_a_manag
     assert (line_of(env)["status"], line_of(env)["request"]) == ("Planned", None)
 
 
+def test_the_shared_administrator_login_does_not_plan_again_a_line_that_may_have_been_paid(env):
+    # decision 1: it holds every role, M-Pesa Manager too, but names nobody who checked the statement
+    schedule_row(env)
+    line_row(env, status="Sending", request="MB2B-1")
+    env.request("MB2B-1", docstatus=2, status="Not Initiated", transaction_id=None, schedule_line="L1",
+                payment_schedule="MPS-1", send_started_on=NOW - datetime.timedelta(minutes=2))
+    env.schedule.sync_line("MB2B-1")
+    env.frappe.session.user, env.frappe.user_roles = "Administrator", {"System Manager", "M-Pesa Manager"}
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        env.schedule.plan_again("L1")
+    assert (line_of(env)["status"], line_of(env)["request"]) == ("Failed", "MB2B-1")
+
+
+@pytest.mark.parametrize("call,args", [("move_date", (["L1"], TODAY.isoformat())), ("plan_again", ("L1",)),
+                                       ("close_schedule", ("MPS-1",))])
+def test_system_manager_does_not_prepare_or_change_schedules(env, call, args):
+    # decision 1: PREPARE_ROLES, not FINANCE_ROLES: a moved or re-planned line is payable
+    schedule_row(env)
+    line_row(env, planned_date=day(3))
+    env.frappe.session.user, env.frappe.user_roles = "it@example.com", {"System Manager"}
+    with pytest.raises(env.frappe.PermissionError):
+        getattr(env.schedule, call)(*args)
+    assert (line_of(env)["planned_date"], line_of(env)["status"]) == (day(3), "Planned")
+
+
 # ---------------------------------------------------------------- approximate balance
 def test_available_takes_the_newest_balance_less_what_is_on_its_way(env):
     settings = b2b_fixture.SETTINGS

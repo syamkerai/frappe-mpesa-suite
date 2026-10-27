@@ -3,9 +3,11 @@
 Rows and entries are written with db_insert, so no company, accounts or Daraja credentials are
 needed. Nothing is sent (the send is patched) and nothing is committed (commits are patched;
 every test rolls back), except in the tests where a second connection commits a concurrent
-cancel: their rows are committed first and deleted again afterwards.
+cancel: their rows are committed first and deleted again afterwards. Retries are a named M-Pesa
+Payer's (round 4): the shared Administrator login is refused (permissions.require_named_user).
 """
 
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 import frappe
@@ -13,6 +15,7 @@ from frappe.utils import add_days, getdate, now_datetime, nowdate
 
 from mpsa_suite.accounting import journal_service
 from mpsa_suite.compat import IntegrationTestCase
+from mpsa_suite.money_in import testing as t
 from mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request import (
     b2c_disbursement_request as request_module,
 )
@@ -28,6 +31,13 @@ COMMITTED = (PARENT, REF, REQ, "Payment Entry", "Payment Entry Reference", "Purc
 
 
 class TestFix2B2C2(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        frappe.set_user("Administrator")
+        cls.payer = t.payer()  # retries a payout (PAYOUT_ROLES, a named login)
+        frappe.db.commit()  # the user stays; each test rolls back to here
+
     def setUp(self):
         frappe.set_user("Administrator")
         self.tag = frappe.generate_hash(length=8)
@@ -145,9 +155,18 @@ class TestFix2B2C2(IntegrationTestCase):
     def _booked(self, disbursement, row):
         return postprocess.booked_docstatus(disbursement, frappe.get_doc(REF, row))
 
+    @contextmanager
+    def _as_payer(self):
+        """Retry as the named payer (Retry Failed Payment), then Administrator again."""
+        frappe.set_user(self.payer)
+        try:
+            yield
+        finally:
+            frappe.set_user("Administrator")
+
     def _retry(self, request):
         sent = Mock()
-        with patch.object(request_module, "make_b2c_payment_request", sent):
+        with patch.object(request_module, "make_b2c_payment_request", sent), self._as_payer():
             frappe.get_doc(REQ, request).retry_failed_payment()
         return sent
 
@@ -155,6 +174,7 @@ class TestFix2B2C2(IntegrationTestCase):
         sent = Mock()
         with (
             patch.object(request_module, "make_b2c_payment_request", sent),
+            self._as_payer(),
             self.assertRaisesRegex(frappe.ValidationError, message),
         ):
             frappe.get_doc(REQ, request).retry_failed_payment()
@@ -294,6 +314,22 @@ class TestFix2B2C2(IntegrationTestCase):
         self.assertEqual(self._booked(d1, r2), 1)
 
     # ------------------------------------------------------------ C13: retry guard
+    def test_retry_refuses_the_shared_administrator_login(self):
+        """Round 4 (decision 1): a retry sends money, so it names a person; nothing is reset or sent."""
+        _, request = self._row(self._disbursement(), 1, self._invoice(50000), 50000, status="Failed")
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        sent = Mock()
+        try:
+            with patch.object(request_module, "make_b2c_payment_request", sent):
+                self.assertRaisesRegex(frappe.PermissionError, "Use your own login",
+                                       frappe.get_doc(REQ, request).retry_failed_payment)
+        finally:
+            frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        sent.assert_not_called()
+        self.assertEqual(frappe.db.get_value(REQ, request, ["status", "originator_conversation_id"]),
+                         ("Failed", f"OCID-{request}"))
+
     def test_retry_refused_when_the_other_payouts_entry_was_cancelled(self):
         # D2 paid the invoice and its Payment Entry booked it; an accountant cancelled the entry,
         # so the invoice owes the amount again while the payout stays marked booked

@@ -142,3 +142,33 @@ class TestMPesaSuiteSettings(IntegrationTestCase):
             self.assertEqual(comment[0].content, message)
         finally:
             frappe.db.set_single_value(SETTINGS, "schedule_maker_checker", was)
+
+    def test_a_save_that_also_changes_the_notify_role_alerts_the_old_role_and_the_new(self):
+        """Round 4 review: the Notify Role and the casual-payee switches are watched too; an alert about
+        a save that changes the Notify Role goes to the role before it as well as the one after."""
+        fields = ("notify_role", "allow_claim_payees", "claim_payee_max_amount", "b2c_approved_phones_only")
+        settings = frappe.get_single(SETTINGS)
+        was = {f: settings.get(f) for f in fields}
+        old_role = was["notify_role"] or "Accounts Manager"
+        new_role = "Accounts User" if old_role != "Accounts User" else "Accounts Manager"
+        try:
+            with patch("mpsa_suite.money_out.party_accounts.alert") as alert:
+                settings.notify_role = old_role
+                settings.save()  # a known Notify Role first
+                settings.reload()
+                alert.reset_mock()
+                settings.notify_role = new_role
+                settings.allow_claim_payees = 0 if frappe.utils.cint(settings.allow_claim_payees) else 1
+                settings.claim_payee_max_amount = frappe.utils.flt(settings.claim_payee_max_amount) + 5000
+                settings.b2c_approved_phones_only = 0 if frappe.utils.cint(settings.b2c_approved_phones_only) else 1
+                settings.save()
+            self.assertEqual(alert.call_count, 1)
+            (message, _doc), kwargs = alert.call_args
+            self.assertEqual(kwargs["roles"], [old_role, new_role])
+            for label in ("Notify Role from", "Allow Paying Merchants and Casual Payees from Expense Claims from",
+                          "Most per Payment to a Payee That Is Not an Approved Account (0 = no cap) from",
+                          "Pay Employees by B2C Only to Approved Phones from"):
+                self.assertIn(label, message)
+        finally:
+            frappe.db.set_single_value(SETTINGS, {f: v for f, v in was.items()})
+            frappe.clear_document_cache(SETTINGS, SETTINGS)
