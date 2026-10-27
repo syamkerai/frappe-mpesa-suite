@@ -137,6 +137,9 @@ class TestB2BDocuments(IntegrationTestCase):
         # moves a paid payout to another document, or books one paid after its request was cancelled: a named
         # M-Pesa Manager (never the shared Administrator login) who may make Payment Entries
         cls.booker = t.named_user("_t-b2b-booker@example.com", "M-Pesa Manager", "Accounts Manager")
+        # prepare requests: an Accounts User (reads invoices, not orders), an Expense Approver (reads neither)
+        cls.clerk = t.named_user("_t-b2b-clerk@example.com", "Accounts User")
+        cls.approver = t.named_user("_t-b2b-approver@example.com", "Expense Approver")
         # Requests an interrupted run committed would show as earlier payouts to the test supplier
         # (it exists only for these tests).
         frappe.db.delete(B2B, {"supplier": cls.supplier})
@@ -839,6 +842,75 @@ class TestB2BDocuments(IntegrationTestCase):
             t.send_as(self.payer, req)
         self.assertEqual(frappe.db.get_value(B2C_REQ, req.name, "docstatus"), 1)
         sent.assert_called_once_with(req.name)
+
+    def _supplier_phone(self) -> str:
+        """An approved Phone (B2C) Supplier M-Pesa Account of the supplier for B2C_PHONE (written as approved)."""
+        doc = frappe.get_doc({
+            "doctype": "Supplier M-Pesa Account", "supplier": self.supplier, "account_type": "Phone (B2C)",
+            "phone": B2C_PHONE, "expected_name": SUPPLIER, "is_default": 0, "docstatus": 1,
+            "proof": "/private/files/_t_b2b_proof.pdf", "approved_by": "Administrator", "approved_on": now_datetime(),
+            "active_from": add_days(now_datetime(), -1), "creation": now_datetime(), "modified": now_datetime(),
+            "owner": "Administrator"})
+        doc.name = f"_T-MSA-B2BDOCS-P-{self.tag}"
+        doc.db_insert()
+        return doc.name
+
+    def test_a_supplier_with_an_approved_phone_is_paid_only_to_it_by_hand_and_on_retry(self):
+        # verification K15: a B2C request made by hand to another number is refused; a failed payout is not sent
+        # again once the approved account its row named is cancelled (a stolen SIM), though it was the only one
+        from mpsa_suite.money_out import employee_documents
+
+        account = self._supplier_phone()
+        pi = self._invoice(5000)
+        doc = self._b2c_disbursement(pi.name, 1500)
+        self.assertEqual(doc.references[0].payee_account, account)
+        values = {"doctype": B2C_REQ, "amount": 1500, "currency": "KES", "mpesa_settings": SETTINGS,
+                  "reference_doctype": PI, "reference_name": pi.name, "party_type": "Supplier", "party": self.supplier,
+                  "b2c_payment_disbursement": doc.name, "b2c_payment_disbursement_reference": doc.references[0].name}
+        self.assertRaisesRegex(frappe.ValidationError, "254733999888 is not a phone approved for",
+                               frappe.get_doc(dict(values, phone_number="254733999888")).insert)
+        request = frappe.get_doc(dict(values, phone_number=B2C_PHONE)).insert()
+        frappe.db.set_value(B2C_REQ, request.name, {"docstatus": 1, "status": "Failed"})
+        employee_documents.check_b2c_retry(frappe.get_doc(B2C_REQ, request.name))  # may be sent again
+        frappe.db.set_value("Supplier M-Pesa Account", account, "docstatus", 2)
+        self.assertRaisesRegex(frappe.ValidationError, f"{account} is not approved \\(cancelled\\)",
+                               employee_documents.check_b2c_retry, frappe.get_doc(B2C_REQ, request.name))
+
+    def test_a_draft_names_an_invoice_or_order_only_for_who_may_read_it(self):
+        # verification K9: an Expense Approver (create on the request, no read on invoices) does not learn an
+        # invoice's supplier or what is left to pay; an Accounts User names an order by its invoice read (ERPNext
+        # gives Purchase Order read only to the Purchase and Stock roles); a payer saving a draft whose invoice is
+        # unchanged needs no read on it, one changing it does
+        pi, other = self._invoice(5000), self._invoice(3000)
+        po = self._order(4000)
+        values = {"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 1000, "company": t.COMPANY,
+                  "remarks": f"T {self.tag}"}
+        frappe.set_user(self.approver)
+        try:
+            draft = frappe.get_doc(dict(values, purchase_invoice=pi.name))
+            self.assertRaises(frappe.PermissionError, draft.insert)
+            self.assertFalse(draft.get("supplier"))
+        finally:
+            frappe.set_user("Administrator")
+        frappe.set_user(self.clerk)
+        try:
+            self.assertFalse(frappe.has_permission(PO, "read"))
+            request = frappe.get_doc(dict(values, purchase_order=po.name)).insert()
+            self.assertEqual(request.supplier, self.supplier)
+        finally:
+            frappe.set_user("Administrator")
+        request = self._request(1000, send=False, purchase_invoice=pi.name)  # prepared by Administrator
+        frappe.set_user(self.payer)
+        try:
+            self.assertFalse(frappe.has_permission(PI, "read"))
+            doc = frappe.get_doc(B2B, request.name)
+            doc.remarks = f"Checked {self.tag}"
+            doc.save()
+            doc.purchase_invoice = other.name
+            self.assertRaises(frappe.PermissionError, doc.save)
+        finally:
+            frappe.set_user("Administrator")
+        self.assertEqual(frappe.db.get_value(B2B, request.name, "purchase_invoice"), pi.name)
 
     # ------------------------------------------------------------ B2B and B2C see each other
     def test_open_b2c_payout_counts_against_a_b2b_request(self):

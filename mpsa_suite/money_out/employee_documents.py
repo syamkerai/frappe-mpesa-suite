@@ -238,12 +238,18 @@ def booking_party(dt: str | None, dn: str | None):
 # ---------------------------------------------------------------- B2C rows and requests
 def b2c_phone(employee) -> tuple:
     """(phone, account) a B2C payout to ``employee`` goes to: the phone of their default (or only)
-    approved phone account that can be paid now; while M-Pesa Suite Settings lets B2C pay phones
-    nobody approved, the Employee's Cell Number when they have none; ("", None) otherwise."""
-    account = party_accounts.pick_account(EMPLOYEE_ACCOUNT, employee, (PHONE,)) if employee else None
-    if account:
+    approved phone account that can be paid now; ("", None) when they have approved phones and
+    none can be picked now (a default on hold or blocked is never passed over for a number nobody
+    approved, as supplier_b2c_phone). While M-Pesa Suite Settings lets B2C pay phones nobody
+    approved, the Employee's Cell Number when they have no approved phone; ("", None) otherwise."""
+    if not employee:
+        return "", None
+    if party_accounts.accounts_of(EMPLOYEE_ACCOUNT, employee, (PHONE,)):
+        account = party_accounts.pick_account(EMPLOYEE_ACCOUNT, employee, (PHONE,))
+        if not account:
+            return "", None
         return cstr(party_accounts.get_account(EMPLOYEE_ACCOUNT, account).phone).strip(), account
-    if approved_phones_only() or not employee:
+    if approved_phones_only():
         return "", None
     return cstr(frappe.db.get_value("Employee", employee, "cell_number")).strip(), None
 
@@ -339,23 +345,29 @@ def check_supplier_b2c_row(row) -> None:
     that can be paid now, never a Contact number nobody approved, and names it (the name M-Pesa paid
     is checked against it, and maker-checker watches it). On every save and at the send. A supplier
     with no approved phone account is paid to its Contact's phone, as before."""
-    supplier = getattr(row, "party", None)
-    phones = party_accounts.accounts_of(SUPPLIER_ACCOUNT, supplier, (PHONE,))
-    phone = normalize_msisdn(getattr(row, "partyb", None))
-    matches = [a for a in phones if phone and normalize_msisdn(a.phone) == phone]
-    usable = [a for a in matches if not party_accounts.usable_problem(a, supplier, SUPPLIER_ACCOUNT)]
-    acc = (usable or matches or [None])[0]
+    acc, problem = supplier_phone(getattr(row, "party", None), getattr(row, "partyb", None))
     row.payee_account_doctype = SUPPLIER_ACCOUNT if acc else None
     row.payee_account = acc.name if acc else None
-    if not phones:
-        return
-    if not acc:
-        frappe.throw(f"Row #{row.idx}: {cstr(getattr(row, 'partyb', None)).strip() or 'No number'} is not a phone "
-                     f"approved for {supplier}. {supplier} has approved M-Pesa phone accounts, so B2C pays only one of "
-                     "them (Supplier > M-Pesa Accounts).")
-    problem = party_accounts.usable_problem(acc, supplier, SUPPLIER_ACCOUNT)
     if problem:
         frappe.throw(f"Row #{row.idx}: {problem}")
+
+
+def supplier_phone(supplier, phone) -> tuple:
+    """(account, problem) of a B2C payout to ``supplier`` at ``phone``: its approved Phone (B2C)
+    Supplier M-Pesa Account for the number (one that can be paid now first), and why the payout may
+    not go there (None when it may). A supplier with approved phone accounts is paid only to one of
+    them that can be paid now; one with none, to any number."""
+    phones = party_accounts.accounts_of(SUPPLIER_ACCOUNT, supplier, (PHONE,))
+    number = normalize_msisdn(phone)
+    matches = [a for a in phones if number and normalize_msisdn(a.phone) == number]
+    usable = [a for a in matches if not party_accounts.usable_problem(a, supplier, SUPPLIER_ACCOUNT)]
+    acc = (usable or matches or [None])[0]
+    if not phones:
+        return acc, None
+    if not acc:
+        return None, (f"{cstr(phone).strip() or 'No number'} is not a phone approved for {supplier}. {supplier} has "
+                      "approved M-Pesa phone accounts, so B2C pays only one of them (Supplier > M-Pesa Accounts).")
+    return acc, party_accounts.usable_problem(acc, supplier, SUPPLIER_ACCOUNT)
 
 
 def check_b2c_request(doc) -> None:
@@ -367,7 +379,8 @@ def check_b2c_request(doc) -> None:
     employee (phone)) or, a salary, from a payment schedule line. An employee is paid to an approved
     phone (as a disbursement row is), nobody sends a payout to themselves, and a payment to an
     employee that no document caps is sent by an M-Pesa Manager only (as a B2B request or a
-    schedule line with none)."""
+    schedule line with none). A supplier with approved phone accounts is paid only to one of them
+    that can be paid now (supplier_phone, as a disbursement row is)."""
     flags = getattr(doc, "flags", None) or frappe._dict()
     if flags.get("mpesa_from_disbursement") or flags.get("mpesa_from_schedule"):
         return
@@ -379,6 +392,10 @@ def check_b2c_request(doc) -> None:
         frappe.throw("A Salary Slip is paid from an M-Pesa Payment Schedule line (Pay by M-Pesa on the slip or its "
                      "Payroll Entry) or a B2C Payment Disbursement row, not by a B2C Disbursement Request made by "
                      "hand.")
+    if doc.get("party_type") == "Supplier" and doc.get("party"):
+        problem = supplier_phone(doc.party, doc.get("phone_number"))[1]
+        if problem:
+            frappe.throw(problem)
     if doc.get("party_type") == "Employee" and doc.get("party"):
         problem = phone_lock_problem(doc.party, doc.get("phone_number"))
         if problem:
@@ -401,12 +418,35 @@ def _row_claim_payee(doc) -> str | None:
     return cstr(frappe.db.get_value(DISB_ROW, ref, "claim_payee")).strip() or None
 
 
+def _supplier_retry_problem(doc) -> str | None:
+    """Why a failed B2C payout to a supplier may not be sent again: the Supplier M-Pesa Account its
+    disbursement row named was since cancelled (a stolen number goes at once), put on hold or
+    blocked, or is not this number. A payout whose row named none pays only one of the supplier's
+    approved phones that can be paid now, should it have any since (supplier_phone)."""
+    supplier, phone = doc.party, getattr(doc, "phone_number", None)
+    ref = cstr(getattr(doc, "b2c_payment_disbursement_reference", None)).strip()
+    row = None
+    if ref and frappe.get_meta(DISB_ROW).has_field("payee_account"):
+        row = frappe.db.get_value(DISB_ROW, ref, ["payee_account_doctype", "payee_account"], as_dict=True)
+    if row and row.payee_account_doctype == SUPPLIER_ACCOUNT and row.payee_account:
+        acc = party_accounts.get_account(SUPPLIER_ACCOUNT, row.payee_account)
+        problem = party_accounts.usable_problem(acc, supplier, SUPPLIER_ACCOUNT)
+        if problem:
+            return problem
+        if normalize_msisdn(acc.phone) != normalize_msisdn(phone):
+            return (f"{cstr(phone).strip() or 'No number'} is not the phone of {acc.name}, the approved account of "
+                    f"{supplier} this payout was made for.")
+        return None
+    return supplier_phone(supplier, phone)[1]
+
+
 def check_b2c_retry(doc) -> None:
     """A failed B2C payout sent again (Retry on the request or on its disbursement), under the
     document's lock: what its send checked is checked again, since the claim, the phone account
     or the payer may have changed since. The claim or advance it pays may still be paid; an
     employee is paid only to an approved phone that can be paid now while M-Pesa Suite Settings
-    says so (a payee of the claim is claim_payees'); nobody pays themselves."""
+    says so (a payee of the claim is claim_payees'); a supplier only to the approved account its
+    row named, or one of its approved phones (_supplier_retry_problem); nobody pays themselves."""
     dt, dn = getattr(doc, "reference_doctype", None), cstr(getattr(doc, "reference_name", None)).strip()
     party = getattr(doc, "party", None) if getattr(doc, "party_type", None) == "Employee" else None
     employees = set()
@@ -416,6 +456,10 @@ def check_b2c_retry(doc) -> None:
         if problem:
             frappe.throw(problem)
         employees.add(values.employee)
+    if getattr(doc, "party_type", None) == "Supplier" and getattr(doc, "party", None):
+        problem = _supplier_retry_problem(doc)
+        if problem:
+            frappe.throw(problem)
     if party:
         employees.add(party)
         if not _row_claim_payee(doc):
@@ -647,6 +691,10 @@ def _b2c_amount_problem(employee, amount) -> str | None:
 
 
 def _no_phone(employee) -> str:
+    """Why b2c_phone found no phone: the approved phone that cannot be paid now first."""
+    if party_accounts.accounts_of(EMPLOYEE_ACCOUNT, employee, (PHONE,)):
+        return party_accounts.pick_problem(EMPLOYEE_ACCOUNT, employee, (PHONE,)) or (
+            f"{employee} has several approved phones and none is the default: make one the default.")
     if approved_phones_only():
         return (f"{employee} has no approved phone that can be paid now. Add one under Employee > M-Pesa Accounts and "
                 "have a manager approve it.")

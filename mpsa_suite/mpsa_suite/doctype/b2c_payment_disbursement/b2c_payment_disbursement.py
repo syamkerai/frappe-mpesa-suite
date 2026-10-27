@@ -31,6 +31,8 @@ class B2CPaymentDisbursement(Document):
         self.error = ""
         if "erpnext" not in frappe.get_installed_apps():
             return
+        # before a slip is read: what the checks below answer would tell its net pay
+        self.check_salary_reader()
         self.validate_mandatory_fields()
         self.validate_mode_of_payment()
         self.validate_party_type()
@@ -39,7 +41,6 @@ class B2CPaymentDisbursement(Document):
             ref.validate()
         self.validate_payout_limits()
         self.validate_reference_doctypes()
-        self.check_salary_reader()
         from ....money_out.schedule import check_b2c_disbursement
 
         check_b2c_disbursement(self)  # schedule lines only from Pay Selected
@@ -487,6 +488,9 @@ class B2CPaymentDisbursement(Document):
             if args.get("payroll_entry"):
                 frappe.has_permission("Payroll Entry", "read", doc=args["payroll_entry"], throw=True)
         config = self._get_doctype_config(doctype)
+        # the documents, what they owe and their payees' phones: for who reads them (ERPNext's and
+        # HRMS's rights), each document by its own rights as it is listed
+        _can_read(doctype, throw=True)
         filters = self._build_filters(args, config)
         entries = self._fetch_entries(doctype, config, args, filters)
         return self._populate_references(entries, args, doctype, config.date_field)
@@ -636,6 +640,8 @@ class B2CPaymentDisbursement(Document):
             entries = [
                 e for e in entries if (e.paid_amount or 0) < (e.advance_amount or 0)
             ]
+        # a claim or advance the user may not read (HRMS's rights, User Permissions, shares) is not listed
+        entries = [e for e in entries if _can_read(doctype, e.name)]
         from ....money_out.employee_documents import payable_entries
 
         # claims and advances M-Pesa may pay now (approved, the workflow state, KES...)
@@ -833,7 +839,8 @@ class B2CPaymentDisbursement(Document):
 
             try:
                 entries = original_get_outstanding_reference_documents(erpnext_args)
-                entries = [e for e in entries if e["voucher_type"] == doctype]
+                # an invoice or order the user may not read is not listed
+                entries = [e for e in entries if e["voucher_type"] == doctype and _can_read(doctype, e["voucher_no"])]
                 for entry in entries:
                     entry["party"] = party
                     entry["party_type"] = party_type
@@ -1160,6 +1167,13 @@ def create_b2c_request(ref, settings, b2c_disbursement):
         send_b2c(b2c_request.name)
         sync_b2c_line_later(ref.name)  # its line shows Sent once M-Pesa took it
         frappe.db.commit()
+
+
+def _can_read(doctype: str, name: str | None = None, throw: bool = False) -> bool:
+    """Whether the user may read the document ``name`` (None: any of the DocType): money_out.b2b.can_read."""
+    from ....money_out.b2b import can_read
+
+    return can_read(doctype, name, throw=throw)
 
 
 def current_outstanding(doctype: str | None, name: str | None, for_update: bool = False) -> float | None:

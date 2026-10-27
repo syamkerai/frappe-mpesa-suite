@@ -39,6 +39,7 @@ ACCOUNTS_ONLY = "_t_slip_accounts@example.com"
 HR_ONLY = "_t_slip_hr@example.com"
 SYSTEM_MANAGER = "_t_slip_sysmgr@example.com"
 ACCOUNTS_PAYER = "_t_slip_accounts_payer@example.com"
+BOOKS = "_t_slip_books@example.com"
 USERS = {
     PREPARER: ("Accounts User", "HR Manager"),
     PAYER: ("M-Pesa Payer",),
@@ -47,6 +48,7 @@ USERS = {
     SYSTEM_MANAGER: ("System Manager",),
     # makes schedules and sees salaries, may not read Employee M-Pesa Accounts (their DocPerms: HR, M-Pesa Manager)
     ACCOUNTS_PAYER: ("Accounts User", "M-Pesa Payer"),
+    BOOKS: ("Accounts Manager",),  # makes B2C Payment Disbursements, may not see salaries
 }
 PHONE = "254722000888"
 TILL = "835811"
@@ -354,6 +356,39 @@ class TestSalarySlipPayouts(pp._Base):
         self.assertEqual([a["name"] for a in status["accounts"]], [self.slip_accounts[("_T Slip Bank",
                                                                                        party_accounts.BANK)]])
         self.assertEqual(frappe.db.count(SCHEDULE, {"title": ["like", f"%{slip}%"]}), 0)
+
+    def test_a_salary_row_is_refused_before_its_slip_is_read(self):
+        # verification K5: an Accounts Manager (create on B2C Payment Disbursement, no HR role) types a slip and an
+        # amount. More than the slip owes, or a slip with nothing left, gets the same refusal: its net pay cannot be
+        # learned from which message comes back
+        _, slips = self._payroll()
+
+        def disbursement(first, amount):
+            return frappe.get_doc({
+                "doctype": pp.DISB, "naming_series": "MPESA-B2C-.YYYY.-", "company": t.COMPANY,
+                "posting_date": nowdate(), "payment_type": "Mpesa Disbursement", "party_type": "Employee",
+                "transaction_to_pay_against": SLIP, "mode_of_payment": f"Mpesa-{SETTINGS}", "paid_from": self.gl,
+                "paid_from_account_currency": "KES", "paid_to": self.payable, "paid_to_account_currency": "KES",
+                "paid_amount": amount, "source_exchange_rate": 1, "target_exchange_rate": 1,
+                "references": [{"reference_doctype": SLIP, "reference_name": slips[first], "party_type": "Employee",
+                                "party": self.people[first], "allocated_amount": amount, "partyb": PHONE,
+                                "currency": "KES", "exchange_rate": 1}]})
+
+        # the slip paid in full by an earlier B2C payout (written as its Result leaves it)
+        paid = frappe.get_doc({"doctype": REQ, "amount": 30000, "status": "Paid", "docstatus": 1,
+                               "reference_doctype": SLIP, "reference_name": slips["_T Slip Phone"],
+                               "party_type": "Employee", "party": self.people["_T Slip Phone"], "phone_number": PHONE,
+                               "mpesa_settings": SETTINGS, "transaction_id": "TSLIPK5" + frappe.generate_hash(length=3),
+                               "creation": now_datetime(), "modified": now_datetime(), "owner": "Administrator"})
+        paid.name = f"_T-B2C-SLIP-{frappe.generate_hash(length=6)}"
+        paid.db_insert()
+        with pp._as(BOOKS):
+            # 90,000 is more than the slip owes (50,000.40); the other slip has nothing left to pay
+            self.assertRaisesRegex(frappe.PermissionError, "salaries are shown only",
+                                   disbursement("_T Slip Bank", 90000).insert)
+            self.assertRaisesRegex(frappe.PermissionError, "salaries are shown only",
+                                   disbursement("_T Slip Phone", 1000).insert)
+        self.assertEqual(frappe.db.count(pp.DISB, {"owner": BOOKS}), 0)
 
     def test_who_may_not_read_employee_accounts_pays_the_default_only(self):
         _, slips = self._payroll()
