@@ -1,0 +1,1440 @@
+"""Merchants and casual payees paid straight from an Expense Claim ("petty cash without cash").
+
+Staff often pay a claim's expenses from their own phones or petty cash (a till, a county paybill,
+parking, fuel, casual workers) and are reimbursed later. An Expense Claim may instead list who is
+to be paid (its M-Pesa Payees table, M-Pesa Claim Payee rows) and pay them directly: a till by Buy
+Goods, a paybill with its account number, a bank account through the bank's paybill (B2B), or a
+phone (B2C). The money goes to the merchant; the books stay a reimbursement of the claim: each
+paid payout is booked as a Payment Entry to the claimant against the claim
+(money_out.employee_documents), whoever received the money. Whatever the lines leave of what the
+claim owes is reimbursed to the employee as usual.
+
+Switched on by M-Pesa Suite Settings (allow_claim_payees) and per Expense Claim Type
+(allow_mpesa_payees): every payee line names the expense line it pays, and that line's type must
+allow payees (the claim's other lines may be of any type). Who does what:
+- the claimant (or HR or Accounts) enters the lines while the claim is a draft;
+- the claim's expense approver approves them with the claim (HRMS's approval and submit); the
+  lines are frozen from then on;
+- someone in PREPARE_ROLES presses Pay merchants and payees: one draft B2B request per merchant
+  line and one draft B2C Payment Disbursement for all the phone lines (pay_payees, retry_payees,
+  pay_claims for casual payees of several claims);
+- an M-Pesa Payer who did not prepare them sends each with Send via M-Pesa (maker-checker).
+
+These destinations are not approved M-Pesa accounts, so:
+- never an employee's: the claimant's own or any employee's phone, M-Pesa account or bank account
+  number is refused (an employee is paid by reimbursing the claim);
+- a per-payment and a per-day (per company) cap from M-Pesa Suite Settings, when above 0, except for
+  a destination that is a supplier's approved Supplier M-Pesa Account (noted on the line);
+- a payout of a line must be the approved line's: the same destination, at most its amount, the line
+  not paid or on its way already, the claim still payable (check_b2b, check_b2c_row: on save, at
+  the send and right before the money leaves);
+- the name M-Pesa paid is compared with the name the claimant gave (a bank account: with the bank's
+  name on M-Pesa Bank Paybill); a mismatch is commented on the claim and alerted to the Notify Role.
+
+A till or paybill paid suggest_supplier_after times from claims is suggested as a Supplier M-Pesa
+Account, approved once and then paid like any supplier.
+
+Each line's status follows its payouts (sync_lines): Draft (no payout), Queued (a payout not sent
+yet), In Flight, Paid, Failed (paid again with Retry failed payees), Cancelled (the claim was
+rejected or cancelled).
+"""
+
+import csv
+import re
+
+import frappe
+from frappe.utils import cint, cstr, flt, now_datetime, nowdate
+
+from ..daraja import apis
+from ..daraja import money_out as daraja
+from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
+from ..permissions import ADMIN_ROLES, PREPARE_ROLES, require
+from ..utils.phone import is_safaricom, normalize_msisdn, to_local
+from . import owed
+from . import party_accounts as pa
+
+SUITE = "M-Pesa Suite Settings"
+CLAIM = "Expense Claim"
+CLAIM_TYPE = "Expense Claim Type"
+LINE = "M-Pesa Claim Payee"
+TABLE = "mpesa_payees"
+TYPE_FLAG = "allow_mpesa_payees"
+B2B = "Mpesa B2B Payment Request"
+B2C = "B2C Payment Disbursement"
+B2C_ROW = "B2C Payment Disbursement Reference"
+B2C_REQUEST = "B2C Disbursement Request"
+SUPPLIER_ACCOUNT = "Supplier M-Pesa Account"
+EMPLOYEE_ACCOUNT = "Employee M-Pesa Account"
+BANK_PAYBILL = "M-Pesa Bank Paybill"
+
+# What a line pays: the payee account types' labels (party_accounts after round 4's payee accounts)
+TILL = "Till (Buy Goods)"
+PAYBILL = "Paybill"
+BANK = "Bank Account (via Bank Paybill)"
+PHONE = "Phone (B2C)"
+OLD_BANK = "Bank Paybill (B2B)"  # an Employee M-Pesa Account's bank type before round 4
+TYPES = (TILL, PAYBILL, BANK, PHONE)
+B2B_TYPES = (TILL, PAYBILL, BANK)
+COMMAND_FOR = {TILL: daraja.B2B_BUY_GOODS, PAYBILL: daraja.B2B_PAYBILL, BANK: daraja.B2B_PAYBILL}
+WHAT = {PHONE: "phone", TILL: "till", PAYBILL: "paybill and account number", BANK: "bank account"}
+
+# A line's status
+DRAFT, QUEUED, IN_FLIGHT, PAID, FAILED, CANCELLED = "Draft", "Queued", "In Flight", "Paid", "Failed", "Cancelled"
+# Which payout decides a line when it has several: the one furthest on its way
+RANK = {PAID: 4, IN_FLIGHT: 3, QUEUED: 2, FAILED: 1}
+# Written by the server from the line's payouts; a save after submit keeps what the database holds
+RESULT_FIELDS = ("status", "payout_doctype", "payout_name", "receipt", "paid_on", "sent_on", "error_message",
+                 "receiver_name", "name_matches", "name_note", "supplier_account")
+LINE_FIELDS = ("name", "idx", "parent", "parenttype", "payee_type", "payee_name", "destination", "expense_detail",
+               "expense_type", "bank_paybill", "shortcode", "account_number", "phone", "amount",
+               "destination_key", *RESULT_FIELDS)
+# Pasted or uploaded casual payees: at most this many rows at a time
+PASTE_LIMIT = 1000
+# The number M-Pesa puts before a name: "522522 - KCB Paybill AC", "2547****0111 - JANE" (also after
+# an en-dash or em-dash); party_accounts.number_prefix after round 4's payee accounts
+_NUMBER_PREFIX = re.compile(r"^\s*([0-9][0-9*xX]*)\s*[-–—]\s*")
+
+
+def settings() -> frappe._dict:
+    """M-Pesa Suite Settings for claim payees: the switch, the two caps (0 = no cap) and when to
+    suggest a supplier account (0 = never)."""
+    def get(field):
+        return frappe.db.get_single_value(SUITE, field)
+
+    after = get("suggest_supplier_after")
+    return frappe._dict(
+        allow=bool(cint(get("allow_claim_payees"))),
+        max_amount=flt(get("claim_payee_max_amount")),
+        daily_cap=flt(get("claim_payee_daily_cap")),
+        suggest_after=3 if after in (None, "") else cint(after),
+    )
+
+
+def money(value) -> str:
+    return owed.money(value)
+
+
+# ---------------------------------------------------------------- where a line pays
+def _paybill_number(value) -> str:
+    return re.sub(r"[\s-]", "", cstr(value)).upper()
+
+
+def bank_number(value) -> str:
+    """A bank account number as the payee accounts keep it: letters and digits, upper-cased."""
+    return re.sub(r"[^A-Za-z0-9]", "", cstr(value)).upper()
+
+
+def destination_key(payee_type, shortcode=None, account_number=None, phone=None) -> str | None:
+    """Where a line (or a payee account) pays, in the payee accounts' format
+    (party_accounts.destination_key after round 4's payee accounts): 'B2C:2547...', 'TILL:835811',
+    'PB:522522:0123456789'. A paybill's account number is upper-cased without spaces and dashes, a
+    bank's letters and digits only, so the same destination typed two ways is one key."""
+    if payee_type == PHONE:
+        msisdn = normalize_msisdn(phone)
+        return f"B2C:{msisdn}" if msisdn else None
+    code = cstr(shortcode).strip()
+    if not code:
+        return None
+    if payee_type == TILL:
+        return f"TILL:{code}"
+    if payee_type == PAYBILL:
+        return f"PB:{code}:{_paybill_number(account_number)}"
+    if payee_type in (BANK, OLD_BANK):
+        return f"PB:{code}:{bank_number(account_number)}"
+    return None
+
+
+def line_key(line) -> str | None:
+    return destination_key(line.get("payee_type"), line.get("shortcode"), line.get("account_number"),
+                           line.get("phone"))
+
+
+def account_key(acc) -> str | None:
+    """A Supplier or Employee M-Pesa Account's key: its own destination_key once it has one."""
+    if cstr(acc.get("destination_key")).strip():
+        return acc.destination_key
+    return destination_key(acc.get("account_type"), acc.get("shortcode"), acc.get("account_number"), acc.get("phone"))
+
+
+def describe(line) -> str:
+    """How a line's destination reads: '835811', '522522 / 0123456789', '0722 000 111'."""
+    if line.get("payee_type") == PHONE:
+        local = to_local(line.get("phone"))
+        return f"{local[:4]} {local[4:7]} {local[7:]}" if local else cstr(line.get("phone"))
+    code = cstr(line.get("shortcode")).strip()
+    account = cstr(line.get("account_number")).strip()
+    return f"{code} / {account}" if account and line.get("payee_type") != TILL else code
+
+
+# ---------------------------------------------------------------- the claim's lines (validate)
+def validate_claim(doc, method=None) -> None:
+    """Expense Claim validate (hooks.py doc_events), on every save of a draft and at submit, which
+    is the approval: the payee lines cleaned and checked (see the module docstring). A rejected
+    claim pays no payee: its lines are left as they are and never paid."""
+    rows = doc.get(TABLE) or []
+    if not rows:
+        return
+    at_submit = cint(doc.docstatus) == 1
+    if doc.get("approval_status") == "Rejected":
+        if at_submit:
+            for row in rows:
+                row.status = CANCELLED
+        return
+    s = settings()
+    if not s.allow:
+        frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings): "
+                     "remove the payee lines, or ask an M-Pesa Manager to switch it on.")
+    if cint(doc.get("is_paid")):
+        frappe.throw("This claim is marked Is Paid (paid at once from its Mode of Payment), so it pays no payee by "
+                     "M-Pesa: untick Is Paid or remove the payee lines.")
+    if (doc.get("currency") or "KES") != "KES":
+        frappe.throw(f"This claim is in {doc.currency}. M-Pesa pays KES only: remove the payee lines.")
+    expenses = {r.name: r for r in doc.get("expenses") or []}
+    allowed = types_allowing_payees({r.expense_type for r in expenses.values()})
+    found = employee_destinations()
+    own = own_numbers()
+    warnings, per_expense, seen = [], {}, {}
+    capped_total = capped_phones = 0.0
+    for row in rows:
+        clean_line(row, own, warnings)
+        expense = _expense_line(row, expenses, at_submit, warnings)
+        if expense:
+            row.expense_type = expense.expense_type
+            if expense.expense_type not in allowed:
+                frappe.throw(f"Row #{row.idx}: {expense.expense_type} is not paid to merchants or payees. Tick Paid "
+                             "to Merchants or Casual Payees by M-Pesa on the Expense Claim Type, or pay this expense "
+                             "to the employee.")
+            per_expense[expense.name] = per_expense.get(expense.name, 0.0) + flt(row.amount)
+        problem = employee_problem(row, doc.employee, found)
+        if problem:
+            frappe.throw(problem)
+        row.supplier_account = approved_supplier_account(row)
+        if not row.supplier_account:
+            cap_problem = amount_cap_problem(row, s)
+            if cap_problem:
+                frappe.throw(cap_problem)
+            capped_total += flt(row.amount)
+            if row.payee_type == PHONE:
+                capped_phones += flt(row.amount)
+        seen.setdefault(row.destination_key, []).append(row.idx)
+        if not row.get("status"):
+            row.status = DRAFT
+    for name, total in per_expense.items():
+        expense = expenses[name]
+        limit = flt(expense.sanctioned_amount) if at_submit else flt(expense.sanctioned_amount) or flt(expense.amount)
+        if total > limit + 0.001:
+            frappe.throw(f"The payee lines for expense line #{expense.idx} ({expense.expense_type}) add up to KES "
+                         f"{money(total)}, more than the line's KES {money(limit)}.")
+    total, left = sum(flt(r.amount) for r in rows), claim_owed(doc, at_submit)
+    if total > left + 0.001:
+        frappe.throw(f"The payee lines add up to KES {money(total)}, more than the claim owes (KES {money(left)}). "
+                     "Lower them: whatever they leave is reimbursed to the employee as usual.")
+    if s.daily_cap and capped_phones > s.daily_cap:
+        frappe.throw(f"The phone payees add up to KES {money(capped_phones)}, more than may be paid in one day to "
+                     f"payees that are not approved accounts (KES {money(s.daily_cap)}, M-Pesa Suite Settings), "
+                     "and a claim's phone payees are paid in one batch: split them over two claims.")
+    if s.daily_cap and capped_total > s.daily_cap:
+        warnings.append(f"The payee lines add up to KES {money(capped_total)}, more than may be paid in one day to "
+                        f"payees that are not approved accounts (KES {money(s.daily_cap)}): some will be paid on a "
+                        "later day.")
+    for key, rows_of_key in seen.items():
+        if key and len(rows_of_key) > 1:
+            warnings.append(f"Rows {', '.join(f'#{i}' for i in rows_of_key)} pay the same destination: check that "
+                            "this is not one payment entered twice.")
+    if warnings:
+        frappe.msgprint("<br>".join(warnings), title="Check the M-Pesa payees", indicator="orange")
+
+
+def clean_line(row, own=None, warnings=None) -> None:
+    """One line's details for its type: a phone kept as 2547..., a till or paybill as 5 to 7
+    digits (a paybill with its account number), a bank account at an enabled M-Pesa Bank Paybill
+    (its paybill copied from the bank, never typed), and never one of this company's own numbers."""
+    row.payee_name = cstr(row.get("payee_name")).strip()
+    if not row.payee_name:
+        frappe.throw(f"Row #{row.idx}: enter the Payee Name, as the claimant gives it.")
+    if row.get("payee_type") not in TYPES:
+        frappe.throw(f"Row #{row.idx}: Pay To must be {', '.join(TYPES[:-1])} or {TYPES[-1]}.")
+    if row.payee_type == PHONE:
+        msisdn = normalize_msisdn(row.get("phone"))
+        if not msisdn:
+            frappe.throw(f"Row #{row.idx}: {cstr(row.get('phone')) or 'no phone'} is not a Kenyan mobile number "
+                         "(07XX XXX XXX or 2547XX XXX XXX).")
+        row.phone = msisdn
+        row.shortcode = row.account_number = row.bank_paybill = None
+        if not is_safaricom(msisdn) and warnings is not None:
+            # not refused: a number moved from another network keeps its old prefix
+            warnings.append(f"Row #{row.idx}: {to_local(msisdn)} does not start like a Safaricom number, and B2C "
+                            "pays M-Pesa lines only.")
+    elif row.payee_type == BANK:
+        _clean_bank(row)
+    else:
+        row.shortcode = cstr(row.get("shortcode")).strip()
+        row.phone = row.bank_paybill = None
+        if not row.shortcode.isdigit() or not 5 <= len(row.shortcode) <= 7:
+            frappe.throw(f"Row #{row.idx}: the Till / Paybill Number must be 5 to 7 digits.")
+        if row.payee_type == TILL:
+            row.account_number = None
+        else:
+            row.account_number = cstr(row.get("account_number")).strip() or None
+            if not row.account_number:
+                frappe.throw(f"Row #{row.idx}: a paybill needs the Account Number the merchant gave.")
+            bank = _bank_with_paybill(row.shortcode)
+            if bank:
+                # the bank's account number rule and Safaricom's name for the bank apply to it
+                frappe.throw(f"Row #{row.idx}: {row.shortcode} is {bank.institution_name}'s bank paybill: pick Pay "
+                             f"To Bank Account (via Bank Paybill) and {bank.institution_name}.")
+        if len(cstr(row.account_number)) > 20:
+            frappe.throw(f"Row #{row.idx}: the Account Number is longer than M-Pesa allows (20 characters).")
+    if row.payee_type != PHONE and row.shortcode in (own if own is not None else own_numbers()):
+        frappe.throw(f"Row #{row.idx}: {row.shortcode} is one of this company's own M-Pesa numbers.")
+    try:
+        daraja.whole_shillings(row.get("amount"))
+    except ValueError as e:
+        frappe.throw(f"Row #{row.idx}: {e}")
+    if row.payee_type == PHONE and not B2C_MIN_AMOUNT <= flt(row.amount) <= B2C_MAX_AMOUNT:
+        frappe.throw(f"Row #{row.idx}: M-Pesa B2C pays KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,} to a phone.")
+    row.destination = describe(row)
+    row.destination_key = line_key(row)
+
+
+def _clean_bank(row) -> None:
+    if not cstr(row.get("bank_paybill")).strip():
+        frappe.throw(f"Row #{row.idx}: pick the Bank the account is at.")
+    bank = frappe.db.get_value(BANK_PAYBILL, row.bank_paybill,
+                               ["name", "institution_name", "paybill", "enabled", "account_number_pattern",
+                                "account_number_rule"], as_dict=True)
+    if not bank:
+        frappe.throw(f"Row #{row.idx}: M-Pesa Bank Paybill {row.bank_paybill} not found.")
+    if not cint(bank.enabled):
+        frappe.throw(f"Row #{row.idx}: {bank.institution_name} is switched off in M-Pesa Bank Paybills: an M-Pesa "
+                     "Manager checks its paybill and enables it first.")
+    row.shortcode = cstr(bank.paybill).strip()
+    row.phone = None
+    number = re.sub(r"[\s-]", "", cstr(row.get("account_number"))).upper()
+    if not number:
+        frappe.throw(f"Row #{row.idx}: enter the account number at {bank.institution_name}.")
+    if not number.isalnum():
+        frappe.throw(f"Row #{row.idx}: a bank account number has letters and digits only.")
+    pattern = cstr(bank.get("account_number_pattern")).strip()
+    if pattern and not _fits(pattern, number):
+        rule = cstr(bank.get("account_number_rule")).strip()
+        frappe.throw(f"Row #{row.idx}: {number} does not look like a {bank.institution_name} account number"
+                     + (f" ({rule})" if rule else "") + ".")
+    row.account_number = number
+
+
+def _fits(pattern, value) -> bool:
+    try:
+        return bool(re.fullmatch(pattern, value))
+    except re.error:
+        return True  # a broken pattern refuses nothing
+
+
+def _bank_with_paybill(shortcode):
+    """The enabled M-Pesa Bank Paybill row with this paybill, if the list exists on the site."""
+    if not frappe.db.exists("DocType", BANK_PAYBILL):
+        return None
+    return frappe.db.get_value(BANK_PAYBILL, {"paybill": shortcode, "enabled": 1}, ["name", "institution_name"],
+                               as_dict=True)
+
+
+def _expense_line(row, expenses: dict, at_submit: bool, warnings: list):
+    """The claim's expense line the payee line pays: the claim's only one when none is picked."""
+    picked = cstr(row.get("expense_detail")).strip()
+    if picked:
+        if picked not in expenses:
+            frappe.throw(f"Row #{row.idx}: its expense line is no longer on the claim: pick its Expense Line again.")
+        return expenses[picked]
+    if len(expenses) == 1:
+        row.expense_detail = next(iter(expenses))
+        return expenses[row.expense_detail]
+    if at_submit:
+        frappe.throw(f"Row #{row.idx}: pick the Expense Line this payee is paid for.")
+    warnings.append(f"Row #{row.idx}: pick the Expense Line this payee is paid for before the claim is approved.")
+    return None
+
+
+def types_allowing_payees(types) -> set:
+    """Of these Expense Claim Types, the ones whose lines may be paid to merchants or payees."""
+    types = sorted({t for t in types if t})
+    if not types or not frappe.db.has_column(CLAIM_TYPE, TYPE_FLAG):
+        return set()
+    return set(frappe.get_all(CLAIM_TYPE, filters={"name": ["in", types], TYPE_FLAG: 1}, pluck="name"))
+
+
+def claim_owed(doc, at_submit: bool = True) -> float:
+    """What the claim owes: HRMS's grand total (sanctioned, plus taxes, less advances) less what was
+    reimbursed. A draft's lines may not be sanctioned yet: their claimed amounts count then."""
+    total = flt(doc.get("grand_total"))
+    if not at_submit and not total:
+        lines = doc.get("expenses") or []
+        sanctioned = sum(flt(r.get("sanctioned_amount")) or flt(r.get("amount")) for r in lines)
+        total = sanctioned + flt(doc.get("total_taxes_and_charges")) - flt(doc.get("total_advance_amount"))
+    return max(0.0, flt(total - flt(doc.get("total_amount_reimbursed")), 2))
+
+
+def own_numbers() -> set:
+    """This company's own M-Pesa numbers (every Mpesa Settings' shortcode and till)."""
+    own = frappe.get_all("Mpesa Settings", pluck="business_shortcode") + frappe.get_all("Mpesa Settings",
+                                                                                     pluck="till_number")
+    return {cstr(s).strip() for s in own if cstr(s).strip()}
+
+
+def amount_cap_problem(row, s) -> str | None:
+    """The per-payment cap (M-Pesa Suite Settings; 0 = none) on a destination that is not an
+    approved supplier account."""
+    if s.max_amount and flt(row.amount) > s.max_amount + 0.001:
+        return (f"Row #{row.idx}: KES {money(row.amount)} is more than may be paid at once to a payee that is not an "
+                f"approved account (KES {money(s.max_amount)}, M-Pesa Suite Settings). Pay it to an approved Supplier "
+                "M-Pesa Account, or reimburse the employee.")
+    return None
+
+
+# ---------------------------------------------------------------- never an employee's destination
+def employee_destinations() -> frappe._dict:
+    """Every employee's destinations: their phones (Employee cell number and Employee M-Pesa
+    Accounts, approved or not) by key, and their bank account numbers (the Employee's and their
+    accounts'), each with the employee."""
+    found = frappe._dict(destinations={}, bank_numbers={})
+    meta = frappe.get_meta("Employee")
+    fields = ["name"] + [f for f in ("cell_number", "bank_ac_no") if meta.has_field(f)]
+    for employee in frappe.get_all("Employee", fields=fields):
+        key = destination_key(PHONE, phone=employee.get("cell_number"))
+        if key:
+            found.destinations.setdefault(key, employee.name)
+        number = bank_number(employee.get("bank_ac_no"))
+        if number:
+            found.bank_numbers.setdefault(number, employee.name)
+    columns = ["name", "employee", "account_type", "phone", "shortcode", "account_number"]
+    if frappe.db.has_column(EMPLOYEE_ACCOUNT, "destination_key"):
+        columns.append("destination_key")
+    for acc in frappe.get_all(EMPLOYEE_ACCOUNT, filters={"docstatus": ["<", 2]}, fields=columns):
+        key = account_key(acc)
+        if key:
+            found.destinations.setdefault(key, acc.employee)
+        if acc.get("account_type") in (BANK, OLD_BANK) and bank_number(acc.get("account_number")):
+            found.bank_numbers.setdefault(bank_number(acc.account_number), acc.employee)
+    return found
+
+
+def employee_problem(row, claimant, found) -> str | None:
+    """Why the line may not pay its destination: it is the claimant's own or another employee's
+    (who is not named: what an employee is paid is not everyone's to see)."""
+    who = found.destinations.get(row.get("destination_key") or line_key(row))
+    if not who and row.get("payee_type") == BANK:
+        who = found.bank_numbers.get(bank_number(row.get("account_number")))
+    if not who:
+        return None
+    whose = "the claimant's own" if who == claimant else "an employee's"
+    return (f"Row #{row.idx}: {describe(row)} is {whose} {WHAT[row.payee_type]}. An employee is paid by reimbursing "
+            "the claim, never as a payee.")
+
+
+# ---------------------------------------------------------------- approved supplier destinations
+def approved_supplier_account(line) -> str | None:
+    """A supplier's approved Supplier M-Pesa Account with this destination that can be paid now:
+    the payee caps do not apply to it."""
+    key = line.get("destination_key") or line_key(line)
+    if not key:
+        return None
+    if frappe.db.has_column(SUPPLIER_ACCOUNT, "destination_key"):
+        names = frappe.get_all(SUPPLIER_ACCOUNT, filters={"destination_key": key, "docstatus": 1}, pluck="name")
+    elif line.get("payee_type") in B2B_TYPES:
+        rows = frappe.get_all(SUPPLIER_ACCOUNT, filters={"shortcode": line.get("shortcode"), "docstatus": 1},
+                              fields=["name", "account_type", "shortcode", "account_number"])
+        names = [r.name for r in rows if account_key(r) == key]
+    else:
+        names = []
+    for name in names:
+        acc = pa.get_account(SUPPLIER_ACCOUNT, name)
+        if acc and not pa.usable_problem(acc, None, SUPPLIER_ACCOUNT):
+            return name
+    return None
+
+
+# ---------------------------------------------------------------- after submit
+def keep_results(doc, method=None) -> None:
+    """Expense Claim before_update_after_submit: a save after submit (a form opened before a
+    result, the API) writes back what the database holds for the lines' status and result: they
+    are the server's, and the double-payment checks read them."""
+    rows = doc.get(TABLE) or []
+    if not rows:
+        return
+    current = {r.name: r for r in frappe.get_all(LINE, filters={"parent": doc.name, "parenttype": CLAIM},
+                                                 fields=["name", *RESULT_FIELDS])}
+    for row in rows:
+        stored = current.get(row.name)
+        if stored:
+            for field in RESULT_FIELDS:
+                setattr(row, field, stored.get(field))
+
+
+def on_cancel_claim(doc, method=None) -> None:
+    """Expense Claim on_cancel: its lines are not paid any more (the cancel was refused while a
+    payout of the claim was paid or on its way: money_out.employee_documents.before_cancel). A
+    draft payout left for a line cannot be sent: the claim is no longer payable."""
+    for row in doc.get(TABLE) or []:
+        if row.get("status") not in (PAID, IN_FLIGHT):
+            frappe.db.set_value(LINE, row.name, "status", CANCELLED, update_modified=False)
+
+
+# ---------------------------------------------------------------- a line's payouts and status
+def _locking(for_update: bool) -> str:
+    return "FOR UPDATE" if for_update and frappe.db.db_type == "mariadb" else ""
+
+
+def read_lines(claim: str, for_update: bool = False) -> list:
+    """The claim's payee lines (a locking read when making payouts: one made meanwhile is seen)."""
+    return frappe.db.sql(
+        f"""SELECT {", ".join(f"`{f}`" for f in LINE_FIELDS)} FROM `tab{LINE}`
+        WHERE parent = %(claim)s AND parenttype = %(parenttype)s AND parentfield = %(field)s
+        ORDER BY idx {_locking(for_update)}""",
+        {"claim": claim, "parenttype": CLAIM, "field": TABLE},
+        as_dict=True,
+    )
+
+
+def b2b_state(docstatus, status) -> str | None:
+    """A B2B request's say on its line: None when it never took money (cancelled unsent)."""
+    status = status or "Not Initiated"
+    if cint(docstatus) == 0:
+        return QUEUED
+    if cint(docstatus) == 1:
+        return {"Not Initiated": QUEUED, "Initiated": IN_FLIGHT, "Unknown": IN_FLIGHT, "Paid": PAID,
+                "Failed": FAILED}.get(status, IN_FLIGHT)
+    # cancelled: only one that may have paid still counts
+    return {"Paid": PAID, "Initiated": IN_FLIGHT, "Unknown": IN_FLIGHT}.get(status)
+
+
+def b2c_state(parent_docstatus, payment_status, request=None, request_docstatus=None, request_status=None) -> str | None:
+    """A B2C Payment Disbursement row's say on its line, from its payout (B2C Disbursement
+    Request) once it has one, else from the row."""
+    if request and cint(request_docstatus) in (1, 2):
+        status = request_status or "Not Initiated"
+        if cint(request_docstatus) == 2:
+            return {"Paid": PAID, "Initiated": IN_FLIGHT, "Status Unknown": IN_FLIGHT}.get(status)
+        return {"Paid": PAID, "Failed": FAILED}.get(status, IN_FLIGHT)
+    if cint(parent_docstatus) == 0:
+        return QUEUED
+    if cint(parent_docstatus) == 1:
+        return {"Paid": PAID, "Failed": FAILED}.get(payment_status, IN_FLIGHT)
+    return None  # a cancelled disbursement whose row never got a payout
+
+
+def payouts_of(lines, for_update: bool = False) -> list:
+    """Every B2B request and B2C row that names one of ``lines``, with what it says about it."""
+    names = [cstr(n) for n in lines if cstr(n)]
+    if not names:
+        return []
+    found = []
+    if frappe.db.has_column(B2B, "claim_payee"):
+        for r in frappe.db.sql(
+            f"""SELECT name, claim_payee, docstatus, status, transaction_id, receiver_public_name,
+                   trans_completed_time, error_message, result_desc, creation
+            FROM `tab{B2B}` WHERE claim_payee IN %(lines)s ORDER BY creation {_locking(for_update)}""",
+            {"lines": tuple(names)},
+            as_dict=True,
+        ):
+            state = b2b_state(r.docstatus, r.status)
+            found.append(frappe._dict(
+                line=r.claim_payee, doctype=B2B, name=r.name, state=state, creation=r.creation,
+                receipt=r.transaction_id, receiver_name=r.receiver_public_name, paid_on=r.trans_completed_time,
+                error=(r.result_desc or r.error_message) if state == FAILED else None,
+            ))
+    if frappe.db.has_column(B2C_ROW, "claim_payee"):
+        for r in frappe.db.sql(
+            f"""SELECT ref.name AS row_name, ref.parent, ref.claim_payee, ref.payment_status, ref.creation,
+                   d.docstatus AS parent_docstatus, req.name AS request, req.docstatus AS request_docstatus,
+                   req.status AS request_status, req.transaction_id, req.receiver_public_name,
+                   req.transaction_completed_datetime, req.error_message, req.result_desc
+            FROM `tab{B2C_ROW}` ref
+            JOIN `tab{B2C}` d ON d.name = ref.parent
+            LEFT JOIN `tab{B2C_REQUEST}` req ON req.name = ref.b2c_disbursement_request
+            WHERE ref.claim_payee IN %(lines)s AND ref.parenttype = %(parenttype)s
+            ORDER BY ref.creation {_locking(for_update)}""",
+            {"lines": tuple(names), "parenttype": B2C},
+            as_dict=True,
+        ):
+            state = b2c_state(r.parent_docstatus, r.payment_status, r.request, r.request_docstatus, r.request_status)
+            found.append(frappe._dict(
+                line=r.claim_payee, doctype=B2C, name=r.parent, row=r.row_name, request=r.request, state=state,
+                creation=r.creation, receipt=r.transaction_id, receiver_name=r.receiver_public_name,
+                paid_on=r.transaction_completed_datetime,
+                error=(r.result_desc or r.error_message or "Not sent") if state == FAILED else None,
+            ))
+    return found
+
+
+def deciding_payout(payouts):
+    """The payout that decides a line: the one furthest on its way, the latest of those."""
+    live = [p for p in payouts if p.state]
+    if not live:
+        return None
+    return max(live, key=lambda p: (RANK[p.state], cstr(p.creation)))
+
+
+def line_values(line, payouts, claim_docstatus) -> dict:
+    """A line's status and result from its payouts (pure)."""
+    best = deciding_payout(payouts)
+    status = best.state if best else (CANCELLED if line.get("status") == CANCELLED else DRAFT)
+    if cint(claim_docstatus) == 2 and status not in (PAID, IN_FLIGHT):
+        status = CANCELLED
+    values = {
+        "status": status,
+        "payout_doctype": best.doctype if best else None,
+        "payout_name": best.name if best else None,
+        "receipt": best.receipt if best and status == PAID else None,
+        "paid_on": best.paid_on if best and status == PAID else None,
+        "receiver_name": (cstr(best.receiver_name).strip() or None) if best and status == PAID else None,
+        "error_message": best.error if best and status == FAILED else None,
+    }
+    paid = sorted({p.name for p in payouts if p.state == PAID})
+    if len(paid) > 1:
+        values["error_message"] = (f"Paid {len(paid)} times: {', '.join(paid)}. Check with the payee and recover the "
+                                   "extra payment.")
+    return values
+
+
+def sync_lines(claim: str, lines=None, for_update: bool = False) -> list:
+    """Each payee line's status and result from its payouts; only what changed is written. A line
+    newly paid, or whose payout's receiver name came later (a till's, from Safaricom's Transaction
+    Status answer), has its name checked. Returns the lines as they are now."""
+    rows = lines if lines is not None else read_lines(claim, for_update)
+    if not rows:
+        return []
+    payouts = payouts_of([r.name for r in rows], for_update)
+    docstatus = frappe.db.get_value(CLAIM, claim, "docstatus")
+    for row in rows:
+        mine = [p for p in payouts if p.line == row.name]
+        values = line_values(row, mine, docstatus)
+        changed = {k: v for k, v in values.items() if cstr(row.get(k)) != cstr(v)}
+        verdict = None
+        if values["status"] == PAID and ("status" in changed or "receiver_name" in changed):
+            row.update(values)
+            verdict, note = name_check(row, row.get("receiver_name"), _bank_name(row))
+            changed.update(name_matches=1 if verdict else 0, name_note=note)
+        if changed:
+            frappe.db.set_value(LINE, row.name, changed, update_modified=False)
+            row.update(changed)
+        if cstr(changed.get("error_message")).startswith("Paid "):
+            pa.alert(f"{claim}: payee row #{row.idx} ({row.payee_name}): {changed['error_message']}",
+                     frappe._dict(doctype=CLAIM, name=claim))
+        if verdict is False:
+            _name_alarm(claim, row)
+    return rows
+
+
+def on_payout_result(doctype: str, name: str) -> None:
+    """After a payout's result is recorded (money_out.b2b's Result, a B2C payout's row, or a
+    Transaction Status answer that fills a till's receiver name later): the Expense Claim payee
+    line it pays follows it. Safe to call again, and for any payout (one that pays no payee line is
+    left alone). Never raises, but for a deadlock or a lock wait past MariaDB's limit: the caller
+    records the result again (money_out.b2b.handle_result) or its job fails and is retried."""
+    try:
+        line = _line_of(doctype, name)
+        if not line:
+            return
+        row = frappe.db.get_value(LINE, line, list(LINE_FIELDS), as_dict=True)
+        if row and row.parenttype == CLAIM:
+            sync_lines(row.parent, [row])
+    except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+        raise  # MariaDB rolled the transaction back: the caller must record the result again
+    except Exception:
+        frappe.log_error(title="M-Pesa claim payee result not recorded", message=f"{doctype} {name}\n"
+                         f"{frappe.get_traceback()}")
+
+
+def _line_of(doctype: str, name: str) -> str | None:
+    if not name:
+        return None
+    if doctype == B2B:
+        return frappe.db.has_column(B2B, "claim_payee") and frappe.db.get_value(B2B, name, "claim_payee") or None
+    if doctype == B2C_REQUEST:
+        name = frappe.db.get_value(B2C_REQUEST, name, "b2c_payment_disbursement_reference")
+        doctype = B2C_ROW
+    if doctype == B2C_ROW and name:
+        return frappe.db.has_column(B2C_ROW, "claim_payee") and frappe.db.get_value(B2C_ROW, name, "claim_payee") or None
+    return None
+
+
+# ---------------------------------------------------------------- the name M-Pesa paid
+def number_prefix(name) -> str | None:
+    found = _NUMBER_PREFIX.match(cstr(name))
+    return found.group(1) if found else None
+
+
+def _same_number(prefix: str, line) -> bool:
+    """The number in front of the name is the line's: its shortcode, or its phone (M-Pesa masks a
+    phone's middle digits: the digits shown must agree)."""
+    if line.get("payee_type") != PHONE:
+        return prefix == cstr(line.get("shortcode")).strip()
+    phone = cstr(line.get("phone")).strip()
+    if prefix.isdigit():
+        return normalize_msisdn(prefix) == phone
+    head = re.match(r"[0-9]*", prefix).group(0)
+    tail = re.search(r"[0-9]*$", prefix).group(0)
+    if head.startswith("0"):
+        head = "254" + head[1:]
+    return phone.startswith(head) and phone.endswith(tail)
+
+
+def name_check(line, received, bank_name=None) -> tuple:
+    """(matches, note) for the name M-Pesa paid (pure): True, False, or None when nothing could be
+    checked (a till's result names no one; a bank whose Safaricom name is not on file yet, past its
+    number)."""
+    received = cstr(received).strip()
+    if not received:
+        if line.get("payee_type") == TILL:
+            return None, ("Name not checked (till): M-Pesa's result names no one. Safaricom's Transaction Status "
+                          "answer fills it in later.")
+        return None, "Name not checked: M-Pesa's result names no one."
+    prefix = number_prefix(received)
+    if prefix and not _same_number(prefix, line):
+        expected = describe(line) if line.get("payee_type") == PHONE else cstr(line.get("shortcode")).strip()
+        return False, f"M-Pesa paid {received!r}: number {prefix}, not {expected}."
+    if line.get("payee_type") == BANK:
+        bank_name = cstr(bank_name).strip()
+        if not bank_name:
+            return None, (f"M-Pesa paid {received!r}. A bank paybill names the bank, and this bank's Name M-Pesa Shows "
+                          "is not set on M-Pesa Bank Paybill: only the number was checked.")
+        if pa.names_match(bank_name, _without_number(received)):
+            return True, f"M-Pesa paid {received!r}: the bank's own name (the account holder is not shown)."
+        return False, f"M-Pesa paid {received!r}, but the bank's name is {bank_name!r}."
+    if pa.names_match(line.get("payee_name"), _without_number(received)):
+        return True, f"M-Pesa paid {received!r}."
+    return False, f"M-Pesa paid {received!r}, but the claim gives {line.get('payee_name')!r}."
+
+
+def _without_number(name) -> str:
+    return _NUMBER_PREFIX.sub("", cstr(name), count=1).strip()
+
+
+def _bank_name(line) -> str | None:
+    """The name M-Pesa shows for a bank account line's bank (its M-Pesa Bank Paybill row)."""
+    if line.get("payee_type") != BANK or not line.get("bank_paybill"):
+        return None
+    return frappe.db.get_value(BANK_PAYBILL, line.bank_paybill, "receiver_name")
+
+
+def _name_alarm(claim: str, line) -> None:
+    """A Comment on the claim and an alert to the Notify Role: M-Pesa paid someone else's name."""
+    message = (f"Payee row #{line.idx} ({line.payee_name}, {describe(line)}): {line.name_note} Check with the claimant "
+               "before this payee is paid again.")
+    try:
+        frappe.get_doc(CLAIM, claim).add_comment("Comment", message)
+    except Exception:
+        frappe.log_error(title="M-Pesa claim payee comment failed", message=f"{claim}\n{frappe.get_traceback()}")
+    frappe.log_error(title="M-Pesa claim payee name mismatch", message=f"{claim}: {message}",
+                     reference_doctype=CLAIM, reference_name=claim)
+    pa.alert(f"{claim}: {message}", frappe._dict(doctype=CLAIM, name=claim))
+
+
+# ---------------------------------------------------------------- a payout of a line (B2B, B2C)
+def _line(name: str):
+    row = frappe.db.get_value(LINE, name, list(LINE_FIELDS), as_dict=True) if name else None
+    if not row or row.parenttype != CLAIM:
+        frappe.throw(f"Expense Claim payee {name} not found.")
+    return row
+
+
+def payable_problem(doc) -> str | None:
+    """Why the claim may not be paid now (money_out.employee_documents: submitted, approved, in a
+    payable workflow state, something owed)."""
+    from .employee_documents import payable_problem as problem
+
+    return problem(doc)
+
+
+def _memo(owner, key: str, make):
+    """``make()`` once per document being checked (a disbursement checks each of its rows)."""
+    flags = getattr(owner, "flags", None)
+    if flags is None:
+        return make()
+    if key not in flags:
+        flags[key] = make()
+    return flags[key]
+
+
+def _account_of(value, payee_type) -> str | None:
+    return None if payee_type == TILL else (cstr(value).strip() or None)
+
+
+def check_b2b(doc) -> None:
+    """A B2B request that pays a merchant line of an Expense Claim (its claim_payee). money_out.b2b
+    calls it beside an employee request's checks: on save, at the send (submit) and right before
+    the money leaves. A draft takes the line's destination, and every check compares with it: the
+    line's claim and claimant, its till, paybill or bank account, at most its amount, the line not
+    paid or on its way by another payout. At the send, under the claim's lock: the claim still
+    payable, the destination still no employee's, and the payee caps (M-Pesa Suite Settings)."""
+    name = cstr(doc.get("claim_payee")).strip()
+    if not name:
+        return
+    line = _line(name)
+    claim = cstr(doc.get("expense_claim")).strip()
+    if claim != line.parent:
+        frappe.throw(f"{name} is a payee of {line.parent}, not of {claim or 'no Expense Claim'}.")
+    if line.payee_type not in B2B_TYPES:
+        frappe.throw(f"Payee row #{line.idx} of {claim} is a phone: it is paid by B2C, not B2B.")
+    for field, label in (("supplier", "Supplier"), ("supplier_mpesa_account", "Supplier M-Pesa Account"),
+                         ("employee_mpesa_account", "Employee M-Pesa Account"), ("salary_slip", "Salary Slip"),
+                         ("employee_advance", "Employee Advance"), ("purchase_invoice", "Purchase Invoice"),
+                         ("purchase_order", "Purchase Order")):
+        if cstr(doc.get(field)).strip():
+            frappe.throw(f"This pays payee row #{line.idx} of {claim} to its own {WHAT[line.payee_type]}, for the "
+                         f"claim only: clear {label}.")
+    values = frappe.db.get_value(CLAIM, claim, ["name", "employee", "company"], as_dict=True)
+    if not values:
+        frappe.throw(f"Expense Claim {claim} not found.")
+    sending = cint(doc.docstatus) == 1
+    if not sending:
+        doc.employee = values.employee
+        doc.company = values.company or doc.get("company")  # the claim's, not the user's default
+        doc.command_id = COMMAND_FOR[line.payee_type]
+        doc.receiver_shortcode = line.shortcode
+        doc.account_reference = _account_of(line.account_number, line.payee_type)
+    if doc.get("employee") != values.employee:
+        frappe.throw(f"{claim} is {values.employee}'s claim: its payees are paid on it, with Employee {values.employee}.")
+    if values.company and doc.get("company") != values.company:
+        frappe.throw(f"{claim} belongs to {values.company}, not {doc.get('company') or 'no company'}.")
+    if (doc.get("command_id") != COMMAND_FOR[line.payee_type]
+            or cstr(doc.get("receiver_shortcode")).strip() != cstr(line.shortcode).strip()
+            or _account_of(doc.get("account_reference"), line.payee_type)
+            != _account_of(line.account_number, line.payee_type)):
+        frappe.throw(f"The destination on {doc.name or 'this request'} is not payee row #{line.idx}'s of {claim} "
+                     f"({describe(line)}).")
+    if flt(doc.get("amount")) > flt(line.amount) + 0.001:
+        frappe.throw(f"KES {money(doc.amount)} is more than payee row #{line.idx} of {claim} pays "
+                     f"(KES {money(line.amount)}).")
+    if not sending:
+        _check_others(line, (B2B, doc.name))
+        return
+    with owed.doc_lock(CLAIM, claim):
+        _check_others(line, (B2B, doc.name), for_update=True)
+        _check_sending(claim, line, flt(doc.amount), (B2B, doc.name), doc.company, flt(doc.amount), doc)
+
+
+def check_b2c_row(parent, row) -> None:
+    """A B2C Payment Disbursement row that pays a casual payee (phone) line of an Expense Claim
+    (its claim_payee). The row's own validate calls it, on every save and at the send (submit):
+    the row pays the line's claim on its claimant, to the line's phone, at most its amount, and the
+    line is not paid or on its way by another payout. At the send, under the claim's lock: the
+    claim still payable, the phone still no employee's, and the payee caps (the disbursement's rows
+    to such payees counted together for the day's cap)."""
+    name = cstr(row.get("claim_payee")).strip()
+    if not name:
+        return
+    parent = parent or frappe.get_doc(B2C, row.parent)
+    line = _line(name)
+    if row.get("reference_doctype") != CLAIM or row.get("reference_name") != line.parent:
+        frappe.throw(f"Row #{row.idx} pays payee row #{line.idx} of {line.parent}: its document must be Expense "
+                     f"Claim {line.parent}.")
+    if line.payee_type != PHONE:
+        frappe.throw(f"Row #{row.idx}: payee row #{line.idx} of {line.parent} is a {WHAT[line.payee_type]}: it is "
+                     "paid by B2B, not to a phone.")
+    claimant = frappe.db.get_value(CLAIM, line.parent, "employee")
+    if row.get("party_type") != "Employee" or row.get("party") != claimant:
+        frappe.throw(f"Row #{row.idx}: the party is the claimant, {claimant}: a payee is paid on their claim.")
+    if normalize_msisdn(row.get("partyb")) != line.phone:
+        frappe.throw(f"Row #{row.idx}: the phone is not payee row #{line.idx}'s of {line.parent} ({describe(line)}).")
+    if flt(row.get("allocated_amount")) > flt(line.amount) + 0.001:
+        frappe.throw(f"Row #{row.idx}: KES {money(row.allocated_amount)} is more than payee row #{line.idx} of "
+                     f"{line.parent} pays (KES {money(line.amount)}).")
+    twice = [r.idx for r in parent.get("references") or [] if cstr(r.get("claim_payee")).strip() == name]
+    if len(twice) > 1:
+        frappe.throw(f"Rows {', '.join(f'#{i}' for i in twice)} pay the same payee row #{line.idx} of {line.parent}.")
+    if _sent_already(row):
+        return  # an amended copy of a row its original sent: not sent again
+    if cint(parent.docstatus) != 1:
+        _check_others(line, (B2C, parent.name))
+        return
+    with owed.doc_lock(CLAIM, line.parent):
+        _check_others(line, (B2C, parent.name), for_update=True)
+        batch = _memo(parent, "mpsa_claim_payee_batch", lambda: _capped_rows_total(parent))
+        _check_sending(line.parent, line, flt(row.allocated_amount), (B2C, parent.name), parent.get("company"),
+                       batch, parent)
+
+
+def _sent_already(row) -> bool:
+    request = cstr(row.get("b2c_disbursement_request")).strip()
+    if not request:
+        return False
+    status = frappe.db.get_value(B2C_REQUEST, request, "status")
+    return bool(status) and status != "Failed"
+
+
+def _capped_rows_total(parent) -> float:
+    """What the disbursement's rows send to payees that are not approved supplier accounts (as
+    found when the claim was approved)."""
+    rows = [r for r in parent.get("references") or [] if cstr(r.get("claim_payee")).strip() and not _sent_already(r)]
+    if not rows:
+        return 0.0
+    supplier = {r.name: r.supplier_account for r in frappe.get_all(
+        LINE, filters={"name": ["in", [r.claim_payee for r in rows]]}, fields=["name", "supplier_account"])}
+    return flt(sum(flt(r.allocated_amount) for r in rows if not supplier.get(r.claim_payee)), 2)
+
+
+def _check_others(line, this: tuple, for_update: bool = False) -> None:
+    """The line is not paid, on its way, or about to be sent by another payout (a draft is not
+    one: whichever is sent first takes the line)."""
+    for p in payouts_of([line.name], for_update):
+        if (p.doctype, p.name) == this:
+            continue
+        if p.state in (PAID, IN_FLIGHT) or (p.state == QUEUED and _submitted(p)):
+            how = "paid" if p.state == PAID else "being paid"
+            frappe.throw(f"Payee row #{line.idx} of {line.parent} ({line.payee_name}) is {how} by {p.doctype} "
+                         f"{p.name}: it is never paid twice.")
+
+
+def retry_problem(request: str) -> str | None:
+    """Why a failed B2C payout (B2C Disbursement Request) of a casual payee line may not be sent
+    again by its own retry: the line has another payout paid, on its way or about to be sent
+    (Retry failed payees made a new one). None for a payout that pays no payee line. For the
+    payout's retries (B2C Disbursement Request.retry_failed_payment) to call."""
+    line = _line_of(B2C_REQUEST, request)
+    if not line:
+        return None
+    parent = frappe.db.get_value(B2C_REQUEST, request, "b2c_payment_disbursement")
+    for p in payouts_of([line]):
+        if p.doctype == B2C and p.name == parent:
+            continue
+        if p.state in (PAID, IN_FLIGHT) or (p.state == QUEUED and _submitted(p)):
+            return (f"{request} pays an Expense Claim payee that {p.doctype} {p.name} pays now: retry the payee from "
+                    "its claim (Retry Failed Payees), never this payout as well.")
+    return None
+
+
+def _submitted(payout) -> bool:
+    """A payout submitted and not sent yet (a B2B request Not Initiated, a B2C row before its
+    payout is made): it is about to take money."""
+    return cint(frappe.db.get_value(payout.doctype, payout.name, "docstatus")) == 1
+
+
+def _check_sending(claim: str, line, amount: float, payout: tuple, company, batch: float, owner=None) -> None:
+    """At the send: the switch, the claim payable (money_out.employee_documents), the destination
+    still no employee's, the caps on a destination that is not an approved supplier account. Then
+    the line notes the payout sending it (the day's cap counts it from now; a send that fails
+    before the money leaves rolls this back with it)."""
+    s = settings()
+    if not s.allow:
+        frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")
+    doc = frappe.get_doc(CLAIM, claim)
+    problem = payable_problem(doc)
+    if problem:
+        frappe.throw(problem)
+    found = _memo(owner, "mpsa_employee_destinations", employee_destinations)
+    problem = employee_problem(line, doc.employee, found)
+    if problem:
+        frappe.throw(f"{claim}: {problem}")
+    supplier = approved_supplier_account(line)
+    if not supplier:
+        problem = amount_cap_problem(frappe._dict(line, amount=amount), s)
+        if problem:
+            frappe.throw(f"{claim}: {problem}")
+        if s.daily_cap:
+            sent = sent_today(company, payout)
+            if sent + batch > s.daily_cap + 0.001:
+                frappe.throw(f"KES {money(sent)} was sent today to Expense Claim payees that are not approved "
+                             f"accounts; with this KES {money(batch)} it would pass the day's cap of KES "
+                             f"{money(s.daily_cap)} (M-Pesa Suite Settings). Send it tomorrow, or pay an approved "
+                             "Supplier M-Pesa Account.")
+    frappe.db.set_value(LINE, line.name, {"status": IN_FLIGHT, "payout_doctype": payout[0], "payout_name": payout[1],
+                                          "sent_on": now_datetime(), "supplier_account": supplier,
+                                          "error_message": None}, update_modified=False)
+
+
+def sent_today(company, exclude: tuple = (None, None)) -> float:
+    """What Expense Claim payee lines of ``company``'s claims sent today to destinations that are
+    not approved supplier accounts, by payouts that did not fail (``exclude``: the payout being
+    sent, which the caller counts)."""
+    if not company:
+        return 0.0
+    rows = frappe.db.sql(
+        f"""
+        SELECT COALESCE(SUM(p.amount), 0)
+        FROM `tab{LINE}` p
+        JOIN `tab{CLAIM}` c ON c.name = p.parent
+        LEFT JOIN `tab{B2B}` r ON p.payout_doctype = %(b2b)s AND r.name = p.payout_name
+        LEFT JOIN `tab{B2C_ROW}` ref ON p.payout_doctype = %(b2c)s AND ref.parent = p.payout_name
+            AND ref.claim_payee = p.name
+        LEFT JOIN `tab{B2C}` d ON d.name = ref.parent
+        LEFT JOIN `tab{B2C_REQUEST}` req ON req.name = ref.b2c_disbursement_request
+        WHERE p.parenttype = %(claim)s AND c.company = %(company)s AND p.sent_on >= %(today)s
+          AND COALESCE(p.supplier_account, '') = ''
+          AND NOT (p.payout_doctype = %(dt)s AND p.payout_name = %(dn)s)
+          AND (
+            (r.docstatus = 1 AND COALESCE(r.status, '') != 'Failed')
+            OR (r.docstatus = 2 AND r.status IN ('Paid', 'Initiated', 'Unknown'))
+            OR (d.docstatus = 1 AND COALESCE(req.status, ref.payment_status, '') != 'Failed')
+            OR (req.docstatus IN (1, 2) AND req.status IN ('Paid', 'Initiated', 'Status Unknown'))
+          )
+        """,
+        {"b2b": B2B, "b2c": B2C, "claim": CLAIM, "company": company, "today": f"{nowdate()} 00:00:00",
+         "dt": exclude[0] or "", "dn": exclude[1] or ""},
+    )
+    return flt(rows[0][0] if rows else 0, 2)
+
+
+# ---------------------------------------------------------------- making the payouts (drafts)
+@frappe.whitelist(methods=["POST"])
+def pay_payees(claim: str, b2b_settings: str | None = None, b2c_settings: str | None = None) -> dict:
+    """Pay merchants and payees: draft payouts for the claim's payee lines with none yet (one B2B
+    request per merchant, one B2C Payment Disbursement for the phones). An M-Pesa Payer who did
+    not prepare them sends them (Send via M-Pesa). For PREPARE_ROLES who can read the claim."""
+    require(PREPARE_ROLES)
+    doc = frappe.get_doc(CLAIM, claim)
+    doc.check_permission("read")
+    return make_payouts([doc], (DRAFT,), b2b_settings, b2c_settings)
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_payees(claim: str, b2b_settings: str | None = None, b2c_settings: str | None = None) -> dict:
+    """Retry failed payees: new draft payouts for the claim's lines whose last payout failed, and
+    only those. For PREPARE_ROLES who can read the claim."""
+    require(PREPARE_ROLES)
+    doc = frappe.get_doc(CLAIM, claim)
+    doc.check_permission("read")
+    return make_payouts([doc], (FAILED,), b2b_settings, b2c_settings)
+
+
+@frappe.whitelist(methods=["POST"])
+def pay_claims(claims, b2c_settings: str | None = None) -> dict:
+    """The Expense Claim list's Pay casual payees by M-Pesa: one draft B2C Payment Disbursement for
+    the phone lines of the ticked claims not paid yet (or failed), of one company and one payable
+    account. For PREPARE_ROLES who can read every ticked claim."""
+    require(PREPARE_ROLES)
+    if isinstance(claims, str):
+        claims = frappe.parse_json(claims)
+    names = sorted({cstr(c).strip() for c in claims or []} - {""})
+    if not names:
+        frappe.throw("Tick the Expense Claims whose payees to pay.")
+    if len(names) > 200:
+        frappe.throw("Pay the payees of at most 200 claims at a time.")
+    for name in names:
+        frappe.has_permission(CLAIM, "read", doc=name, throw=True)
+    docs = [frappe.get_doc(CLAIM, name) for name in names]
+    return make_payouts(docs, (DRAFT, FAILED), None, b2c_settings, phones_only=True)
+
+
+def make_payouts(docs, states, b2b_settings=None, b2c_settings=None, phones_only: bool = False) -> dict:
+    """Draft payouts for the lines of ``docs`` in ``states``, under each claim's lock (a second
+    press waits, then finds the lines Queued). Made with ignore_permissions: the caller checked
+    the preparer's roles and read permission on each claim, and every payout checks its lines
+    again when it is saved and sent. Nothing is sent here."""
+    if not settings().allow:
+        frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")
+    merchants, phones = [], []
+    for doc in sorted(docs, key=lambda d: d.name):
+        problem = payable_problem(doc)
+        if problem:
+            frappe.throw(problem if doc.name in cstr(problem) else f"{doc.name}: {problem}")
+        with owed.doc_lock(CLAIM, doc.name):
+            lines = sync_lines(doc.name, for_update=True)
+            picked = [line for line in lines
+                      if line.status in states and (not phones_only or line.payee_type == PHONE)]
+            _check_left(doc, picked)
+        for line in picked:
+            (phones if line.payee_type == PHONE else merchants).append((doc, line))
+    if not (merchants or phones):
+        frappe.throw("No payee line has failed." if states == (FAILED,) else
+                     "Nothing to pay: every payee line is paid, on its way, or has a payout waiting to be sent.")
+    made = frappe._dict(b2b=[], b2c=None, lines=len(merchants) + len(phones),
+                        total=flt(sum(flt(line.amount) for _doc, line in merchants + phones), 2))
+    for doc, line in merchants:
+        request = new_b2b(doc, line, pick_settings(b2b_settings, apis.B2B, doc.company))
+        request.insert(ignore_permissions=True)
+        _queued(line, B2B, request.name)
+        made.b2b.append(request.name)
+    if phones:
+        disbursement = new_b2c(phones, b2c_settings)
+        disbursement.insert(ignore_permissions=True)
+        for _doc, line in phones:
+            _queued(line, B2C, disbursement.name)
+        made.b2c = disbursement.name
+    names = ", ".join(made.b2b + ([made.b2c] if made.b2c else []))
+    for doc in {d.name: d for d, _line in merchants + phones}.values():
+        doc.add_comment("Comment", f"{frappe.session.user} prepared M-Pesa payouts for its payees: {names}. An M-Pesa "
+                                   "Payer who did not prepare them sends them with Send via M-Pesa.")
+    return made
+
+
+def _check_left(doc, picked) -> None:
+    """The lines to pay fit in what the claim has left to pay, its payouts on their way counted
+    (money_out.owed.employee_doc_left_to_pay, under the claim's lock)."""
+    total = flt(sum(flt(line.amount) for line in picked), 2)
+    if not total:
+        return
+    from .owed import employee_doc_left_to_pay
+
+    result = employee_doc_left_to_pay(CLAIM, doc.name)
+    left = flt(result.get("left") if isinstance(result, dict) else result, 2)
+    if total > left + 0.001:
+        frappe.throw(f"{doc.name} has KES {money(left)} left to pay, less than its payees' KES {money(total)}: check "
+                     "its payouts on their way before paying again.")
+
+
+def _queued(line, doctype: str, name: str) -> None:
+    frappe.db.set_value(LINE, line.name, {"status": QUEUED, "payout_doctype": doctype, "payout_name": name,
+                                          "error_message": None}, update_modified=False)
+    line.update(status=QUEUED, payout_doctype=doctype, payout_name=name)
+
+
+def pick_settings(name, api: str, company) -> str:
+    """The shortcode to pay from: the one picked, or the company's only one that may send ``api``
+    (B2B or B2C) and has an initiator."""
+    has_company = frappe.get_meta("Mpesa Settings").has_field("company")
+    label = "Pay From (B2B)" if api == apis.B2B else "Pay From (B2C)"
+    if name:
+        fields = ["name", "initiator_name", *apis.ALL] + (["company"] if has_company else [])
+        values = frappe.db.get_value("Mpesa Settings", name, fields, as_dict=True)
+        if not values:
+            frappe.throw(f"Mpesa Settings {name} not found")
+        apis.require(values, api)
+        if values.get("company") and company and values.company != company:
+            frappe.throw(f"Mpesa Settings {name} pays for {values.company}, not {company}.")
+        return name
+    filters = {api: 1, **({"company": company} if has_company and company else {})}
+    found = [s.name for s in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "initiator_name"])
+             if s.initiator_name]
+    if len(found) != 1:
+        frappe.throw(f"Pick {label}: {company or 'this company'} has "
+                     + ("no shortcode that may send it." if not found else f"{len(found)} shortcodes that may send it."))
+    return found[0]
+
+
+def new_b2b(doc, line, settings_name: str):
+    """A draft B2B request for a merchant line: on the claimant and the claim, to the line's
+    destination (check_b2b compares it again on every save and at the send)."""
+    request = frappe.new_doc(B2B)
+    request.update({
+        "mpesa_settings": settings_name,
+        "company": doc.company,
+        "employee": doc.employee,
+        "expense_claim": doc.name,
+        "claim_payee": line.name,
+        "command_id": COMMAND_FOR[line.payee_type],
+        "receiver_shortcode": line.shortcode,
+        "account_reference": _account_of(line.account_number, line.payee_type),
+        "amount": flt(line.amount),
+        "remarks": f"{doc.name} {line.payee_name}"[:100],
+    })
+    request.flags.ignore_permissions = True
+    return request
+
+
+def new_b2c(entries, b2c_settings=None):
+    """One draft B2C Payment Disbursement for phone lines [(claim, line)]: a row per line on the
+    claimant and the claim, to the line's phone. The claims are of one company and one payable
+    account (the disbursement's Account Paid To)."""
+    first = entries[0][0]
+    companies = sorted({cstr(doc.company) for doc, _line in entries})
+    if len(companies) > 1:
+        frappe.throw(f"Pay the casual payees of one company at a time ({', '.join(companies)}).")
+    payables = sorted({cstr(doc.get("payable_account")) for doc, _line in entries})
+    if len(payables) > 1:
+        frappe.throw(f"The claims must have one Payable Account to be paid in one batch ({', '.join(payables)}).")
+    if not payables[0]:
+        frappe.throw(f"{first.name} has no Payable Account.")
+    settings_name = pick_settings(b2c_settings, apis.B2C, first.company)
+    from ..money_in import common as money_in_common
+    from .schedule import check_b2c_settings
+
+    check_b2c_settings(settings_name, max(flt(line.amount) for _doc, line in entries), first.company)
+    mop = money_in_common.mode_of_payment_for(settings_name)
+    disbursement = frappe.new_doc(B2C)
+    disbursement.update({
+        "naming_series": "MPESA-B2C-.YYYY.-",
+        "company": first.company,
+        "posting_date": nowdate(),
+        "payment_type": "Mpesa Disbursement",
+        "party_type": "Employee",
+        "transaction_to_pay_against": CLAIM,
+        "mode_of_payment": mop,
+        "paid_from": _b2c_paid_from(settings_name, mop, first.company),
+        "paid_from_account_currency": "KES",
+        "paid_to": payables[0],
+        "paid_to_account_currency": "KES",
+        "paid_amount": flt(sum(flt(line.amount) for _doc, line in entries), 2),
+        "source_exchange_rate": 1,
+        "target_exchange_rate": 1,
+    })
+    for doc, line in entries:
+        disbursement.append("references", {
+            "reference_doctype": CLAIM, "reference_name": doc.name, "party_type": "Employee", "party": doc.employee,
+            "allocated_amount": flt(line.amount), "partyb": line.phone, "currency": "KES", "exchange_rate": 1,
+            "claim_payee": line.name,
+        })
+    disbursement.flags.ignore_permissions = True
+    return disbursement
+
+
+def _b2c_paid_from(settings_name: str, mop, company) -> str:
+    """The GL the payouts leave from: the shortcode's Utility Bank Account (as Pay Selected), else
+    its Mode of Payment's account (as the disbursement form)."""
+    from ..wallet import accounts as wallet_accounts
+
+    bank_account = wallet_accounts.bank_account(settings_name, wallet_accounts.UTILITY)
+    paid_from = frappe.db.get_value("Bank Account", bank_account, "account") if bank_account else None
+    if not paid_from and mop:
+        paid_from = frappe.db.get_value("Mode of Payment Account", {"parent": mop, "company": company},
+                                        "default_account")
+    if not paid_from:
+        frappe.throw(f"Map a Bank Account on Mpesa Settings {settings_name} (Accounting Mapping).")
+    return paid_from
+
+
+# ---------------------------------------------------------------- the claim's form
+@frappe.whitelist(methods=["POST"])
+def claim_state(claim: str) -> dict:
+    """What the claim's form shows: whether payees may be entered, each line's status (brought up
+    to date from its payouts), the totals, the supplier suggestions, why the claim cannot be paid
+    now and whether its reimbursed total needs repairing. For who can read the claim (a claim not
+    saved yet: who may create one, and only the switch)."""
+    if not claim or not frappe.db.exists(CLAIM, claim):
+        frappe.has_permission(CLAIM, "create", throw=True)
+        return {"enabled": settings().allow, "changed": False, "totals": {}, "lines": [], "suggestions": []}
+    frappe.has_permission(CLAIM, "read", doc=claim, throw=True)
+    s = settings()
+    doc = frappe.get_doc(CLAIM, claim)
+    before = {r.name: tuple(cstr(r.get(f)) for f in RESULT_FIELDS) for r in doc.get(TABLE) or []}
+    lines = sync_lines(claim) if before else []
+    changed = any(before.get(r.name) != tuple(cstr(r.get(f)) for f in RESULT_FIELDS) for r in lines)
+    totals = dict.fromkeys((PAID, IN_FLIGHT, QUEUED, FAILED, DRAFT, CANCELLED), 0.0)
+    for line in lines:
+        status = line.get("status") or DRAFT
+        totals[status] = flt(totals.get(status, 0) + flt(line.amount), 2)
+    submitted = cint(doc.docstatus) == 1
+    return {
+        "enabled": s.allow,
+        "changed": changed,
+        "totals": totals,
+        "lines": [{f: line.get(f) for f in ("name", "idx", *RESULT_FIELDS)} for line in lines],
+        "suggestions": suggestions(lines, s.suggest_after) if lines else [],
+        "payable_problem": payable_problem(doc) if submitted and lines else None,
+        "allowed_types": sorted(types_allowing_payees({r.expense_type for r in doc.get("expenses") or []})),
+        "reimbursed": _gap(doc) if submitted else None,
+    }
+
+
+def _gap(doc) -> dict | None:
+    gap = reimbursed_gap(doc)
+    return {"stored": gap[0], "booked": gap[1]} if gap else None
+
+
+# ---------------------------------------------------------------- suggest a supplier account
+def paid_counts(keys) -> dict:
+    """How many times each destination was paid from Expense Claims (Paid payee lines)."""
+    keys = sorted({k for k in keys if k})
+    if not keys:
+        return {}
+    return {k: cint(n) for k, n in frappe.db.sql(
+        f"""SELECT destination_key, COUNT(*) FROM `tab{LINE}`
+        WHERE parenttype = %(claim)s AND status = %(paid)s AND destination_key IN %(keys)s
+        GROUP BY destination_key""",
+        {"claim": CLAIM, "paid": PAID, "keys": tuple(keys)},
+    )}
+
+
+def suggestions(lines, after: int) -> list:
+    """Merchant lines whose till, paybill or bank account was paid ``after`` times or more from
+    Expense Claims and is no supplier's approved account yet: offered as a new Supplier M-Pesa
+    Account (prefilled; the user picks the supplier), approved once and then paid like any
+    supplier."""
+    if after <= 0:
+        return []
+    merchants = [line for line in lines if line.get("payee_type") in B2B_TYPES]
+    counts = paid_counts(line.get("destination_key") for line in merchants)
+    found = []
+    for line in merchants:
+        count = counts.get(line.get("destination_key"), 0)
+        if count < after or approved_supplier_account(line):
+            continue
+        account = {"account_type": line.payee_type,
+                   "expected_name": _without_number(line.get("receiver_name")) or line.payee_name}
+        if line.payee_type == BANK:
+            account.update(bank_paybill=line.bank_paybill, account_number=line.account_number)
+        else:
+            account.update(shortcode=line.shortcode, account_number=_account_of(line.account_number, line.payee_type))
+        found.append({
+            "line": line.name, "idx": line.idx, "count": count, "account": account,
+            "message": f"Row #{line.idx}: {describe(line)} ({line.payee_name}) was paid {count} times from Expense "
+                       "Claims: make it an approved Supplier M-Pesa Account.",
+        })
+    return found
+
+
+# ---------------------------------------------------------------- the reimbursed total
+def reimbursed_gap(doc) -> tuple | None:
+    """(stored, booked) when HRMS's Total Amount Reimbursed disagrees with the Payment and Journal
+    Entries booked against the claim (HRMS's own count), else None. Two payouts booked at the same
+    moment can leave it short."""
+    from hrms.hr.doctype.expense_claim.expense_claim import get_total_reimbursed_amount
+
+    stored, booked = flt(doc.get("total_amount_reimbursed"), 2), flt(get_total_reimbursed_amount(doc), 2)
+    return (stored, booked) if abs(stored - booked) > 0.005 else None
+
+
+@frappe.whitelist(methods=["POST"])
+def repair_reimbursed(claim: str) -> dict:
+    """Repair reimbursed total: HRMS's own update_reimbursed_amount sets Total Amount Reimbursed
+    (and the claim's status) from the entries booked against the claim. For ADMIN_ROLES who can
+    read the claim; under the claim's lock, so no payout is booked meanwhile."""
+    require(ADMIN_ROLES)
+    frappe.get_doc(CLAIM, claim).check_permission("read")
+    from hrms.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
+
+    with owed.doc_lock(CLAIM, claim):
+        doc = frappe.get_doc(CLAIM, claim, for_update=True)  # as it is now, under the lock
+        if cint(doc.docstatus) != 1:
+            frappe.throw(f"{claim} is not submitted.")
+        gap = reimbursed_gap(doc)
+        if not gap:
+            return {"repaired": False, "total": flt(doc.total_amount_reimbursed, 2)}
+        update_reimbursed_amount(doc)
+        doc.add_comment("Comment", f"Total Amount Reimbursed repaired from {money(gap[0])} to {money(gap[1])} (the "
+                                   f"entries booked against the claim) by {frappe.session.user}.")
+    return {"repaired": True, "from": gap[0], "to": gap[1]}
+
+
+# ---------------------------------------------------------------- casual payees: paste or upload
+_HEADERS = {
+    "payee_name": ("name", "payee"),
+    "phone": ("phone", "mobile", "msisdn", "number", "tel"),
+    "amount": ("amount", "kes", "ksh", "pay"),
+}
+
+
+def parse_text(text) -> list:
+    """Pasted rows: a tab between columns (copied from a spreadsheet), else commas (quotes kept)."""
+    rows = []
+    for raw in cstr(text).splitlines():
+        if not raw.strip():
+            continue
+        cells = raw.split("\t") if "\t" in raw else next(csv.reader([raw]))
+        rows.append([c.strip() for c in cells])
+    return rows
+
+
+def parse_amount(value) -> float | None:
+    """'1,500', 'KES 1500', 1500.0 -> 1500.0; None when it is no number."""
+    text = re.sub(r"(?i)\b(kes|kshs?|sh)\b\.?", "", cstr(value)).replace(",", "").replace(" ", "")
+    try:
+        return float(text) if text else None
+    except ValueError:
+        return None
+
+
+def _header(cells) -> dict | None:
+    """{field: column} when the first row names the columns (in any order)."""
+    found = {}
+    for i, cell in enumerate(cells):
+        text = cstr(cell).strip().lower()
+        if parse_amount(cell) is not None or normalize_msisdn(cell):
+            continue
+        for field, words in _HEADERS.items():
+            if field not in found and any(w in text for w in words):
+                found[field] = i
+                break
+    return found if len(found) == len(_HEADERS) else None
+
+
+def table_rows(table) -> list:
+    """Rows of name, phone, amount (a first row naming the columns may come first, in any order):
+    [{row, payee_name, phone, amount_text}]. Without names, the phone is the first cell after the
+    name that is a phone number, and the cells after it are the amount ('1,500' split by a comma
+    comes back whole)."""
+    table = [[cstr(c).strip() if c is not None else "" for c in row or []] for row in table or []]
+    table = [(n, row) for n, row in enumerate(table, start=1) if any(row)]
+    if not table:
+        return []
+    order = _header(table[0][1])
+    if order:
+        table = table[1:]
+    rows = []
+    for n, cells in table:
+        if order:
+            name, phone, amount = (cells[order[f]] if order[f] < len(cells) else "" for f in ("payee_name", "phone",
+                                                                                              "amount"))
+        else:
+            name, rest = cells[0], cells[1:]
+            at = next((i for i, cell in enumerate(rest) if normalize_msisdn(cell)), 0)
+            phone = rest[at] if rest else ""
+            amount = "".join(rest[at + 1:])
+        rows.append(frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount))
+    return rows
+
+
+def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
+    """Each pasted row checked: a name, a Safaricom number (B2C pays M-Pesa lines only; a number
+    moved from another network is added by hand), whole shillings B2C may pay, never an
+    employee's phone, and no phone twice (in the list, or on the claim already)."""
+    found = found or frappe._dict(destinations={}, bank_numbers={})
+    seen = {normalize_msisdn(p) for p in existing or [] if normalize_msisdn(p)}
+    checked = []
+    for r in rows:
+        errors = []
+        if not cstr(r.payee_name).strip():
+            errors.append("no name")
+        msisdn = normalize_msisdn(r.phone)
+        if not msisdn:
+            errors.append(f"{r.phone or 'no phone'} is not a Kenyan mobile number")
+        elif not is_safaricom(msisdn):
+            errors.append(f"{to_local(msisdn)} does not start like a Safaricom number (B2C pays M-Pesa lines only: add "
+                          "it by hand if it is an M-Pesa line moved from another network)")
+        amount = parse_amount(r.amount_text)
+        if amount is None or amount <= 0:
+            errors.append("the amount must be more than 0")
+        elif amount != int(amount):
+            errors.append("M-Pesa pays whole shillings")
+        elif not B2C_MIN_AMOUNT <= amount <= B2C_MAX_AMOUNT:
+            errors.append(f"M-Pesa B2C pays KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,}")
+        if msisdn:
+            who = found.destinations.get(f"B2C:{msisdn}")
+            if who:
+                errors.append("the claimant's own phone" if who == claimant else
+                              "an employee's phone: an employee is paid by reimbursing the claim")
+            if msisdn in seen:
+                errors.append("this phone is on the claim already, or earlier in the list")
+            seen.add(msisdn)
+        checked.append({"row": r.row, "payee_name": cstr(r.payee_name).strip(), "phone": msisdn or cstr(r.phone),
+                        "amount": amount, "errors": errors})
+    return checked
+
+
+@frappe.whitelist(methods=["POST"])
+def parse_payees(text: str | None = None, file_url: str | None = None, claim: str | None = None,
+                 employee: str | None = None, existing=None) -> dict:
+    """The Paste payees dialog: pasted rows (name, phone, amount) or an uploaded CSV / XLSX,
+    checked row by row (check_pasted). Adds nothing: the form appends the good rows to the claim,
+    and its save checks them again. For who may change the claim (or create one, before its first
+    save)."""
+    if claim and frappe.db.exists(CLAIM, claim):
+        frappe.has_permission(CLAIM, "write", doc=claim, throw=True)
+        employee = frappe.db.get_value(CLAIM, claim, "employee")
+    else:
+        frappe.has_permission(CLAIM, "create", throw=True)
+    table = _read_file(file_url) if file_url else parse_text(text)
+    rows = table_rows(table)
+    if len(rows) > PASTE_LIMIT:
+        frappe.throw(f"Paste at most {PASTE_LIMIT} payees at a time.")
+    if isinstance(existing, str):
+        existing = frappe.parse_json(existing)
+    checked = check_pasted(rows, employee, existing or [], employee_destinations())
+    bad = sum(1 for r in checked if r["errors"])
+    return {"rows": checked, "good": len(checked) - bad, "bad": bad}
+
+
+def _read_file(file_url: str) -> list:
+    """An uploaded CSV, TXT or XLSX the user may read, as rows of cells."""
+    file = frappe.get_doc("File", {"file_url": file_url})
+    file.check_permission("read")
+    name = cstr(file.file_name or file_url).lower()
+    if name.endswith(".xlsx"):
+        from frappe.utils.xlsxutils import read_xlsx_file_from_attached_file
+
+        return read_xlsx_file_from_attached_file(file_url=file_url) or []
+    if not name.endswith((".csv", ".txt")):
+        frappe.throw("Upload a CSV or XLSX file (name, phone, amount).")
+    content = file.get_content()
+    if isinstance(content, bytes):
+        content = content.decode("utf-8-sig", errors="replace")
+    return parse_text(content)

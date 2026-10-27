@@ -233,6 +233,9 @@ def _record_result(result: dict, ref: str | None) -> None:
     from . import schedule
 
     schedule.sync_line_later(doc)  # a payment schedule's line, from a job after this commits
+    from . import claim_payees
+
+    claim_payees.on_payout_result(B2B_DOCTYPE, doc.name)  # an Expense Claim's payee line follows it
 
     if outcome == "Paid":
         try:
@@ -324,7 +327,11 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
     if slip:
         _take_from_slip(doc, slip)
     dt, dn = _take_from_employee_document(doc, slip)
-    if not doc.get("claim_payee"):  # a payee of the claim is checked by money_out.claim_payees, not an account
+    if doc.get("claim_payee"):
+        from . import claim_payees
+
+        claim_payees.check_b2b(doc)  # an Expense Claim's merchant line: its own destination and checks
+    else:
         employee_accounts.apply_destination(doc)
     _check_fields(doc)
     _check_settings(doc, fill=True)
@@ -557,7 +564,11 @@ def _check_employee_ready(doc) -> None:
     if cstr(doc.get("supplier")).strip() or owed.document_of(doc) != (None, None):
         frappe.throw("Pay a supplier or an employee, not both.")
     _check_payer(doc, sending=True)
-    if not doc.get("claim_payee"):  # a payee of the claim is checked by money_out.claim_payees
+    if doc.get("claim_payee"):
+        from . import claim_payees
+
+        claim_payees.check_b2b(doc)  # an Expense Claim's merchant line: its own destination and checks
+    else:
         employee_accounts.check_before_send(doc)
     if not doc.mpesa_settings:
         frappe.throw(f"{doc.name} has no Pay From (Mpesa Settings)")

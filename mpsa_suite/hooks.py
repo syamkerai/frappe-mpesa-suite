@@ -70,7 +70,8 @@ doctype_js = {
     # HRMS only: a form that does not exist on the site never loads its script
     "Payroll Entry": "public/js/payroll_entry.js",
     "Employee": "public/js/employee.js",
-    "Expense Claim": "public/js/expense_claim.js",
+    # a list of scripts: Frappe 15 and 16 load each (frappe.desk.form.meta.get_code_files_via_hooks)
+    "Expense Claim": ["public/js/expense_claim.js", "public/js/expense_claim_payees.js"],
     "Employee Advance": "public/js/employee_advance.js",
     "Salary Slip": "public/js/salary_slip.js",
     "Sales Order": "public/js/sales_order.js",
@@ -80,7 +81,7 @@ doctype_js = {
 # Loaded after the DocType's own list script (HRMS's, where it has one): each extends
 # frappe.listview_settings[doctype], never replaces it.
 doctype_list_js = {
-    "Expense Claim": "public/js/expense_claim_list.js",
+    "Expense Claim": ["public/js/expense_claim_list.js", "public/js/expense_claim_payees_list.js"],
     "Employee Advance": "public/js/employee_advance_list.js",
     "Salary Slip": "public/js/salary_slip_list.js",
 }
@@ -232,6 +233,10 @@ doc_events = {
     # HRMS: no cancel while an M-Pesa payout of the claim or advance is paid or on its way
     "Expense Claim": {
         "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
+        # merchants and casual payees paid straight from the claim (money_out.claim_payees)
+        "validate": "mpsa_suite.money_out.claim_payees.validate_claim",
+        "before_update_after_submit": "mpsa_suite.money_out.claim_payees.keep_results",
+        "on_cancel": "mpsa_suite.money_out.claim_payees.on_cancel_claim",
     },
     "Employee Advance": {
         "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",

@@ -294,11 +294,15 @@ def test_a_request_for_a_payee_of_the_claim_is_not_held_to_the_employees_account
     calls, apply_destination = [], ea.apply_destination
     monkeypatch.setattr(ea, "apply_destination", lambda doc: calls.append("apply") or apply_destination(doc))
     monkeypatch.setattr(ea, "check_before_send", lambda doc: calls.append("check"))
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")  # WP4: the line's own checks
+    monkeypatch.setattr(cp, "check_b2b", lambda doc: calls.append("payee"))
     doc = request(env, claim_payee="CP-1", receiver_shortcode="835811", command_id="BusinessBuyGoods", amount=1000)
     env.b2b.validate_request(doc)
-    assert calls == [] and doc.employee == "EMP-1" and not doc.employee_mpesa_account
+    assert calls == ["payee"] and doc.employee == "EMP-1" and not doc.employee_mpesa_account
+    calls.clear()
     env.b2b._check_employee_ready(doc)  # the claim's own checks still run, under its lock
-    assert calls == [] and "b2c-pay:Expense Claim:HR-EXP-1" in env.locks
+    assert calls == ["payee"] and "b2c-pay:Expense Claim:HR-EXP-1" in env.locks
+    calls.clear()
     env.b2b.validate_request(request(env, name="MB2B-E3", amount=1000))
     assert calls == ["apply"]
 
@@ -479,10 +483,14 @@ def test_with_the_lock_on_an_employee_is_paid_by_b2c_only_to_an_approved_phone(e
         row_of(env, reference_doctype=SLIP, reference_name="SAL-2", partyb="0733000000").validate()
 
 
-def test_a_row_paying_a_payee_of_the_claim_is_left_to_claim_payees(env):
+def test_a_row_paying_a_payee_of_the_claim_is_left_to_claim_payees(env, monkeypatch):
     lock_on(env)
     claim(env, "HR-EXP-2", employee="EMP-2", approval_status="Draft")
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")  # WP4: the line's own checks
+    seen = []
+    monkeypatch.setattr(cp, "check_b2c_row", lambda parent, row: seen.append(row.claim_payee))
     row_of(env, claim_payee="CP-1", partyb="0733000000").validate()  # neither the lock nor the gate here
+    assert seen == ["CP-1"]
 
 
 def test_a_b2c_request_made_by_hand_is_held_to_the_same_rules(env):

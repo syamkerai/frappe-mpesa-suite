@@ -254,17 +254,22 @@ def test_desk_scripts_include_the_send_confirmation():
     assert (APP / "public" / "js" / "mpsa_send.js").is_file()
 
 
+def _scripts(hook: dict) -> list:
+    """Every script path of a doctype_js / doctype_list_js hook (a DocType may have a list of them)."""
+    return [p for value in hook.values() for p in (value if isinstance(value, list) else [value])]
+
+
 def test_every_form_and_list_script_exists():
     doctype_js, list_js = _hook("doctype_js"), _hook("doctype_list_js")
     for doctype in ("Expense Claim", "Employee Advance", "Salary Slip", "Sales Order", "Customer"):
         assert doctype in doctype_js, doctype
     assert set(list_js) == {"Expense Claim", "Employee Advance", "Salary Slip"}
-    for path in list(doctype_js.values()) + list(list_js.values()):
+    for path in _scripts(doctype_js) + _scripts(list_js):
         assert (APP / path).is_file(), path
 
 
 def test_list_scripts_extend_hrms_list_settings_never_replace_them():
-    for path in _hook("doctype_list_js").values():
+    for path in _scripts(_hook("doctype_list_js")):
         code = [line for line in (APP / path).read_text(encoding="utf-8").splitlines()
                 if not line.lstrip().startswith("//")]
         assert not any("listview_settings[" in line and "=" in line for line in code), path
@@ -299,7 +304,7 @@ def test_connections_extend_the_dashboards_they_are_given(env):
 def test_claim_and_advance_cancel_and_the_boot_hook_are_wired():
     events = _hook("doc_events")
     for doctype in ("Expense Claim", "Employee Advance"):
-        assert events[doctype] == {"before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel"}
+        assert events[doctype]["before_cancel"] == "mpsa_suite.money_out.employee_documents.before_cancel"
     assert _hook("boot_session") == "mpsa_suite.boot.boot_session"
     for dotted in ("mpsa_suite.money_out.employee_documents.before_cancel", "mpsa_suite.boot.boot_session"):
         assert _defines(dotted), dotted

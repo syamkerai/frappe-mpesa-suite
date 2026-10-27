@@ -64,9 +64,15 @@ class B2CPaymentDisbursementReference(Document):
 
             check_b2c_row(self)
 
-        from ....money_out import employee_documents
+        if getattr(self, "claim_payee", None):
+            # a casual payee line of an Expense Claim: the line's phone and amount, approved with the
+            # claim (money_out.claim_payees)
+            from ....money_out import claim_payees
 
-        if not getattr(self, "claim_payee", None):  # a payee of the claim: money_out.claim_payees checks it
+            claim_payees.check_b2c_row(getattr(self, "parent_doc", None), self)
+        else:
+            from ....money_out import employee_documents
+
             # a claim or advance that may be paid, of the row's employee; an employee only to an
             # approved phone (M-Pesa Suite Settings)
             employee_documents.check_b2c_row(self)

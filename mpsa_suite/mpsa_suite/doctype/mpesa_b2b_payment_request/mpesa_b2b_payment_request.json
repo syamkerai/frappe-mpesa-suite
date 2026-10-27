@@ -58,7 +58,8 @@
   "receiver_public_name",
   "receiver_name_mismatch",
   "debit_party_charges",
-  "debit_account_balance"
+  "debit_account_balance",
+  "claim_payee"
  ],
  "fields": [
   {
@@ -484,10 +485,19 @@
    "read_only": 1,
    "allow_on_submit": 1,
    "no_copy": 1
+  },
+  {
+   "fieldname": "claim_payee",
+   "fieldtype": "Data",
+   "label": "Expense Claim Payee",
+   "read_only": 1,
+   "search_index": 1,
+   "depends_on": "eval:doc.claim_payee",
+   "description": "The merchant line of the Expense Claim this pays (M-Pesa Claim Payee): the till, paybill or bank account and the most it may pay are the line's, approved with the claim."
   }
  ],
  "links": [],
- "modified": "2026-10-27 20:00:00.000000",
+ "modified": "2026-10-27 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2B Payment Request",
