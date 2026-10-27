@@ -507,9 +507,13 @@ def hrms_installed() -> bool:
 def payroll_bank_entries(payroll_entry: str) -> list:
     """Live (draft or submitted) Bank or Cash Journal Entries for the Payroll Entry not made by an
     M-Pesa payout (HRMS's Make Bank Entry, or one made by hand): an M-Pesa salary as well could
-    pay twice. M-Pesa's own salary entries are tagged with their payout."""
+    pay twice. M-Pesa's own salary entries are tagged with their payout. While a salary schedule is
+    built (payroll._bank_entries_once), each Payroll Entry is read once."""
     if not payroll_entry:
         return []
+    once = getattr(frappe.local, "mpesa_bank_entries", None)
+    if once is not None and payroll_entry in once:
+        return list(once[payroll_entry])
     meta = frappe.get_meta("Journal Entry Account")
     tags = [f for f in ("b2c_payment_disbursement", "mpesa_b2b_payment_request") if meta.has_field(f)]
     mpesa = " OR ".join(f"COALESCE(t.{f}, '') != ''" for f in tags)
@@ -526,7 +530,10 @@ def payroll_bank_entries(payroll_entry: str) -> list:
         """,
         (payroll_entry,),
     )
-    return [r[0] for r in rows]
+    found = [r[0] for r in rows]
+    if once is not None:
+        once[payroll_entry] = found
+    return list(found)
 
 
 def bank_entry_problem(payroll_entry: str) -> str | None:

@@ -168,22 +168,74 @@ def test_the_payroll_builder_leaves_out_a_slip_paid_by_a_one_off_and_cannot_be_c
         site.payroll.before_cancel(pe)
 
 
-def test_a_payout_committed_meanwhile_is_seen_by_the_locking_read(site, monkeypatch):
-    real = site.owed.slip_left_to_pay
+def _committed_meanwhile(s, monkeypatch, part, left):
+    """What another worker committed after this request's snapshot: only a locking read sees it."""
+    real = s.owed.slip_left_to_pay
+    calls = []
 
-    def left(slip, **kw):
+    def slip_left_to_pay(slip, **kw):
+        calls.append((slip, bool(kw.get("for_update"))))
         result = real(slip, **kw)
-        if kw.get("for_update") and slip == "SAL-1":  # another worker's payout, committed after this snapshot
-            result.left, result.parts = 10000, [fake_frappe._dict(kind="b2b", name="MB2B-9", amount=40000,
-                                                                   label="MB2B-9 Initiated 40,000")]
+        if kw.get("for_update") and slip == "SAL-1":
+            result.left, result.parts = left, [fake_frappe._dict(part)]
         return result
 
-    monkeypatch.setattr(site.owed, "slip_left_to_pay", left)
-    with pytest.raises(site.frappe.ValidationError, match="KES 50,000 is more than is left to pay now. SAL-1 owes "
-                                                          "50,000, less MB2B-9 Initiated 40,000"):
-        site.payroll.from_salary_slip("SAL-1", b2b_settings=SETTINGS)
+    monkeypatch.setattr(s.owed, "slip_left_to_pay", slip_left_to_pay)
+    return calls
+
+
+def test_a_payout_committed_meanwhile_is_seen_by_the_locking_read(site, monkeypatch):
+    calls = _committed_meanwhile(site, monkeypatch, {"kind": "b2b", "name": "MB2B-9", "amount": 40000,
+                                                     "label": "MB2B-9 Initiated 40,000"}, 10000)
+    # each builder plans what the locking read leaves (read once per slip), not the snapshot's 50,000
+    answer = site.payroll.from_salary_slip("SAL-1", b2b_settings=SETTINGS)
+    assert answer["amount"] == 10000
+    assert [c for c in calls if c[1]] == [("SAL-1", True)]
     answer = site.payroll.from_salary_slips(["SAL-1", "SAL-2"], b2b_settings=SETTINGS, b2c_settings=SETTINGS)
-    assert any("(SAL-1): KES 50,000 is more than is left to pay now" in x for x in answer["excluded"])
+    assert {r["reference_name"]: r["amount"] for r in schedule_of(site, answer["name"])[1]} == {
+        "SAL-1": 10000, "SAL-2": 30000}
+
+
+def test_a_schedule_committed_meanwhile_leaves_the_slip_out_of_every_builder(site, monkeypatch):
+    _committed_meanwhile(site, monkeypatch, {"kind": "planned", "name": "MPS-9", "amount": 50000,
+                                             "label": "planned on MPS-9 for 1 Nov 50,000"}, 0)
+    with pytest.raises(site.frappe.ValidationError, match="SAL-1 cannot be paid by M-Pesa: already planned on M-Pesa "
+                                                          "Payment Schedule MPS-9: SAL-1 owes 50,000, less planned on "
+                                                          "MPS-9"):
+        site.payroll.from_salary_slip("SAL-1", b2b_settings=SETTINGS)
+    # the Payroll Entry's builder reads what is left the same way (it did not before: review finding 1)
+    answer = site.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert [r["reference_name"] for r in schedule_of(site, answer["name"])[1]] == ["SAL-2"]
+    assert "EMP-1 Jane Wanjiru (SAL-1): nothing is left to pay" in answer["excluded"]
+    with pytest.raises(site.frappe.ValidationError, match="None of these salary slips can be paid by M-Pesa. EMP-1 "
+                                                          "Jane Wanjiru \\(SAL-1\\): already planned on M-Pesa Payment "
+                                                          "Schedule MPS-9"):
+        site.payroll.from_salary_slips(["SAL-1"], b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+
+
+def test_the_live_schedule_is_read_with_a_locking_read(site, monkeypatch):
+    schedule_row(site)  # MPS-1, live for PAY-1, committed after this request's snapshot
+    db = site.frappe.db
+    real = db.get_value
+
+    def get_value(doctype, filters, *a, for_update=False, **kw):
+        if doctype == SCHEDULE and isinstance(filters, dict) and not for_update:
+            return None  # the snapshot does not have it yet
+        return real(doctype, filters, *a, for_update=for_update, **kw)
+
+    monkeypatch.setattr(db, "get_value", get_value)
+    assert site.payroll.live_schedule("PAY-1") is None and site.payroll.live_schedule("PAY-1", True) == "MPS-1"
+    with pytest.raises(site.frappe.ValidationError, match="PAY-1 already has M-Pesa Payment Schedule MPS-1"):
+        site.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    # a whole payroll selected beside it is not that payroll's schedule: one live schedule per payroll
+    answer = site.payroll.from_salary_slips(["SAL-1", "SAL-2", "SAL-3", "SAL-4"], b2b_settings=SETTINGS,
+                                            b2c_settings=SETTINGS)
+    assert answer["payroll_entry"] is None
+
+
+def test_the_payroll_builder_takes_the_slip_locks_too(site):
+    site.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert site.locks[:5] == ["payroll-schedule:PAY-1"] + [f"b2c-pay:Salary Slip:SAL-{i}" for i in (1, 2, 3, 4)]
 
 
 # ---------------------------------------------------------------- who may prepare, who may see
@@ -281,6 +333,105 @@ def test_a_slip_that_cannot_be_paid_is_listed_with_its_reason(site, change, reas
     assert [r["reference_name"] for r in schedule_of(site, answer["name"])[1]] == ["SAL-1"]
     (left_out,) = [x for x in answer["excluded"] if "(SAL-2)" in x]
     assert reason in left_out, left_out
+
+
+def test_a_slip_partly_planned_on_another_schedule_is_left_out_of_selected_slips(site):
+    schedule_row(site)
+    bank_line(site, amount=20000)  # 20,000 of SAL-1's 50,000 on MPS-1
+    answer = site.payroll.from_salary_slips(["SAL-1", "SAL-2"], b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert [r["reference_name"] for r in schedule_of(site, answer["name"])[1]] == ["SAL-2"]
+    (left_out,) = [x for x in answer["excluded"] if "(SAL-1)" in x]
+    assert left_out.startswith("EMP-1 Jane Wanjiru (SAL-1): already planned on M-Pesa Payment Schedule MPS-1: SAL-1 "
+                               "owes 50,000, less planned on MPS-1"), left_out
+    # the schedule's Not Included keeps the reason, the answer also says what is left
+    assert schedule_of(site, answer["name"])[0]["excluded"] == (
+        "EMP-1 Jane Wanjiru (SAL-1): already planned on M-Pesa Payment Schedule MPS-1")
+    # a one-off still pays the rest (test_a_part_planned_elsewhere_leaves_the_rest)
+    assert site.payroll.from_salary_slip("SAL-1", b2b_settings=SETTINGS)["amount"] == 30000
+
+
+def test_not_included_is_cut_to_fit_its_column(site, monkeypatch):
+    long = [f"EMP-{i:05d} A Long Employee Name (Sal Slip/EMP-{i:05d}/00001): " + "x" * 200 for i in range(500)]
+    text = site.payroll._not_included(long)
+    assert len(text.encode()) < 65535  # MariaDB text
+    kept = text.split("\n")
+    assert kept[-1] == f"... and {500 - (len(kept) - 1)} more (listed when the schedule was made)"
+    assert kept[:-1] == long[:len(kept) - 1]
+    assert site.payroll._not_included(long[:3]) == "\n".join(long[:3])
+    assert site.payroll._not_included([]) is None
+    # both builders store it so
+    monkeypatch.setattr(site.payroll, "NOT_INCLUDED_BYTES", 20)
+    answer = site.payroll.from_salary_slips(["SAL-1", "SAL-X", "SAL-Y", "SAL-3"], b2b_settings=SETTINGS)
+    assert len(answer["excluded"]) == 3
+    assert schedule_of(site, answer["name"])[0]["excluded"] == (
+        "SAL-X: not found\n... and 2 more (listed when the schedule was made)")
+    site.frappe.db.table(SCHEDULE).clear()
+    site.frappe.db.table(LINE).clear()
+    answer = site.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert schedule_of(site, answer["name"])[0]["excluded"].endswith(
+        f"... and {len(answer['excluded'])} more (listed when the schedule was made)")
+
+
+def test_the_selection_is_read_in_grouped_queries(site, monkeypatch):
+    """Speed (review finding 3): no full document load per slip for its read permission, what each
+    slip has left read once under its lock, the payroll's bank entries read once."""
+    frappe = site.frappe
+    doc_checks, bank_reads, left_reads = [], [], []
+    plain_has_permission, plain_sql, plain_left = frappe.has_permission, frappe.db.sql, site.owed.slip_left_to_pay
+
+    def has_permission(doctype, ptype="read", doc=None, **kw):
+        if doc is not None:
+            doc_checks.append((doctype, doc))
+        return plain_has_permission(doctype, ptype, doc=doc, **kw)
+
+    def sql(query, *a, **kw):
+        if "SELECT DISTINCT je.name" in query:
+            bank_reads.append(query)
+        return plain_sql(query, *a, **kw)
+
+    def slip_left_to_pay(slip, **kw):
+        left_reads.append((slip, bool(kw.get("for_update"))))
+        return plain_left(slip, **kw)
+
+    monkeypatch.setattr(frappe, "has_permission", has_permission)
+    monkeypatch.setattr(frappe.db, "sql", sql)
+    monkeypatch.setattr(site.owed, "slip_left_to_pay", slip_left_to_pay)
+    lists = []
+    plain_get_list = frappe.get_list
+
+    def get_list(doctype, **kw):  # the user's permissions: SAL-3 is not for them
+        lists.append(doctype)
+        return [n for n in plain_get_list(doctype, **kw) if n != "SAL-3"]
+
+    monkeypatch.setattr(frappe, "get_list", get_list)
+    answer = site.payroll.from_salary_slips(["SAL-1", "SAL-2", "SAL-3"], b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert answer["lines"] == 2 and "SAL-3: you may not read it" in answer["excluded"]
+    assert lists == [SLIP] and not [c for c in doc_checks if c[0] == SLIP]
+    assert sorted(c for c in left_reads if c[1]) == [("SAL-1", True), ("SAL-2", True)]
+    assert len(left_reads) <= 4  # and the schedule's own check of each line when it is saved
+    assert len(bank_reads) == 1  # PAY-1's, not per slip and per check (6 before)
+    assert site.frappe.local.mpesa_bank_entries is None  # only while the schedule was built
+    bank_reads.clear()
+    site.frappe.db.table(SCHEDULE).clear()
+    site.frappe.db.table(LINE).clear()
+    site.payroll.from_payroll_entry("PAY-1", b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+    assert len(bank_reads) == 1
+
+
+def test_who_may_not_read_employee_accounts_pays_the_default_only(site):
+    account(site, "MEA-8", "EMP-1", site.pa.BANK, default=0, shortcode="522522", account_number="1100223344")
+    full = site.payroll.salary_slip_status("SAL-1")
+    assert [(a["name"], a["destination"]) for a in full["accounts"]] == [("MEA-1", "247247 / 0123456789"),
+                                                                         ("MEA-8", "522522 / 1100223344")]
+    site.denied.add((EMPACC, "read"))  # an Accounts User who sees salaries (a custom Salary Slip read, a Payer role)
+    status = site.payroll.salary_slip_status("SAL-1")
+    assert [(a["name"], a["destination"], a["is_default"], a["expected_name"]) for a in status["accounts"]] == [
+        ("MEA-1", "247247 / ******6789", 1, None)]
+    assert site.payroll.salary_slip_status("SAL-2")["accounts"][0]["destination"] == "2547****0111"
+    with pytest.raises(site.frappe.PermissionError, match="you may not read Employee M-Pesa Account MEA-8"):
+        site.payroll.from_salary_slip("SAL-1", payee_account="MEA-8", b2b_settings=SETTINGS)
+    answer = site.payroll.from_salary_slip("SAL-1", payee_account="MEA-1", b2b_settings=SETTINGS)
+    assert answer["payee_account"] == "MEA-1"
 
 
 def test_a_whole_payroll_selected_is_that_payrolls_schedule(site):
@@ -413,3 +564,10 @@ def test_the_scripts_call_whitelisted_endpoints_and_show_only_to_who_may(path, m
     assert "can_see_salaries" in code
     if "from_salary" in " ".join(methods):
         assert "can_prepare" in code
+
+
+@pytest.mark.parametrize("path", ["public/js/salary_slip.js", "public/js/payroll_entry.js"])
+def test_schedule_links_only_for_who_may_read_the_schedule(path):
+    # HR Manager and HR User see the headline but have no DocPerm on M-Pesa Payment Schedule
+    code = (ROOT / "mpsa_suite" / path).read_text(encoding="utf-8")
+    assert 'frappe.model.can_read("M-Pesa Payment Schedule")' in code

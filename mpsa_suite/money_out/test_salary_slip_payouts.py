@@ -6,7 +6,9 @@ default) through its one-line M-Pesa Payment Schedule and Pay Selected; the Sala
 Pay Selected Slips by M-Pesa for three slips with mixed routes (phone, bank account, till), paid
 in one Pay Selected; the double-pay refusals both ways (the Payroll Entry's schedule against a
 one-off, a one-off against the Payroll Entry's schedule); the cancel guards on the Payroll Entry
-and the slip; who may prepare and who may see the figures; the forms' headlines.
+and the slip; who may prepare and who may see the figures, and who may not read the employee's
+accounts (the default only); a slip partly planned elsewhere left out of selected slips; the
+forms' headlines.
 
 Named users only: an Accounts User who is also HR Manager prepares (reads slips and Payroll
 Entries, sees salaries, makes schedules), an M-Pesa Payer pays with Pay Selected (the payer's
@@ -36,12 +38,15 @@ PAYER = "_t_slip_payer@example.com"
 ACCOUNTS_ONLY = "_t_slip_accounts@example.com"
 HR_ONLY = "_t_slip_hr@example.com"
 SYSTEM_MANAGER = "_t_slip_sysmgr@example.com"
+ACCOUNTS_PAYER = "_t_slip_accounts_payer@example.com"
 USERS = {
     PREPARER: ("Accounts User", "HR Manager"),
     PAYER: ("M-Pesa Payer",),
     ACCOUNTS_ONLY: ("Accounts User",),  # makes schedules, may not see salaries
     HR_ONLY: ("HR User",),  # sees salaries, may not make a schedule
     SYSTEM_MANAGER: ("System Manager",),
+    # makes schedules and sees salaries, may not read Employee M-Pesa Accounts (their DocPerms: HR, M-Pesa Manager)
+    ACCOUNTS_PAYER: ("Accounts User", "M-Pesa Payer"),
 }
 PHONE = "254722000888"
 TILL = "835811"
@@ -226,6 +231,9 @@ class TestSalarySlipPayouts(pp._Base):
 
     # ------------------------------------------------------------ the list's selected slips
     def test_three_selected_slips_one_schedule_mixed_routes_one_pay_selected(self):
+        if party_accounts.TILL not in party_accounts.PROFILES[EMPACC].types:
+            # an employee's till is paid by B2B once the payee accounts work package (r4-wp2) is merged
+            self.skipTest("employee tills need WP2's payee account types")
         pe, slips = self._payroll()
         picked = [slips[f] for f in ("_T Slip Phone", "_T Slip Bank", "_T Slip Till")]
         with pp._as(PREPARER):
@@ -294,6 +302,20 @@ class TestSalarySlipPayouts(pp._Base):
         self.assertNotIn(slip, [x.reference_name for x in self._lines(again["name"])])
         self.assertTrue(any(f"({slip}): nothing is left to pay" in x for x in again["excluded"]), again["excluded"])
 
+    def test_a_slip_partly_planned_elsewhere_is_left_out_of_selected_slips_a_one_off_pays_the_rest(self):
+        pe, slips = self._payroll()
+        slip = slips["_T Slip Bank"]
+        with pp._as(PREPARER):
+            planned = schedule.from_payroll_entry(pe, b2b_settings=SETTINGS, b2c_settings=SETTINGS)["name"]
+            doc = frappe.get_doc(SCHEDULE, planned)
+            next(r for r in doc.lines if r.reference_name == slip).amount = 20000
+            doc.save()
+            self.assertRaisesRegex(frappe.ValidationError, f"None of these salary slips can be paid.*{slip}.*already "
+                                   f"planned on M-Pesa Payment Schedule {planned}", payroll.from_salary_slips,
+                                   [slip], b2b_settings=SETTINGS, b2c_settings=SETTINGS)
+        _, (line,) = self._one_off(slip)
+        self.assertEqual(flt(line.amount), 30000)
+
     def test_the_payroll_and_the_slip_cannot_be_cancelled_under_a_one_off(self):
         pe, slips = self._payroll()
         slip = slips["_T Slip Bank"]
@@ -332,6 +354,24 @@ class TestSalarySlipPayouts(pp._Base):
         self.assertEqual([a["name"] for a in status["accounts"]], [self.slip_accounts[("_T Slip Bank",
                                                                                        party_accounts.BANK)]])
         self.assertEqual(frappe.db.count(SCHEDULE, {"title": ["like", f"%{slip}%"]}), 0)
+
+    def test_who_may_not_read_employee_accounts_pays_the_default_only(self):
+        _, slips = self._payroll()
+        slip = slips["_T Slip Phone"]  # the phone is the default, a bank account the other
+        bank = self.slip_accounts[("_T Slip Phone", party_accounts.BANK)]
+        frappe.share.add_docshare(SLIP, slip, ACCOUNTS_PAYER, read=1, flags={"ignore_share_permission": True})
+        with pp._as(ACCOUNTS_PAYER):
+            self.assertFalse(frappe.has_permission(EMPACC, "read"))
+            status = payroll.salary_slip_status(slip)
+            self.assertTrue(status["can_prepare"])
+            self.assertEqual([(a["destination"], a["expected_name"]) for a in status["accounts"]],
+                             [(PHONE[:4] + "****" + PHONE[-4:], None)])
+            self.assertRaisesRegex(frappe.PermissionError, f"you may not read Employee M-Pesa Account {bank}",
+                                   payroll.from_salary_slip, slip, payee_account=bank, b2b_settings=SETTINGS)
+            answer = payroll.from_salary_slip(slip, b2c_settings=SETTINGS)
+        self.assertEqual((answer["route"], answer["amount"]), ("B2C Phone", 30000))
+        with pp._as(PREPARER):  # HR reads the accounts: both offered
+            self.assertEqual(len(payroll.salary_slip_status(slip)["accounts"]), 2)
 
     def test_the_shared_administrator_login_does_not_pay_a_one_off(self):
         # Administrator is refused at Pay Selected (permissions.require_named_user in prepare_payment: the
