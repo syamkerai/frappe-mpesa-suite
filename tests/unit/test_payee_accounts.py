@@ -627,7 +627,8 @@ def test_a_default_change_does_not_move_a_planned_line(site):
     ({"account_type": TILL, "shortcode": "835811", "account_number": None}, "B2B Till", "835811"),
 ])
 def test_payroll_pays_a_paybill_or_till_default_by_b2b(site, kw, route, destination):
-    site.frappe.session.user, site.frappe.user_roles = "accounts@example.com", {"Accounts User"}
+    # an Accounts User who may also see salaries: the payroll schedule lists them (decision D4)
+    site.frappe.session.user, site.frappe.user_roles = "accounts@example.com", {"Accounts User", "HR Manager"}
     site.frappe.db.table(EMPACC)["MEA-3"] = {
         "name": "MEA-3", "docstatus": 1, "employee": "EMP-3", "phone": None, "expected_name": "Achieng Mary",
         "active_from": NOW - datetime.timedelta(days=2), "is_default": 1, "name_mismatch": 0, **kw}
