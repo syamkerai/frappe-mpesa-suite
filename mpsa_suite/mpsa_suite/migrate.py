@@ -16,6 +16,7 @@ def after_migrate():
     access.after_migrate()  # Role Profiles, credential-field access, site permission overrides
     ensure_suite_settings()
     ensure_lookup_indexes()
+    sync_payee_accounts()
 
     if is_app_installed("payments"):
         update_settings_module()
@@ -28,6 +29,18 @@ def after_migrate():
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
+
+
+def sync_payee_accounts():
+    """The shipped bank paybills into the site (a release updates only what an admin has not
+    changed), then the payee accounts brought in step: the Employee type's old label renamed,
+    bank accounts linked to their bank's row, destination keys filled. Idempotent, every migrate
+    and at install (after_install runs this hook); never a patch, since each release may ship
+    new rows."""
+    from mpsa_suite.money_out import bank_paybills, party_accounts
+
+    bank_paybills.sync_shipped()
+    party_accounts.after_migrate()
 
 
 def backfill_b2b_entry_status():

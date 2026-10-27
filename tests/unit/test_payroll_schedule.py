@@ -155,7 +155,7 @@ def env(monkeypatch):
         env.payroll = importlib.import_module("mpsa_suite.money_out.payroll")
         env.balances = importlib.import_module("mpsa_suite.wallet.balances")
         env.pa = importlib.import_module("mpsa_suite.money_out.party_accounts")
-        monkeypatch.setattr(env.pa, "alert", lambda message, doc: env.alerts.append((doc.name, message)))
+        monkeypatch.setattr(env.pa, "alert", lambda message, doc, **kw: env.alerts.append((doc.name, message)))
         for module in (env.schedule, env.balances):
             monkeypatch.setattr(module, "get_datetime", _datetime)
         controller = importlib.import_module(
@@ -214,7 +214,7 @@ def env(monkeypatch):
             db.table("Employee")[emp] = {"name": emp, "employee_name": name, "status": status, "company": "Astral"}
         active = NOW - datetime.timedelta(days=2)
         db.table(EMPACC)["MEA-1"] = {"name": "MEA-1", "docstatus": 1, "employee": "EMP-1",
-                                     "account_type": "Bank Paybill (B2B)", "phone": None, "shortcode": "247247",
+                                     "account_type": "Bank Account (via Bank Paybill)", "phone": None, "shortcode": "247247",
                                      "account_number": "0123456789", "bank": "Equity", "expected_name": "Equity Bank",
                                      "active_from": active, "is_default": 1, "name_mismatch": 0}
         db.table(EMPACC)["MEA-2"] = {"name": "MEA-2", "docstatus": 1, "employee": "EMP-2", "account_type": "Phone (B2C)",

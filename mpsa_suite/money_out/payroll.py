@@ -3,8 +3,8 @@
 "Create M-Pesa Payment Schedule" on a submitted Payroll Entry builds ONE schedule for it: a line
 per submitted, not withheld Salary Slip of an active employee of the same company, for what the
 slip still has to pay in whole shillings, routed by the employee's default approved Employee
-M-Pesa Account (a bank paybill by B2B, a phone by B2C). Employees that cannot be paid that way
-are listed on the schedule under Not Included, with the reason. The schedule shows the Payroll
+M-Pesa Account (a bank account, paybill or till by B2B, a phone by B2C). Employees that cannot
+be paid that way are listed on the schedule under Not Included, with the reason. The schedule shows the Payroll
 Entry and each line its Salary Slip; a Payroll Entry has at most one live (not closed) schedule.
 From there the schedule's rules apply: Accounts prepare, an M-Pesa Payer pays on the day with
 Pay Selected after the 5-second confirm, and never before the line's Pay On.
@@ -165,20 +165,20 @@ def _line_for(header, payroll, slip, day) -> tuple:
     account = party_accounts.default_account(EMPLOYEE_ACCOUNT, slip.employee)
     if not account:
         if party_accounts.accounts_of(EMPLOYEE_ACCOUNT, slip.employee):
-            return None, "several approved M-Pesa accounts and none is the default: tick Default on one"
+            return None, "several approved M-Pesa accounts and none is the default: press Make Default on one"
         return None, "no approved M-Pesa account: add one under Employee > M-Pesa Accounts and have a manager approve it"
     acc = party_accounts.get_account(EMPLOYEE_ACCOUNT, account)
     route = party_accounts.ROUTE_FOR.get(acc.account_type)
     if route == party_accounts.B2C_PHONE:
         if amount > B2C_MAX_AMOUNT:
             return None, (f"KES {_money(amount)} is more than M-Pesa B2C pays at once (KES {B2C_MAX_AMOUNT:,}): pay it to "
-                          "a bank paybill account")
+                          "a bank, paybill or till account")
         if amount < B2C_MIN_AMOUNT:
             return None, f"KES {_money(amount)} is less than M-Pesa B2C pays (KES {B2C_MIN_AMOUNT})"
         if not header.b2c_settings:
             return None, "paid to a phone: pick Pay From (B2C)"
     elif not header.b2b_settings:
-        return None, "paid to a bank paybill: pick Pay From (B2B)"
+        return None, "paid to a bank, paybill or till account: pick Pay From (B2B)"
     line = {"planned_date": day, "party_type": "Employee", "party": slip.employee,
             "payee_account_doctype": EMPLOYEE_ACCOUNT, "payee_account": account, "amount": amount,
             "reference_doctype": owed.SLIP, "reference_name": slip.name, "entry_mode": "Book automatically",

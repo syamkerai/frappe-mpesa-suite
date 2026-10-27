@@ -21,6 +21,9 @@ B2B = "Mpesa B2B Payment Request"
 @pytest.fixture
 def env():
     frappe, saved = fake_frappe.install()
+    # every approval here is the confirmed Approve step (send_confirm.deliberate); the step itself is
+    # tested in test_send_confirm.py and test_payee_accounts.py
+    frappe.flags["mpsa_deliberate"] = [("Approve (unit test)", None)]
     try:
         frappe.db.table(SUITE)[SUITE] = {"supplier_account_hold_hours": 24, "allow_one_off_b2b": 0}
         frappe.db.table("Mpesa Settings")["Astral 600999"] = {
@@ -38,6 +41,7 @@ def account(env, name="MSA-1", **kw):
            "active_from": NOW - datetime.timedelta(hours=1), "is_default": 0, "owner": "clerk@example.com",
            "proof": "/private/files/letter.pdf", "creation": "2026-10-01"}
     row.update(kw)
+    row["destination_key"] = env.sa.pa.destination_key(row)
     env.frappe.db.table(ACC)[name] = row
     return row
 

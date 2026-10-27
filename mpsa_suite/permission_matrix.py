@@ -77,6 +77,13 @@ DOCTYPES = {
         SM: PREPARE, MM: ALL,
         HM: "rwcaRepmh", HU: "rwcaRep",
     },
+    # Round 4: the banks' paybills that payee bank accounts are paid through. Public numbers: read by who
+    # enters payee accounts (Accounts, HR, Purchase) and who pays them; changed by CONFIG_ROLES only, a
+    # shipped row never deleted (money_out.bank_paybills).
+    "M-Pesa Bank Paybill": {
+        SM: "rwcdRe", MM: "rwcdRe",
+        AM: "rRe", AU: "rRe", HM: "rRe", HU: "rRe", PM: "rRe", MP: "rRe", MV: "rRe",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -302,13 +309,18 @@ ENDPOINTS = {
         "Create / write the disbursement", ("via:_check_can_prepare",)),
     _D + "b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.allocate_amount_to_references": (
         "Create / write the disbursement", ("via:_check_can_prepare",)),
-    _D + "supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier": ("Read Supplier M-Pesa Account", ("perm",)),
+    _D + "supplier_m_pesa_account.supplier_m_pesa_account.accounts_for_supplier": (
+        "Read Supplier M-Pesa Account", ("via:accounts_for",)),
     _D + "supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.confirm_receiver_name": (
         "ADMIN_ROLES", ("via:confirm_receiver_name",)),
+    _D + "supplier_m_pesa_account.supplier_m_pesa_account.SupplierMPesaAccount.make_default": (
+        "FINANCE_ROLES or Purchase Manager + read the account", ("via:make_default",)),
     _D + "employee_m_pesa_account.employee_m_pesa_account.accounts_for_employee": (
         "Read Employee M-Pesa Account", ("via:accounts_for",)),
     _D + "employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.confirm_receiver_name": (
         "ADMIN_ROLES", ("via:confirm_receiver_name",)),
+    _D + "employee_m_pesa_account.employee_m_pesa_account.EmployeeMPesaAccount.make_default": (
+        "ADMIN_ROLES or HR Manager + read the account", ("via:make_default",)),
     # Admin and configuration
     "mpsa_suite.money_in.c2b_verify.release": ("CONFIG_ROLES", ("roles:RELEASE_ROLES",)),
     _D + "mpesa_settings.mpesa_settings.register_pull_transaction": ("ADMIN_ROLES", ("direct", "roles:ADMIN_ROLES")),
@@ -344,6 +356,8 @@ HELPERS = {
     "require_lab": ("mpsa_suite.sandbox_lab.guard", ("roles:ADMIN_ROLES",)),
     "confirm_receiver_name": ("mpsa_suite.money_out.party_accounts", ("roles:ADMIN_ROLES",)),
     "accounts_for": ("mpsa_suite.money_out.party_accounts", ("perm",)),
+    # the roles are the account DocType's profile.default_roles
+    "make_default": ("mpsa_suite.money_out.party_accounts", ("roles:default_roles", "perm")),
     "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:FINANCE_ROLES", "perm")),
     "_sendable": ("mpsa_suite.money_out.send_confirm", ("roles:PAYOUT_ROLES", "roles:ADMIN_ROLES", "perm")),
 }

@@ -5,11 +5,22 @@ const MPSA_B2B = "mpsa_suite.money_out.b2b";
 const MPSA_B2B_ENTRIES = "mpsa_suite.money_out.b2b_entries";
 const MPSA_FINANCE_ROLES = ["System Manager", "M-Pesa Manager", "Accounts Manager", "Accounts User"];
 const MPSA_ORDER_CLOSED = ["On Hold", "Closed", "Completed"];
+// The Daraja command of each account type B2B pays (a phone account is paid by B2C)
+const MPSA_B2B_COMMAND = {
+	Paybill: "BusinessPayBill",
+	"Till (Buy Goods)": "BusinessBuyGoods",
+	"Bank Account (via Bank Paybill)": "BusinessPayBill",
+};
 
 frappe.ui.form.on("Mpesa B2B Payment Request", {
 	setup(frm) {
+		// B2B pays a paybill, till or bank account (a phone is paid by B2C)
 		frm.set_query("supplier_mpesa_account", () => ({
-			filters: { docstatus: 1, ...(frm.doc.supplier ? { supplier: frm.doc.supplier } : {}) },
+			filters: {
+				docstatus: 1,
+				account_type: ["in", Object.keys(MPSA_B2B_COMMAND)],
+				...(frm.doc.supplier ? { supplier: frm.doc.supplier } : {}),
+			},
 		}));
 		frm.set_query("purchase_invoice", () => {
 			const filters = { docstatus: 1, outstanding_amount: [">", 0] };
@@ -26,11 +37,11 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 			if (frm.doc.company) filters.company = frm.doc.company;
 			return { filters };
 		});
-		// an employee is paid by B2B to an approved bank paybill account only
+		// an employee is paid by B2B to an approved bank, paybill or till account, never a phone
 		frm.set_query("employee_mpesa_account", () => ({
 			filters: {
 				docstatus: 1,
-				account_type: "Bank Paybill (B2B)",
+				account_type: ["in", Object.keys(MPSA_B2B_COMMAND)],
 				...(frm.doc.employee ? { employee: frm.doc.employee } : {}),
 			},
 		}));
@@ -99,11 +110,16 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 		// Display only: the server copies the destination from the approved account on save.
 		if (!frm.doc.employee_mpesa_account) return;
 		frappe.db
-			.get_value("Employee M-Pesa Account", frm.doc.employee_mpesa_account, ["employee", "shortcode", "account_number"])
+			.get_value("Employee M-Pesa Account", frm.doc.employee_mpesa_account, [
+				"employee",
+				"account_type",
+				"shortcode",
+				"account_number",
+			])
 			.then(({ message }) => {
 				if (!message) return;
 				if (!frm.doc.employee) frm.set_value("employee", message.employee);
-				frm.set_value("command_id", "BusinessPayBill");
+				if (MPSA_B2B_COMMAND[message.account_type]) frm.set_value("command_id", MPSA_B2B_COMMAND[message.account_type]);
 				frm.set_value("receiver_shortcode", message.shortcode);
 				frm.set_value("account_reference", message.account_number || "");
 			});
@@ -124,10 +140,7 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 			.then(({ message }) => {
 				if (!message) return;
 				if (!frm.doc.supplier) frm.set_value("supplier", message.supplier);
-				frm.set_value(
-					"command_id",
-					message.account_type === "Paybill" ? "BusinessPayBill" : "BusinessBuyGoods"
-				);
+				if (MPSA_B2B_COMMAND[message.account_type]) frm.set_value("command_id", MPSA_B2B_COMMAND[message.account_type]);
 				frm.set_value("receiver_shortcode", message.shortcode);
 				frm.set_value("account_reference", message.account_number || "");
 			});
@@ -149,7 +162,7 @@ const mpsa_b2b = {
 	},
 
 	// What is left to pay on a Salary Slip, and why; ``fill``: take employee, company, the
-	// employee's bank paybill account and the amount from it.
+	// employee's bank, paybill or till account and the amount from it.
 	async load_salary(frm, fill) {
 		const r = await frappe.xcall(`${MPSA_B2B}.salary_left`, {
 			salary_slip: frm.doc.salary_slip,
