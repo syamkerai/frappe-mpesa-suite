@@ -230,11 +230,49 @@ def test_paid_b2b_line_and_its_stated_charge(env):
     assert env.frappe.db.table(B2B)["MB2B-26-10-000012"]["mpesa_charge"] == 2.0
 
 
-def test_b2b_without_charges_gets_only_its_line(env):
-    b2b(env, debit_party_charges="")
+def test_b2b_charged_nothing_gets_only_its_line(env):
+    b2b(env, debit_party_charges="Business Pay Bill Charge|KES|0.00")
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM"]
+    assert env.calls.entries == [] and env.calls.logs == []
+
+
+def test_b2b_whose_charge_is_not_stated_gets_no_charge_line_and_one_match_log(env, monkeypatch):
+    # a till's Result (F2.2): no balance before it, and no status query left to ask
+    b2b(env, debit_party_charges="", command_id="BusinessBuyGoods")
+    monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: None)
+    status = importlib.import_module("mpsa_suite.money_out.b2b_status")
+    monkeypatch.setattr(status, "still_asking", lambda name: False)
     env.statement.after_payout(B2B, "MB2B-26-10-000012")
     assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM"]
     assert env.calls.entries == []
+    (result, method), kw = env.calls.logs[0]
+    assert (result, method, kw["reference_name"], kw["once"]) == ("Ambiguous", "Payout Charge", "MB2B-26-10-000012", True)
+    assert "Charge not stated" in kw["details"]
+
+
+def test_b2b_whose_charge_a_status_query_may_still_give_is_left_quietly(env, monkeypatch):
+    b2b(env, debit_party_charges="")
+    monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: None)
+    status = importlib.import_module("mpsa_suite.money_out.b2b_status")
+    monkeypatch.setattr(status, "still_asking", lambda name: True)
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert [line["receipt"] for line in env.calls.lines] == ["UJMTM632YM"] and env.calls.logs == []
+
+
+def test_b2b_charge_from_the_working_balance_gets_its_line(env, monkeypatch):
+    b2b(env, debit_party_charges="")
+    monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: 3.0)
+    env.statement.after_payout(B2B, "MB2B-26-10-000012")
+    assert [(line["receipt"], line["amount"]) for line in env.calls.lines] == [("UJMTM632YM", 10.0), ("CHG-UJMTM632YM", 3.0)]
+    assert env.calls.entries == [("BT-CHG-UJMTM632YM", 3.0)]
+
+
+def test_a_stated_b2b_charge_wins_over_the_balance(env, monkeypatch):
+    b2b(env, debit_party_charges="Business Buy Goods Charge|KES|3.00")
+    monkeypatch.setattr(env.statement, "b2b_balance_charge", lambda p: pytest.fail("looked at the balances"))
+    p = env.statement.load(B2B, "MB2B-26-10-000012")
+    assert env.statement.charge_for(p) == 3.0
 
 
 def test_b2b_paid_after_its_request_was_cancelled_still_gets_its_lines(env):
@@ -351,13 +389,15 @@ def test_a_failing_line_never_breaks_the_result_job(env, monkeypatch):
 
 
 def test_sweep_skips_a_b2b_that_was_charged_nothing(env, monkeypatch):
-    b2b(env, debit_party_charges="", bank_transaction="BT-UJMTM632YM")
+    b2b(env, debit_party_charges="Business Pay Bill Charge|KES|0.00", bank_transaction="BT-UJMTM632YM")
     b2b(env, name="MB2B-2", transaction_id="UJMTM6331C")
+    # a till whose charge was not stated: looked for again until a status query or the balance gives it
+    b2b(env, name="MB2B-3", transaction_id="UJRSN5BOEH", debit_party_charges="", bank_transaction="BT-UJRSN5BOEH")
     fed = []
     monkeypatch.setattr(env.statement, "feed", lambda doctype, name: fed.append(name))
     env.frappe.get_all = lambda doctype, **kw: env.frappe.db.get_all(doctype, filters=kw.get("filters"))
     env.statement.sweep_missing()
-    assert fed == ["MB2B-2"]
+    assert fed == ["MB2B-2", "MB2B-3"]
 
 
 # ---------------------------------------------------------------- reconciliation

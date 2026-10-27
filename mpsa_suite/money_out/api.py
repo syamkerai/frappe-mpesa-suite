@@ -1,4 +1,4 @@
-"""HTTP endpoints for Reversal, B2B and B2C Transaction Status.
+"""HTTP endpoints for Reversal, B2B and B2C / B2B Transaction Status.
 
 Safaricom-facing endpoints go through ``@safaricom_callback`` (IP allow-list, URL
 token, integration user). Each API has its own Result URL and its own QueueTimeOut
@@ -10,7 +10,7 @@ import frappe
 from ..daraja.callbacks import KIND_RESULT, TOKEN_PARAM, callback_token, safaricom_callback
 from ..daraja.guard import token_matches
 from ..permissions import ADMIN_ROLES, PAYOUT_ROLES, require
-from . import b2b, b2c_status, reversal
+from . import b2b, b2b_status, b2c_status, reversal
 
 ACCEPTED = {"ResultCode": 0, "ResultDesc": "Accepted"}
 PAYOUT_OR_ADMIN = tuple(dict.fromkeys(PAYOUT_ROLES + ADMIN_ROLES))
@@ -105,6 +105,15 @@ def check_b2c_status(b2c_request: str) -> str:
     require(PAYOUT_OR_ADMIN)
     frappe.get_doc("B2C Disbursement Request", b2c_request).check_permission("read")
     return b2c_status.start_query(b2c_request)
+
+
+@frappe.whitelist(methods=["POST"])
+def check_b2b_status(b2b_request: str) -> str:
+    """Ask Safaricom about a B2B payout: what a till's Result left out (receiver, charge, time), or
+    what happened to one whose Result never came."""
+    require(PAYOUT_OR_ADMIN)
+    frappe.get_doc("Mpesa B2B Payment Request", b2b_request).check_permission("read")
+    return b2b_status.start_query(b2b_request)
 
 
 @frappe.whitelist(methods=["POST"])

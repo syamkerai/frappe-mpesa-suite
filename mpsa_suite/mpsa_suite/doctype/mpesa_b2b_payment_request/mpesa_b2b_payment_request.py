@@ -16,7 +16,7 @@ SERVER_FIELDS = (
     "error_code", "error_message", "queue_timed_out", "result_code", "result_desc", "transaction_id",
     "trans_completed_time", "receiver_public_name", "receiver_name_mismatch", "debit_party_charges",
     "debit_account_balance", "payment_entry", "journal_entry", "entry_status", "entry_note",
-    "entry_attempted_on", "entry_alerted_on", "send_started_on",
+    "entry_attempted_on", "entry_alerted_on", "send_started_on", "completed_time_estimated",
 )
 # A request in one of these states may have reached M-Pesa.
 MAY_HAVE_PAID = ("Initiated", "Paid", "Unknown")

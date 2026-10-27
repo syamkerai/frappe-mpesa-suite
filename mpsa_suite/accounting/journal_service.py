@@ -43,11 +43,13 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
         # Credit the paid_from account (the Utility account's own GL when it has one)
         from mpsa_suite.wallet.accounts import b2c_utility_gl
 
+        cost_center = salary_cost_center(b2c_disbursement, b2c_disbursement_ref)
         je.append(
             "accounts",
             {
                 "account": b2c_utility_gl(b2c_disbursement_ref) or b2c_disbursement.paid_from,
                 "credit_in_account_currency": b2c_disbursement_ref.allocated_amount,
+                "cost_center": cost_center,
             },
         )
 
@@ -62,6 +64,7 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
                 "reference_type": "Payroll Entry",
                 "reference_name": b2c_disbursement_ref.payroll_entry,
                 "b2c_payment_disbursement": b2c_disbursement.name,
+                "cost_center": cost_center,
             },
         )
 
@@ -71,3 +74,17 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Journal Service Error")
         raise  # the caller rolls back and the B2C accounting sweep retries
+
+
+def salary_cost_center(b2c_disbursement, b2c_disbursement_ref):
+    """Both rows of a salary payout's entry on one cost center (handover F5): the Payroll Entry's,
+    else the shortcode's, else the company's default."""
+    from mpsa_suite.money_out.common import payout_cost_center
+
+    payroll = getattr(b2c_disbursement_ref, "payroll_entry", None)
+    cost_center = payroll and frappe.db.get_value("Payroll Entry", payroll, "cost_center")
+    if cost_center:
+        return cost_center
+    request = getattr(b2c_disbursement_ref, "b2c_disbursement_request", None)
+    settings = request and frappe.db.get_value("B2C Disbursement Request", request, "mpesa_settings")
+    return payout_cost_center(settings, b2c_disbursement.company)

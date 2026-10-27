@@ -25,6 +25,13 @@ frappe.listview_settings["Mpesa C2B Payment Register"] = {
 			);
 		}
 		window._mpesa_c2b_status_handler = (data) => {
+			if (data.status === "queued") {
+				// Safaricom took the query; its answer is still to come
+				if (window._mpesa_c2b_status_timeout) {
+					frappe.show_progress(__("Processing"), 70, 100, __(data.message));
+				}
+				return;
+			}
 			frappe.hide_progress();
 			if (window._mpesa_c2b_status_timeout) {
 				clearTimeout(window._mpesa_c2b_status_timeout);
@@ -104,10 +111,11 @@ frappe.listview_settings["Mpesa C2B Payment Register"] = {
 										__("Waiting for M-Pesa callback...")
 									);
 									window._mpesa_c2b_status_timeout = setTimeout(() => {
+										window._mpesa_c2b_status_timeout = null;
 										frappe.hide_progress();
 										frappe.show_alert({
 											message: __(
-												"No callback received from M-Pesa. Check Error Logs."
+												"No answer from M-Pesa yet. It is shown here when it comes."
 											),
 											indicator: "orange",
 										});

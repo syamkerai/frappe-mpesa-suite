@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "b2c_request",
+  "b2b_request",
   "mpesa_settings",
   "query_by",
   "query_value",
@@ -25,6 +26,8 @@
   "result_desc",
   "debit_party_name",
   "credit_party_name",
+  "debit_party_charges",
+  "debit_account_type",
   "ids_section",
   "conversation_id",
   "column_break_c",
@@ -36,7 +39,20 @@
    "fieldtype": "Link",
    "label": "B2C Request",
    "options": "B2C Disbursement Request",
-   "reqd": 1,
+   "mandatory_depends_on": "eval:!doc.b2b_request",
+   "depends_on": "eval:!doc.b2b_request",
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "b2b_request",
+   "fieldtype": "Link",
+   "label": "B2B Request",
+   "options": "Mpesa B2B Payment Request",
+   "description": "A B2B payout this query asked about: a till's Result names no receiver, charge or time, and Safaricom's answer fills them.",
+   "depends_on": "eval:doc.b2b_request",
    "search_index": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
@@ -157,6 +173,18 @@
    "read_only": 1
   },
   {
+   "fieldname": "debit_party_charges",
+   "fieldtype": "Data",
+   "label": "Charges",
+   "read_only": 1
+  },
+  {
+   "fieldname": "debit_account_type",
+   "fieldtype": "Data",
+   "label": "Paid From Account",
+   "read_only": 1
+  },
+  {
    "fieldname": "ids_section",
    "fieldtype": "Section Break",
    "label": "IDs",
@@ -182,7 +210,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-18 20:00:00.000000",
+ "modified": "2026-10-27 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa B2C Status Query",

@@ -29,12 +29,15 @@ def create_payment_entry(
     party_account=None,
     references=None,
     bank_gl=None,
+    dimensions=None,
 ):
     """
     Create a payment entry for a given customer and company.
 
     ``bank_gl``: the bank/cash account to use instead of the Mode of Payment's (a B2C payout
     from a till's Utility account mapped to a Bank Account of its own).
+    ``dimensions``: {field: value} of project and accounting dimensions to set (a payout copies
+    its document's).
 
     Args:
             company (str): Company for which the payment entry is being created.
@@ -122,6 +125,9 @@ def create_payment_entry(
     pe.letter_head = frappe.get_value("Company", company, "default_letter_head")
     pe.reference_date = reference_date
     pe.reference_no = reference_no
+    for field, value in (dimensions or {}).items():
+        if pe.meta.has_field(field):
+            pe.set(field, value)
     if pe.party_type in ["Customer", "Supplier", "Employee"]:
         bank_account = get_party_bank_account(pe.party_type, pe.party)
         if bank_account:

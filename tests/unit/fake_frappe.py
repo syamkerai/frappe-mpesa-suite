@@ -122,6 +122,9 @@ class FakeDB:
     def rollback(self, save_point=None):
         pass
 
+    def commit(self):
+        pass
+
 
 class FakeDoc:
     def __init__(self, frappe, doctype, row):

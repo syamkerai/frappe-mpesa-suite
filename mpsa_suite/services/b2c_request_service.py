@@ -11,7 +11,8 @@ from mpsa_suite.utils.phone import normalize_msisdn
 
 
 def validate_b2c_amount_and_party(doc) -> None:
-    """Daraja B2C takes whole shillings from 10 to 250,000 and a 2547/2541 MSISDN; refuse rather than round."""
+    """Daraja B2C takes whole shillings from 10 to 250,000 and a 2547/2541 MSISDN; refuse rather than round.
+    The shortcode's Transaction Limit and the Minimum B2C Payout apply too (payout_limit_problem)."""
     amount = flt(doc.amount)
     if amount <= 0:
         frappe.throw(f"B2C amount must be positive, got {doc.amount}")
@@ -22,11 +23,38 @@ def validate_b2c_amount_and_party(doc) -> None:
             frappe.throw(
                 f"M-Pesa B2C amount must be between {B2C_MIN_AMOUNT} and {B2C_MAX_AMOUNT:,}, got {doc.amount}"
             )
+        problem = payout_limit_problem(amount, doc.mpesa_settings)
+        if problem:
+            frappe.throw(problem)
         msisdn = normalize_msisdn(doc.phone_number)
         if not msisdn:
             frappe.throw(f"Invalid M-Pesa phone number {doc.phone_number!r} on {doc.name}")
         if msisdn != doc.phone_number:
             doc.db_set("phone_number", msisdn, update_modified=False)
+
+
+def min_payout_amount() -> float:
+    """M-Pesa Suite Settings' Minimum B2C Payout, never below what Daraja pays (KES 10)."""
+    from mpsa_suite.money_in.common import suite
+
+    try:
+        setting = flt(suite().get("min_payout_amount"))
+    except frappe.DoesNotExistError:
+        setting = 0
+    return max(float(B2C_MIN_AMOUNT), setting)
+
+
+def payout_limit_problem(amount, mpesa_settings: str | None) -> str | None:
+    """Why the shortcode may not pay ``amount`` by B2C (handover F7), or None: above its
+    Transaction Limit (0 = no limit), or below the Minimum B2C Payout. Checked when a B2C
+    Payment Disbursement row is saved and again when each payout is sent."""
+    limit = flt(frappe.db.get_value("Mpesa Settings", mpesa_settings, "transaction_limit")) if mpesa_settings else 0
+    if limit and flt(amount) > limit:
+        return f"Amount is above this shortcode's transaction limit of {limit:,.2f}"
+    minimum = min_payout_amount()
+    if flt(amount) < minimum:
+        return f"M-Pesa B2C pays at least KES {minimum:,.2f} (Minimum B2C Payout on M-Pesa Suite Settings); the amount is {flt(amount):,.2f}"
+    return None
 
 
 def create_b2c_request(doc_name: str) -> dict:

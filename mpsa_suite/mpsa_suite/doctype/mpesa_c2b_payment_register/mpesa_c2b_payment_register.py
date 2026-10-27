@@ -102,7 +102,7 @@ class MpesaC2BPaymentRegister(Document):
         self.set_missing_values()
 
     def after_insert(self):
-        from mpsa_suite.money_in.common import settings_for_shortcode
+        from mpsa_suite.money_in.common import as_user, settings_for_shortcode
 
         # by paybill or till, the same record every other C2B step uses
         settings_name = settings_for_shortcode(self.businessshortcode)
@@ -117,7 +117,11 @@ class MpesaC2BPaymentRegister(Document):
         frappe.db.savepoint("mpesa_c2b_auto_submit")
         try:
             self.db_set("submit_payment", 1)
-            self.submit()
+            # As Administrator, as the 2-minute matcher books it: the confirmation's job runs as
+            # the Integration User, who needs no right to submit registers or to read the
+            # customer and invoice a User Permission may hide (handover F1).
+            with as_user("Administrator"):
+                self.submit()
         except Exception as e:
             frappe.db.rollback(save_point="mpesa_c2b_auto_submit")
             self.docstatus = 0

@@ -7,13 +7,21 @@ frappe.ui.form.on("Mpesa Settings", {
 	},
 
 	refresh: function (frm) {
-		frappe.realtime.on("refresh_form", function () {
-			frm.reload_doc();
-		});
-		frappe.realtime.on("refresh_mpesa_dashboard", function () {
+		// Every listener once per form: refresh runs on each save and reload, and a listener
+		// added each time would reload the form (and answer the status dialog) many times over.
+		if (frm._mpesa_refresh_handler) {
+			frappe.realtime.off("refresh_form", frm._mpesa_refresh_handler);
+		}
+		frm._mpesa_refresh_handler = () => frm.reload_doc();
+		frappe.realtime.on("refresh_form", frm._mpesa_refresh_handler);
+		if (frm._mpesa_dashboard_handler) {
+			frappe.realtime.off("refresh_mpesa_dashboard", frm._mpesa_dashboard_handler);
+		}
+		frm._mpesa_dashboard_handler = () => {
 			frm.reload_doc();
 			frm.events.setup_account_balance_html(frm);
-		});
+		};
+		frappe.realtime.on("refresh_mpesa_dashboard", frm._mpesa_dashboard_handler);
 		frm.fields_dict["exchange_rates"].grid.get_field("currency").get_query = function () {
 			return {
 				filters: {
@@ -28,6 +36,13 @@ frappe.ui.form.on("Mpesa Settings", {
 			frappe.realtime.off("mpesa_transaction_status_update", frm._mpesa_status_handler);
 		}
 		frm._mpesa_status_handler = (data) => {
+			if (data.status === "queued") {
+				// Safaricom took the query; its answer is still to come
+				if (frm._mpesa_status_timeout) {
+					frappe.show_progress(__("Processing"), 70, 100, __(data.message));
+				}
+				return;
+			}
 			frappe.hide_progress();
 			if (frm._mpesa_status_timeout) {
 				clearTimeout(frm._mpesa_status_timeout);
@@ -174,10 +189,11 @@ frappe.ui.form.on("Mpesa Settings", {
 								);
 								// Auto-cancel progress if Safaricom never calls back
 								frm._mpesa_status_timeout = setTimeout(() => {
+									frm._mpesa_status_timeout = null;
 									frappe.hide_progress();
 									frappe.show_alert({
 										message: __(
-											"No callback received from M-Pesa. Check Error Logs."
+											"No answer from M-Pesa yet. It is shown here when it comes."
 										),
 										indicator: "orange",
 									});

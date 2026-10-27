@@ -8,6 +8,7 @@ APIs: ResultCode is an int ``0`` (Reversal, Transaction Status), a string ``"0"`
 dict, or absent.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -215,6 +216,25 @@ def to_number(value):
         return float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+def basic_amount(text) -> float | None:
+    """The amount of Safaricom's "{Amount={CurrencyCode=KES, MinimumAmount=189400, BasicAmount=1894.00}}"
+    (the only balance a Buy Goods Result gives), or None."""
+    match = re.search(r"BasicAmount\s*=\s*(-?[\d,]+(?:\.\d+)?)", str(text or ""))
+    return float(match.group(1).replace(",", "")) if match else None
+
+
+def b2b_balance_text(value, account: str = "Working Account"):
+    """A B2B Result's balance as "<account>|KES|<current>|<available>", the form the wallet reads.
+    The "{Amount=...}" form names no account: B2B always pays from Working (MMF). Anything else,
+    and an "{Amount=...}" with no readable amount, is kept as Safaricom sent it."""
+    text = str(value or "").strip()
+    amount = basic_amount(text) if "{" in text else None
+    if amount is None:
+        return value
+    currency = re.search(r"CurrencyCode\s*=\s*([A-Za-z]{3})", text)
+    return f"{account}|{currency.group(1).upper() if currency else 'KES'}|{amount:.2f}|{amount:.2f}"
 
 
 def reversal_outcome(result: dict) -> str:

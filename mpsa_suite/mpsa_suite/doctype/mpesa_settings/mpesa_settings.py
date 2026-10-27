@@ -6,7 +6,7 @@ import re
 import time
 from json import dumps, loads
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import frappe
 from frappe import _
@@ -39,7 +39,7 @@ from ....utils.utils import (
     erpnext_app_import_guard,
     validate_phone_number,
 )
-from ...api.m_pesa_api import get_account_balance, sanitize_mobile_number
+from ...api.m_pesa_api import get_account_balance, publish_transaction_status, sanitize_mobile_number
 from .mpesa_connector import MpesaConnector
 
 
@@ -513,7 +513,7 @@ def trigger_transaction_status(mpesa_settings, transaction_id, remarks="OK"):
             site_url
             + "/api/method/mpsa_suite.mpsa_suite.api.m_pesa_api.handle_queue_timeout"
         )
-        result_url = with_token(
+        result_url = (
             site_url
             + "/api/method/mpsa_suite.mpsa_suite.api.m_pesa_api.handle_transaction_status_result"
         )
@@ -537,6 +537,11 @@ def trigger_transaction_status(mpesa_settings, transaction_id, remarks="OK"):
                 "method": "POST",
             }
         ).insert(ignore_permissions=True)
+        # The result names this request on its URL: it is matched by a locking read that waits
+        # while the ack is being recorded (Safaricom has answered 0.4 s after the ack, handover F11).
+        data = loads(integration_request.data)
+        data["result_url"] = with_token(f"{result_url}?{urlencode({'ref': integration_request.name})}")
+        integration_request.db_set("data", dumps(data), update_modified=False)
         frappe.db.commit()
 
         frappe.enqueue(
@@ -548,13 +553,8 @@ def trigger_transaction_status(mpesa_settings, transaction_id, remarks="OK"):
             deduplicate=True,
         )
 
-        frappe.publish_realtime(
-            event="mpesa_transaction_status",
-            message={
-                "status": "queued",
-                "message": _("Transaction status check queued for processing"),
-            },
-            user=frappe.session.user,
+        publish_transaction_status(
+            frappe.session.user, "queued", _("Transaction status check queued for processing")
         )
         return {"status": "queued", "message": "Transaction status check queued"}
 
@@ -604,13 +604,11 @@ def process_transaction_status(integration_request_name):
             integration_request.save(ignore_permissions=True)
             frappe.db.commit()
 
-            frappe.publish_realtime(
-                event="mpesa_transaction_status",
-                message={
-                    "status": "success",
-                    "message": f"Transaction Status: {response.get('ResponseDescription')}",
-                },
-                user=frappe.session.user,
+            # only the ack: the answer comes in its own result (m_pesa_api.process_mpesa_integration_request)
+            publish_transaction_status(
+                integration_request.owner,
+                "queued",
+                _("Safaricom accepted the query for {0}; waiting for its answer.").format(transaction_id),
             )
         else:
             error_msg = f"{response.get('errorCode', 'Unknown')}: {response.get('errorMessage', 'Unknown error')}"
@@ -619,11 +617,7 @@ def process_transaction_status(integration_request_name):
             integration_request.save(ignore_permissions=True)
             frappe.db.commit()
 
-            frappe.publish_realtime(
-                event="mpesa_transaction_status",
-                message={"status": "error", "message": error_msg},
-                user=frappe.session.user,
-            )
+            publish_transaction_status(integration_request.owner, "error", error_msg)
 
     except Exception as e:
         integration_request.status = "Failed"
@@ -632,11 +626,7 @@ def process_transaction_status(integration_request_name):
         frappe.db.commit()
 
         frappe.log_error(title="Mpesa Transaction Status Process Error", message=str(e))
-        frappe.publish_realtime(
-            event="mpesa_transaction_status",
-            message={"status": "error", "message": f"Error checking status: {str(e)}"},
-            user=frappe.session.user,
-        )
+        publish_transaction_status(integration_request.owner, "error", f"Error checking status: {str(e)}")
 
 
 @frappe.whitelist()

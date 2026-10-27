@@ -188,6 +188,7 @@ def _record_result(result: dict, ref: str | None) -> None:
         # below is lost or fails before it commits (only rows Paid before the release have none)
         entry = {"entry_status": "Entry Not Made", "entry_note": "Booking the entry…",
                  "entry_attempted_on": now_datetime()}
+    completed = daraja.parse_daraja_datetime(values.get("TransCompletedTime"))
     doc.db_set(
         {
             **entry,
@@ -198,14 +199,20 @@ def _record_result(result: dict, ref: str | None) -> None:
             "originator_conversation_id": doc.originator_conversation_id
             or result.get("OriginatorConversationID"),
             "transaction_id": result.get("TransactionID"),
-            "trans_completed_time": daraja.parse_daraja_datetime(values.get("TransCompletedTime")),
+            # a Buy Goods (till) Result states no time: when it arrived, flagged as estimated
+            # until a Transaction Status query gives Safaricom's own (money_out.b2b_status)
+            "trans_completed_time": completed or (now_datetime() if outcome == "Paid" else None),
+            "completed_time_estimated": 1 if outcome == "Paid" and not completed else 0,
             "receiver_public_name": values.get("ReceiverPartyPublicName"),
             "debit_party_charges": values.get("DebitPartyCharges"),
             # live results name the account ("Working Account|KES|1476.00|..."); Daraja's sample
-            # sends DebitAccountBalance instead
-            "debit_account_balance": values.get("DebitPartyAffectedAccountBalance")
-            or values.get("DebitAccountBalance")
-            or values.get("DebitAccountCurrentBalance"),
+            # sends DebitAccountBalance instead, and a till's Result only
+            # "{Amount={CurrencyCode=KES, ..., BasicAmount=1894.00}}", stored as Working's balance
+            "debit_account_balance": daraja.b2b_balance_text(
+                values.get("DebitPartyAffectedAccountBalance")
+                or values.get("DebitAccountBalance")
+                or values.get("DebitAccountCurrentBalance")
+            ),
         },
         notify=True,
     )
@@ -231,6 +238,14 @@ def _record_result(result: dict, ref: str | None) -> None:
             enqueue_after_commit=True,
             name=doc.name,
         )
+
+    if outcome == "Paid" and not (cstr(values.get("ReceiverPartyPublicName")).strip()
+                                  and cstr(values.get("DebitPartyCharges")).strip()):
+        # a till's Result names no receiver and states no charge: Safaricom's status answer
+        # for the receipt does (handover F2.4)
+        from . import b2b_status
+
+        b2b_status.ask_later(doc.name)
 
 
 def handle_queue_timeout(payload: dict, ref: str | None) -> None:

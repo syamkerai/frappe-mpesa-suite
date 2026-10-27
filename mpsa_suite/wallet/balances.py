@@ -8,6 +8,14 @@ the next Account Balance should be. When it differs, money moved that the ERP ha
 came): the balance is marked "Gap" with the amount, within minutes when balances are asked
 for on a schedule. Importing the statement that holds the missing rows explains it.
 
+With no statement imported (or Create Bank Transactions off), each balance is compared with the
+sub-account's balance before it instead: what moved in between must be what the ERP's payout
+records (B2B from Working, B2C from Utility, each with its charge) and receipts (C2B and STK
+into the account that collects) say. Money the ERP did not send (a payment made on the M-Pesa
+portal) shows as a "Gap" with its amount, and Notify Role is alerted; the same movement in
+opposite directions on two sub-accounts of one result is a transfer between them. A reserved
+amount with no ERP payout in flight is a warning that something is pending outside the ERP.
+
 available() says, approximately, how much a sub-account can pay right now, for the payment
 schedule's Pay Selected summary and the M-Pesa Payments Due report.
 """
@@ -27,13 +35,16 @@ QUIET_MINUTES = 10
 # A balance still unchecked after this long (a payout stuck in flight) is checked anyway.
 GIVE_UP_HOURS = 24
 IN_FLIGHT = {"B2C Disbursement Request": ("Initiated", "Status Unknown"), "Mpesa B2B Payment Request": ("Initiated", "Unknown")}
+# How far back the balance before may be, for the movement check.
+MOVEMENT_DAYS = 7
 # Which payouts a sub-account pays, and the field of a B2C Result that gives its available funds.
 PAID_FROM = {accounts.WORKING: "Mpesa B2B Payment Request", accounts.UTILITY: "B2C Disbursement Request"}
 B2C_FUNDS = {accounts.WORKING: "working_acct_avlbl_funds", accounts.UTILITY: "utility_acct_avlbl_funds"}
 
 
 # ---------------------------------------------------------------- recording
-def record(settings, sub_account, balance, taken_at, source, reference_doctype=None, reference_name=None):
+def record(settings, sub_account, balance, taken_at, source, reference_doctype=None, reference_name=None,
+           available=None, reserved=None):
     if not sub_account or balance is None or not frappe.db.table_exists(SNAPSHOT):
         return None
     shortcode = cstr(frappe.db.get_value("Mpesa Settings", settings, "business_shortcode")).strip()
@@ -45,6 +56,7 @@ def record(settings, sub_account, balance, taken_at, source, reference_doctype=N
     doc = frappe.new_doc(SNAPSHOT)
     doc.update({**key, "mpesa_settings": settings, "balance": flt(balance), "reference_doctype": reference_doctype,
                 "reference_name": reference_name,
+                **{k: flt(v) for k, v in (("available", available), ("reserved", reserved)) if v is not None},
                 "check_status": "Agrees" if source == "Statement" else "Not Checked",
                 "note": "The statement's own balance: later balances are checked from it." if source == "Statement" else None})
     doc.flags.ignore_permissions = True
@@ -64,6 +76,23 @@ def parse_balances(text) -> dict:
             out[sub] = float(fields[2].replace(",", ""))
         except ValueError:
             continue
+    return out
+
+
+def parse_parts(text) -> dict:
+    """{sub-account: (current, available, reserved)} from "Utility Account|KES|4002.91|3902.91|100.00|0.00";
+    available is the current balance, and reserved 0, when a result gives no more."""
+    out = {}
+    for part in cstr(text).split("&"):
+        fields = [f.strip() for f in part.split("|")]
+        sub = accounts.from_balance_text(part)
+        if not sub or len(fields) < 3 or not fields[2]:
+            continue
+        try:
+            current, available, reserved = (float(f.replace(",", "")) if f else None for f in (fields[2:5] + ["", ""])[:3])
+        except ValueError:
+            continue
+        out[sub] = (current, current if available is None else available, reserved or 0.0)
     return out
 
 
@@ -96,18 +125,46 @@ def from_account_balance(settings, account_balance, completed_time=None, referen
     """Record each sub-account of an Account Balance result. Never raises: called from the callback."""
     try:
         taken_at = parse_time(completed_time)
-        return [
-            record(settings, sub, balance, taken_at, "Account Balance", "Integration Request", reference_name)
-            for sub, balance in parse_balances(account_balance).items()
-        ]
+        names = []
+        for sub, (current, available, reserved) in parse_parts(account_balance).items():
+            name = record(settings, sub, current, taken_at, "Account Balance", "Integration Request", reference_name,
+                          available=available, reserved=reserved)
+            if name and reserved > tolerance():
+                warn_reserved(name)
+            names.append(name)
+        return names
     except Exception:
         frappe.log_error(title=f"M-Pesa balance snapshot failed for {settings}", message=frappe.get_traceback())
         return []
 
 
+def warn_reserved(name: str) -> None:
+    """A reserved amount while no ERP payout is in flight: something is pending outside the ERP
+    (a payment started on the M-Pesa portal). Noted on the snapshot; Notify Role is alerted when
+    the balance before had no such warning for the same amount (balances asked for every few
+    minutes would repeat it)."""
+    s = frappe.get_doc(SNAPSHOT, name)
+    if s.get("warning") or in_flight(s.mpesa_settings, s.taken_at):
+        return
+    warning = (f"KES {flt(s.reserved):,.2f} of {s.sub_account} is reserved at Safaricom with no ERP payout in "
+               "flight: something is pending outside the ERP (a payment started on the M-Pesa portal?).")
+    frappe.db.set_value(SNAPSHOT, name, "warning", warning, update_modified=False)
+    prev = previous(s)
+    if prev and frappe.db.get_value(SNAPSHOT, prev.name, "warning") == warning:
+        return
+    _alert(f"M-Pesa {s.shortcode}: {warning}", s)
+
+
+def _alert(message: str, s) -> None:
+    from ..money_out.party_accounts import alert
+
+    alert(message, s)  # Notify Role on M-Pesa Suite Settings; never raises
+
+
 # ---------------------------------------------------------------- checking
 def check(name: str) -> str:
-    """Compare one Account Balance snapshot with the statement anchor plus the lines since."""
+    """Compare one Account Balance snapshot with the statement anchor plus the lines since, or,
+    with no statement imported, with the balance before it plus what the ERP moved since."""
     s = frappe.get_doc(SNAPSHOT, name)
     anchor = frappe.db.get_value(
         SNAPSHOT,
@@ -118,8 +175,7 @@ def check(name: str) -> str:
         order_by="taken_at desc",
     )
     if not anchor:
-        return _set(s, "Cannot Check", note=f"Import a {s.sub_account} statement first: its balance is where the "
-                    "lines are counted from.")
+        return check_movement(s)
     bank_account = accounts.bank_account(s.mpesa_settings, s.sub_account)
     own = accounts.separate(s.mpesa_settings, s.sub_account)
     lines = _lines_sql(own)
@@ -156,8 +212,143 @@ def _lines_sql(own: bool) -> str:
     return "(mpesa_sub_account = %(sub)s OR mpesa_sub_account IS NULL)" if own else "mpesa_sub_account = %(sub)s"
 
 
-def _set(s, status, expected=None, difference=None, anchor=None, note=None) -> str:
-    values = {"check_status": status, "anchor": anchor, "checked_on": now_datetime(), "note": note,
+def check_movement(s) -> str:
+    """With no statement to count from: the movement since the sub-account's balance before this
+    one (within MOVEMENT_DAYS), against what the ERP moved it by (erp_movement)."""
+    prev = previous(s)
+    if not prev:
+        return _set(s, "Cannot Check", note=(
+            f"Import a {s.sub_account} statement, or ask for balances again: there is no earlier {s.sub_account} "
+            f"balance in the last {MOVEMENT_DAYS} days to compare this one with."))
+    moved = erp_movement(s.mpesa_settings, s.sub_account, prev.taken_at, s.taken_at)
+    stale = get_datetime(s.taken_at) < add_to_date(now_datetime(), hours=-GIVE_UP_HOURS)
+    if moved.waiting and not stale:
+        return "Not Checked"  # a payout's charge a status query may still give: checked on a later run
+    seen = round(flt(s.balance) - flt(prev.balance), 2)
+    expected = round(flt(prev.balance) + moved.amount, 2)
+    difference = round(flt(s.balance) - expected, 2)
+    links = {"previous_snapshot": prev.name, "erp_movement": moved.amount}
+    if abs(difference) <= tolerance():
+        status = "Explained" if s.check_status == "Gap" else "Agrees"
+        return _set(s, status, expected, difference, note=moved.note or None, **links)
+    partner = transfer_partner(s, difference)
+    if partner:
+        return _set(s, "Explained", expected, difference, note=(
+            f"{s.sub_account} moved {difference:+,.2f} and {partner} {-difference:+,.2f} more than the ERP recorded, "
+            f"in the same result: a transfer between them (on the M-Pesa portal), nothing left the shortcode. If "
+            f"they post to different Bank Accounts, book it as an Internal Transfer. {moved.note}").strip(), **links)
+    note = (f"{s.sub_account} moved {seen:+,.2f} since {get_datetime(prev.taken_at)}; the ERP recorded "
+            f"{moved.amount:+,.2f}; {difference:+,.2f} was not sent or received by the ERP (a transaction on the M-Pesa "
+            f"portal, a funding, a sweep to the bank, a reversal). {moved.note}").strip()
+    _set(s, "Gap", expected, difference, note=note, **links)
+    _alert(f"M-Pesa {s.shortcode}: {note}", s)
+    return "Gap"
+
+
+def previous(s):
+    """The sub-account's Account Balance before ``s`` (MOVEMENT_DAYS at most), or None."""
+    prev = frappe.db.get_value(
+        SNAPSHOT,
+        {"shortcode": s.shortcode, "sub_account": s.sub_account, "source": "Account Balance",
+         "taken_at": ["<", s.taken_at]},
+        ["name", "balance", "taken_at"],
+        as_dict=True,
+        order_by="taken_at desc",
+    )
+    if not prev or get_datetime(prev.taken_at) < get_datetime(s.taken_at) - datetime.timedelta(days=MOVEMENT_DAYS):
+        return None
+    return prev
+
+
+def transfer_partner(s, difference: float) -> str | None:
+    """Another sub-account of the same Account Balance result whose unexplained movement is the
+    opposite of this one's: money moved between the two."""
+    for other in frappe.get_all(
+        SNAPSHOT,
+        filters={"shortcode": s.shortcode, "source": "Account Balance", "taken_at": s.taken_at,
+                 "sub_account": ["!=", s.sub_account]},
+        fields=["name", "mpesa_settings", "sub_account", "balance", "taken_at"],
+    ):
+        prev = previous(other)
+        if not prev:
+            continue
+        moved = erp_movement(other.mpesa_settings, other.sub_account, prev.taken_at, other.taken_at)
+        other_difference = round(flt(other.balance) - flt(prev.balance) - moved.amount, 2)
+        if abs(other_difference + difference) <= tolerance():
+            return other.sub_account
+    return None
+
+
+def erp_movement(settings, sub_account, after, until):
+    """_dict(amount, waiting, note): what the ERP's records moved ``sub_account`` of the shortcode by
+    between two balances (after < completed <= until). Paid B2B leave Working and Paid B2C leave
+    Utility, each with its charge (stated, booked, else the B2C Charge Bands); C2B receipts and
+    STK payments arrive in the sub-account that collects. ``waiting``: a B2B charge is not known
+    yet and a status query may still give it."""
+    from ..money_out.b2b_status import still_asking
+    from ..money_out.statement import B2B, B2C, band_charge, charge_bands, parse_charges
+
+    wallet = _wallet(settings)
+    amount, waiting, unknown = 0.0, False, []
+    if sub_account in PAID_FROM:
+        doctype = PAID_FROM[sub_account]
+        completed = "trans_completed_time" if doctype == B2B else "transaction_completed_datetime"
+        fields = ["name", "amount", *(["debit_party_charges"] if doctype == B2B else []),
+                  *(["mpesa_charge"] if frappe.get_meta(doctype).has_field("mpesa_charge") else [])]
+        bands = charge_bands() if doctype == B2C else []
+        for r in frappe.get_all(
+            doctype,
+            filters=[[doctype, "mpesa_settings", "in", wallet], [doctype, "docstatus", "in", [1, 2] if doctype == B2B else [1]],
+                     [doctype, "status", "=", "Paid"], [doctype, completed, ">", after], [doctype, completed, "<=", until]],
+            fields=fields,
+        ):
+            if cstr(r.get("debit_party_charges")).strip():
+                charge = parse_charges(r.debit_party_charges)
+            elif flt(r.get("mpesa_charge")):
+                charge = flt(r.mpesa_charge)
+            elif doctype == B2C:
+                charge = flt(band_charge(bands, r.amount)) if bands else 0.0
+            else:
+                charge = 0.0
+                unknown.append(r.name)
+                waiting = waiting or still_asking(r.name)
+            amount -= flt(r.amount) + charge
+    if sub_account == accounts.receiving(settings):
+        amount += _received(settings, wallet, after, until)
+    note = f"No charge is known yet for {', '.join(unknown)}: counted as 0." if unknown else ""
+    return frappe._dict(amount=round(amount, 2), waiting=waiting, note=note)
+
+
+def _received(settings, wallet, after, until) -> float:
+    """Customer payments the ERP holds for the shortcode between two balances: C2B receipts, and
+    STK payments that no C2B receipt carries."""
+    from ..money_in.common import EXPRESS, REGISTER
+
+    row = frappe.db.get_value("Mpesa Settings", settings, ["business_shortcode", "till_number"], as_dict=True) or {}
+    codes = [cstr(v).strip() for v in row.values() if cstr(v).strip()]
+    stamp = "%Y%m%d%H%M%S"
+    registers = frappe.get_all(
+        REGISTER,
+        filters=[[REGISTER, "businessshortcode", "in", codes or [""]], [REGISTER, "docstatus", "<", 2],
+                 [REGISTER, "transtime", ">", get_datetime(after).strftime(stamp)],
+                 [REGISTER, "transtime", "<=", get_datetime(until).strftime(stamp)]],
+        fields=["transid", "transamount"],
+    )
+    total = sum(flt(r.transamount) for r in registers)
+    receipts = {cstr(r.transid).strip().upper() for r in registers}
+    for r in frappe.get_all(
+        EXPRESS,
+        filters=[[EXPRESS, "settings", "in", wallet], [EXPRESS, "status", "=", "Completed"],
+                 [EXPRESS, "transaction_date", ">", after], [EXPRESS, "transaction_date", "<=", until]],
+        fields=["transaction_id", "amount"],
+    ):
+        if cstr(r.transaction_id).strip().upper() not in receipts:
+            total += flt(r.amount)
+    return total
+
+
+def _set(s, status, expected=None, difference=None, anchor=None, note=None, **links) -> str:
+    values = {"check_status": status, "anchor": anchor, "checked_on": now_datetime(), "note": note, **links,
               # Currency columns hold no NULL: a check that compared nothing leaves them as they were
               **{k: v for k, v in (("expected_balance", expected), ("difference", difference)) if v is not None}}
     frappe.db.set_value(SNAPSHOT, s.name, values, update_modified=False)

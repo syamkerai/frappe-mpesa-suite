@@ -193,3 +193,38 @@ def log_callback(payload: dict, description: str, doctype: str, name: str | None
         reference_docname=name,
         status=status,
     )
+
+
+# ---------------------------------------------------------------- payout entries
+def payout_cost_center(settings: str | None, company: str | None, dt: str | None = None, dn: str | None = None):
+    """The cost center of a payout's entries (handover F5): the paid document's own, then the
+    shortcode's (Mpesa Settings, Cost Center), then the company's default. A Payment Entry follows
+    its document, so the payable it clears nets out by cost center; a charge follows the shortcode
+    (no document). A cost center of another company is passed over."""
+    candidates = []
+    if dt and dn and frappe.get_meta(dt).has_field("cost_center"):
+        candidates.append(frappe.db.get_value(dt, dn, "cost_center"))
+    if settings and frappe.get_meta(MPESA_SETTINGS_DOCTYPE).has_field("cost_center"):
+        candidates.append(frappe.db.get_value(MPESA_SETTINGS_DOCTYPE, settings, "cost_center"))
+    for cost_center in candidates:
+        if not cost_center:
+            continue
+        owner = company and frappe.db.get_value("Cost Center", cost_center, "company")
+        if not owner or owner == company:
+            return cost_center
+    import erpnext
+
+    return erpnext.get_default_cost_center(company)
+
+
+def document_dimensions(dt: str | None, dn: str | None) -> dict:
+    """The paid document's project and accounting dimensions ({field: value}, set ones only), for
+    its payout entry."""
+    if not dt or not dn:
+        return {}
+    from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_accounting_dimensions
+
+    meta = frappe.get_meta(dt)
+    fields = [f for f in dict.fromkeys(("project", *get_accounting_dimensions())) if meta.has_field(f)]
+    values = frappe.db.get_value(dt, dn, fields, as_dict=True) if fields else None
+    return {f: values.get(f) for f in fields if values and values.get(f)}

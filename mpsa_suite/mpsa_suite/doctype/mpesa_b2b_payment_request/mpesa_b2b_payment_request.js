@@ -67,6 +67,25 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 		}
 		if (frm.doc.docstatus === 0 && !frm.is_new()) mpsa_b2b.load_left(frm, false);
 		mpsa_b2b.entry_actions(frm);
+		// Ask Safaricom (Transaction Status): what a till's Result left out (receiver, charge,
+		// time), or what happened to a payment whose Result never came. The server checks the roles.
+		const mpsa_flags = frappe.boot.mpsa || {};
+		if (
+			frm.doc.docstatus > 0 &&
+			["Paid", "Initiated", "Unknown"].includes(frm.doc.status) &&
+			(mpsa_flags.can_pay || mpsa_flags.can_approve)
+		) {
+			frm.add_custom_button(__("Check Status"), () =>
+				frappe
+					.xcall("mpsa_suite.money_out.api.check_b2b_status", { b2b_request: frm.doc.name })
+					.then((query) =>
+						frappe.show_alert({
+							message: __("Asked Safaricom ({0}). This form updates when it answers.", [query]),
+							indicator: "blue",
+						})
+					)
+			);
+		}
 	},
 	supplier(frm) {
 		if (frm.doc.supplier_mpesa_account && !frm.mpsa_filling) frm.set_value("supplier_mpesa_account", null);

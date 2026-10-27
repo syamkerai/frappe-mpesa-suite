@@ -4,6 +4,7 @@ import frappe
 
 from . import bank_transaction, c2b_verify, matching, payment_request, reconcile, sales_order, stk_poll, stk_verify
 from ..compat import in_test
+from ..money_out import b2b_status as payout_status
 from ..money_out import schedule as payment_schedule
 from ..money_out import statement as payout_statement
 from .common import enabled, erpnext_installed
@@ -51,9 +52,16 @@ def every_two_minutes() -> None:
     _run("receipt matching", matching.run)
     _run("prepaid orders", sales_order.process_pending_orders)
     _run("payment request status", payment_request.sync_statuses)
+    _run("Transaction Status results", _status_results)
     # last: these make outbound HTTP calls
     _run("STK callback settlement", stk_verify.sweep)
     _run("STK status poll", stk_poll.run)
+
+
+def _status_results() -> None:
+    from ..mpsa_suite.api.m_pesa_api import retry_waiting_status_results
+
+    retry_waiting_status_results()
 
 
 def every_five_minutes() -> None:
@@ -65,3 +73,4 @@ def every_five_minutes() -> None:
     _run("payout reconciliation", payout_statement.reconcile_run)
     _run("scheduled payment sends", payment_schedule.sweep)
     _run("C2B confirmation verification", c2b_verify.sweep)
+    _run("B2B status queries", payout_status.sweep)

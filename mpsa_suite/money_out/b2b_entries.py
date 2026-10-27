@@ -487,9 +487,9 @@ def _require_kes(account: str) -> None:
 def build_payment_entry(doc, dt, dn, supplier: str, amount: float, cap=None, remark=None) -> tuple:
     """(Payment Entry, problem): built by hand, so the Mode of Payment's account never replaces
     the payout's GL (F5). ``problem``: why the document could not take the money."""
-    import erpnext
-    from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_accounting_dimensions
     from erpnext.accounts.party import get_party_account
+
+    from .common import document_dimensions, payout_cost_center
 
     bank_account, gl, date = payout_account(doc.name)
     if not gl:
@@ -517,17 +517,11 @@ def build_payment_entry(doc, dt, dn, supplier: str, amount: float, cap=None, rem
     pe.mode_of_payment = money_in_common.mode_of_payment_for(doc.mpesa_settings)  # a label only
     pe.reference_no = doc.transaction_id
     pe.reference_date = pe.posting_date = date
-    pe.cost_center = (
-        values.get("cost_center")
-        or _settings_value(doc.mpesa_settings, "cost_center")
-        or erpnext.get_default_cost_center(company)
-    )
-    if dt:
-        dimensions = [d for d in get_accounting_dimensions() if frappe.get_meta(dt).has_field(d)]
-        header = frappe.db.get_value(dt, dn, dimensions, as_dict=True) if dimensions else None
-        for field in dimensions:
-            if header and header.get(field) and pe.meta.has_field(field):
-                pe.set(field, header.get(field))
+    # the document's cost center, project and dimensions, as the B2C payouts' entries (F5)
+    pe.cost_center = payout_cost_center(doc.mpesa_settings, company, dt, dn)
+    for field, value in document_dimensions(dt, dn).items():
+        if pe.meta.has_field(field):
+            pe.set(field, value)
     pe.custom_remarks = 1
     pe.remarks = remark_text(doc, dn, remark)
     rows, problem = reference_rows(dt, dn, amount, cap)

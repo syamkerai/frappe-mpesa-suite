@@ -37,6 +37,7 @@ class B2CPaymentDisbursement(Document):
         self.set_outstanding_from_documents()
         for ref in self.references:
             ref.validate()
+        self.validate_payout_limits()
         self.validate_reference_doctypes()
         from ....money_out.schedule import check_b2c_disbursement
 
@@ -112,11 +113,35 @@ class B2CPaymentDisbursement(Document):
                 ref.update({field: current[ref.name][field] for field in SERVER_ROW_FIELDS})
 
     def set_outstanding_from_documents(self) -> None:
-        """Outstanding comes from the document, never from the (editable) row."""
+        """Outstanding comes from the document, never from the (editable) row. A row whose
+        document owes nothing (paid, or not submitted) is refused now rather than at submit
+        (handover F4); a row sent already, which an amended copy keeps, is not."""
+        to_send = {id(ref) for ref in self._rows_to_send()}
         for ref in self.references:
             owed = current_outstanding(ref.reference_doctype, ref.reference_name)
-            if owed is not None:
-                ref.outstanding_amount = owed
+            if owed is None:
+                continue
+            ref.outstanding_amount = owed
+            if flt(owed) <= 0.005 and id(ref) in to_send:
+                frappe.throw(
+                    _("Row #{0}: {1} {2} has nothing left to pay.").format(
+                        ref.idx, ref.reference_doctype, ref.reference_name
+                    ),
+                    title=_("Nothing Left to Pay"),
+                )
+
+    def validate_payout_limits(self) -> None:
+        """Each row to send within the shortcode's Transaction Limit and at least the Minimum B2C
+        Payout (handover F7); each payout is checked again when it is sent."""
+        from ....services.b2c_request_service import payout_limit_problem
+
+        settings = frappe.db.get_value(
+            MPESA_SETTINGS_DOCTYPE, {"payment_gateway_name": (self.mode_of_payment or "")[6:]}, "name"
+        )
+        for ref in self._rows_to_send():
+            problem = payout_limit_problem(ref.allocated_amount, settings)
+            if problem:
+                frappe.throw(_("Row #{0}: {1}").format(ref.idx, problem), title=_("Payout Limit"))
 
     def _rows_to_send(self) -> list:
         """Rows this submit will pay (amended copies of already-sent rows are not re-sent)."""

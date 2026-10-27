@@ -5,12 +5,13 @@ import datetime
 import json
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import frappe
 import requests
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import flt
+from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, now_datetime
 
 from ...daraja import apis
 from ...daraja.callbacks import KIND_C2B, KIND_PULL, KIND_RESULT, safaricom_callback
@@ -812,29 +813,54 @@ def handle_transaction_status_result():
         return {"status": "error", "message": f"Webhook error: {str(e)}"}
 
 
-def _unsolicited_status_result(
-    result_data: dict, result_params: dict, receipt_no: str, credit_shortcode: str
-) -> str | None:
-    """Reason to reject a Transaction Status result that answers no query of ours, or does
-    not show completed money paid to us; None when it may be registered."""
-    from ...money_in.c2b_verify import own_shortcodes
+STATUS_EVENT = "mpesa_transaction_status_update"  # what Mpesa Settings and the C2B register list listen for
+STATUS_QUERY = "Mpesa Transaction Status"
+STATUS_RESULT = "Mpesa Transaction Status Result Callback"
+# A result whose query's ack is not recorded yet (Safaricom has answered 0.4 s after the ack) is
+# kept Queued and tried again every two minutes (retry_waiting_status_results), this long at most.
+STATUS_WAIT_MINUTES = 10
+PAYOUT_DOCTYPES = ("B2C Disbursement Request", "Mpesa B2B Payment Request")
 
-    conversation_id = daraja_id(result_data.get("ConversationID"))
-    if not conversation_id or not receipt_no:
-        return "Result has no valid ConversationID or no receipt"
-    # The LIKE only narrows the search: the query is ours only if its stored ack has exactly
-    # this ConversationID (an ID of "%" used to match the newest query).
-    sent = next(
+
+def publish_transaction_status(user, status: str, message: str, **extra) -> None:
+    """Tell the person who asked: their "Waiting for M-Pesa callback..." dialog closes on any
+    status but "queued". Nobody is told about a result nobody asked for."""
+    if not user or user == "Guest":
+        return
+    frappe.publish_realtime(
+        event=STATUS_EVENT,
+        message={"status": status, "message": message, "title": _("M-Pesa Transaction Status"), **extra},
+        user=user,
+    )
+
+
+def _find_status_query(conversation_id: str, ref: str | None = None):
+    """The "Mpesa Transaction Status" request a result answers, _dict(name, owner, data, output,
+    status), or None.
+
+    By the ``ref`` on its ResultURL: a locking read, which waits while the sender is recording the
+    ack (one still Queued has no ack yet, and the caller waits for it); the ack must have exactly
+    this ConversationID. Else (a query sent before the ref) by that ID; the LIKE only narrows the
+    search (an ID of "%" used to match the newest query)."""
+    fields = ["name", "owner", "data", "output", "status"]
+    if ref:
+        row = frappe.db.get_value(
+            "Integration Request", {"name": ref, "integration_request_service": STATUS_QUERY}, fields,
+            as_dict=True, for_update=True,
+        )
+        if row:
+            return row if row.status == "Queued" or names_id(row.output, "ConversationID", conversation_id) else None
+    return next(
         (
-            row.data
+            row
             for row in frappe.get_all(
                 "Integration Request",
                 filters={
-                    "integration_request_service": "Mpesa Transaction Status",
+                    "integration_request_service": STATUS_QUERY,
                     "status": "Completed",
                     "output": ["like", f"%{conversation_id}%"],
                 },
-                fields=["data", "output"],
+                fields=fields,
                 order_by="creation desc",
                 limit=20,
             )
@@ -842,11 +868,26 @@ def _unsolicited_status_result(
         ),
         None,
     )
-    if not sent:
-        return f"No Transaction Status query of ours has ConversationID {conversation_id}"
-    asked = json.loads(sent)
+
+
+def _asked(row) -> dict:
+    try:
+        return json.loads(row.data or "{}") or {}
+    except ValueError:
+        return {}
+
+
+def _answer_problem(asked: dict, receipt_no: str) -> str | None:
+    """Why a result is not the answer to the query (its stored data ``asked``), or None."""
     if str(asked.get("transaction_id") or "").strip().upper() != str(receipt_no).strip().upper():
         return f"Result is for {receipt_no}, but we asked about {asked.get('transaction_id')}"
+    return None
+
+
+def _c2b_receipt_problem(asked: dict, result_params: dict, receipt_no: str, credit_shortcode: str) -> str | None:
+    """Why the receipt is not completed money paid to us (so no C2B receipt is made), or None."""
+    from ...money_in.c2b_verify import own_shortcodes
+
     # ResultCode 0 only means the query worked; the receipt itself may be Declined or Reversed
     state = str(result_params.get("TransactionStatus") or "").strip()
     if state.lower() != "completed":
@@ -859,113 +900,244 @@ def _unsolicited_status_result(
     return None
 
 
-def process_mpesa_integration_request(integration_request_name):
-    """Process the Mpesa Integration Request and publish updates in real-time"""
-    try:
-        # Fetch the Integration Request
-        integration_request = frappe.get_doc(
-            "Integration Request", integration_request_name
-        )
+def _unsolicited_status_result(
+    result_data: dict, result_params: dict, receipt_no: str, credit_shortcode: str
+) -> str | None:
+    """Reason to reject a Transaction Status result that answers no query of ours, or does not
+    show completed money paid to us; None when it may be registered."""
+    conversation_id = daraja_id(result_data.get("ConversationID"))
+    if not conversation_id or not receipt_no:
+        return "Result has no valid ConversationID or no receipt"
+    sent = _find_status_query(conversation_id)
+    if not sent:
+        return f"No Transaction Status query of ours has ConversationID {conversation_id}"
+    asked = _asked(sent)
+    return _answer_problem(asked, receipt_no) or _c2b_receipt_problem(asked, result_params, receipt_no, credit_shortcode)
 
+
+def _url_param(url, name: str) -> str | None:
+    values = parse_qs(urlparse(str(url or "")).query).get(name)
+    return values[0] if values else None
+
+
+def _close(integration_request, status: str, output: str) -> None:
+    integration_request.status = status
+    integration_request.output = output
+    integration_request.save(ignore_permissions=True)
+    frappe.db.commit()
+
+
+def _keep_waiting(integration_request, sent) -> None:
+    """Leave the result Queued for retry_waiting_status_results (its query ``sent`` has no ack
+    recorded yet), counting the tries."""
+    try:
+        tries = cint((json.loads(integration_request.output or "{}") or {}).get("tries"))
+    except (TypeError, ValueError, AttributeError):
+        tries = 0
+    integration_request.output = json.dumps({
+        "waiting_for": sent.name,
+        "tries": tries + 1,
+    })
+    integration_request.save(ignore_permissions=True)
+    frappe.db.commit()
+
+
+def _payout_for(receipt_no: str, values: dict):
+    """(doctype, name) of the ERP payout the receipt belongs to (by receipt, else by the answer's
+    own ConversationID or OriginatorConversationID), or None."""
+    receipt = daraja_id(receipt_no)
+    ids = [("conversation_id", daraja_id(values.get("ConversationID"))),
+           ("originator_conversation_id", daraja_id(values.get("OriginatorConversationID")))]
+    for lookups in ([("transaction_id", receipt)], ids):
+        for doctype in PAYOUT_DOCTYPES:
+            for field, value in lookups:
+                name = value and frappe.db.get_value(doctype, {field: value}, "name", order_by="creation desc")
+                if name:
+                    return doctype, name
+    return None
+
+
+def _answer_payout(integration_request, asker, payout, result_data: dict, values: dict) -> None:
+    """A status answer for one of our payouts' receipts (handover F11): no C2B receipt is made, and
+    no error logged. The person who asked sees the payout's status, receiver, charge and time; a
+    B2B payout gets what its Result left out (money_out.b2b_status)."""
+    from ...daraja.money_out import parse_daraja_datetime
+    from ...money_out import b2b_status
+    from ...money_out.statement import parse_charges
+
+    doctype, name = payout
+    kind = "B2B" if doctype == b2b_status.B2B_DOCTYPE else "B2C"
+    filled, note = [], ""
+    if kind == "B2B":
+        outcome, reason, filled = b2b_status.apply_answer(
+            name, result_data, f"Transaction Status result {integration_request.name}"
+        )
+        if outcome != "Paid":
+            note = f" Not applied to {name}: {reason}."
+        elif not filled and frappe.db.get_value(doctype, name, "status") != "Paid":
+            note = f" Press Check Status on {name} to settle it."
+    state = cstr(values.get("TransactionStatus")).strip() or "(no status)"
+    finalised = parse_daraja_datetime(values.get("FinalisedTime"))
+    parts = [f"KES {flt(values.get('Amount')):,.2f} to {values.get('CreditPartyName') or 'an unnamed receiver'}"]
+    if cstr(values.get("DebitPartyCharges")).strip():
+        parts.append(f"charge KES {parse_charges(values.get('DebitPartyCharges')):,.2f}")
+    if finalised:
+        parts.append(finalised.strftime("%d-%m-%Y %H:%M"))
+    message = f"Payout {name} {state}: {', '.join(parts)}. In the ERP it is {frappe.db.get_value(doctype, name, 'status')}."
+    if filled:
+        message += f" Filled on {name}: {', '.join(b2b_status.LABELS[f] for f in filled)}."
+    message += note
+    integration_request.reference_doctype = doctype
+    integration_request.reference_docname = name
+    _close(integration_request, "Completed", json.dumps({
+        "kind": kind,
+        "payout": name,
+        "ReceiptNo": values.get("ReceiptNo"),
+        "TransactionStatus": values.get("TransactionStatus"),
+        "Amount": values.get("Amount"),
+        "CreditPartyName": values.get("CreditPartyName"),
+        "DebitPartyCharges": values.get("DebitPartyCharges"),
+        "FinalisedTime": values.get("FinalisedTime"),
+        "filled": filled,
+    }, default=str))
+    publish_transaction_status(asker, "success" if state.lower() == "completed" else "warning", message,
+                               document_name=name, doctype=doctype)
+
+
+def _paid_by_us(asked: dict, values: dict) -> str | None:
+    """Our shortcode when the receipt was paid from it (DebitPartyName "985401 - ..."), else None."""
+    from ...money_in.c2b_verify import own_shortcodes
+
+    debit = str(values.get("DebitPartyName") or "").split("-")[0].strip()
+    return debit if debit and debit in own_shortcodes(asked.get("mpesa_settings")) else None
+
+
+def process_mpesa_integration_request(integration_request_name, final: bool = False):
+    """Process a Transaction Status result (Mpesa Settings → Check Transaction Status) and tell
+    whoever asked, on every outcome.
+
+    Only the answer to a query we sent counts, for the receipt we asked about. A payout's receipt
+    (B2C or B2B) is answered with the payout's status, receiver, charge and time; a receipt
+    completed and paid to one of our shortcodes is registered as a C2B receipt; one paid from our
+    shortcode with no ERP payout is flagged (money that left outside the ERP). ``final``: the last
+    try for a result still waiting for its query's ack (retry_waiting_status_results)."""
+    # locking read: the result's job and the retry sweep never handle one result twice
+    if frappe.db.get_value("Integration Request", integration_request_name, "status", for_update=True) != "Queued":
+        return
+    integration_request = frappe.get_doc("Integration Request", integration_request_name)
+    asker = None
+    try:
         # Parse the stored data
         response_data = json.loads(integration_request.data)
-        result_data = response_data.get("Result", {})
+        result_data = response_data.get("Result", {}) or {}
         result_params = {
             param.get("Key", ""): param.get("Value", "")
             for param in _result_parameters(result_data)
             if "Key" in param
         }
+        from ...daraja.money_out import result_values
+
+        values = result_values(result_data)  # the first of a repeated key (our own DebitPartyName)
 
         result_code = result_data.get("ResultCode", None)
         receipt_no = result_params.get("ReceiptNo", "")
         business_shortcode = str(result_params.get("CreditPartyName") or "").split("-")
 
-        if str(result_code) == "0":
-            from ...money_in.receipts import INSERTED, insert_register
-
-            # Unsigned guest callback: only accept the answer to a query we actually sent,
-            # for the receipt we asked about, Completed and paid to one of our shortcodes.
-            rejection = _unsolicited_status_result(
-                result_data, result_params, receipt_no, business_shortcode[0].strip()
-            )
-            if rejection:
-                integration_request.status = "Failed"
-                integration_request.output = rejection
-                integration_request.save(ignore_permissions=True)
-                frappe.db.commit()
-                frappe.log_error(
-                    f"{rejection}\n\n{integration_request.data}", "M-Pesa Transaction Status result rejected"
-                )
+        # Unsigned guest callback: only the answer to a query we actually sent counts.
+        conversation_id = daraja_id(result_data.get("ConversationID"))
+        sent = _find_status_query(conversation_id, _url_param(integration_request.url, "ref")) if conversation_id else None
+        if not sent or sent.status == "Queued":
+            if sent and not final:
+                _keep_waiting(integration_request, sent)  # the query's ack is not recorded yet
                 return
+            if not conversation_id:
+                rejection = "Result has no valid ConversationID or no receipt"
+            elif sent:
+                rejection = f"The ack of Transaction Status query {sent.name} was never recorded"
+            else:
+                rejection = f"No Transaction Status query of ours has ConversationID {conversation_id}"
+            _close(integration_request, "Failed", rejection)
+            frappe.log_error(f"{rejection}\n\n{integration_request.data}", "M-Pesa Transaction Status result rejected")
+            publish_transaction_status(sent and sent.owner, "error", rejection)
+            return
+        asker = sent.owner
+        asked = _asked(sent)
 
-            debit_party = str(result_params.get("DebitPartyName") or "").split(" - ")
-            name_parts = (
-                debit_party[1].split(" ") if len(debit_party) > 1 else ["", "", ""]
-            )
-            outcome, register_name = insert_register(
-                {
-                    "full_name": result_params.get("DebitPartyName", ""),
-                    "transactiontype": result_params.get("ReasonType", ""),
-                    "transid": receipt_no,
-                    "transtime": result_params.get("InitiatedTime", ""),
-                    "transamount": flt(result_params.get("Amount", 0.0)),
-                    "businessshortcode": business_shortcode[0].strip(),
-                    # Transaction Status does not return the customer's account reference;
-                    # leave billrefnumber empty rather than copy the receipt (it broke matching).
-                    "invoicenumber": result_params.get("TransactionID", ""),
-                    "orgaccountbalance": result_params.get("DebitAccountType", ""),
-                    "thirdpartytransid": result_params.get("OriginatorConversationID", ""),
-                    "msisdn": debit_party[0] if len(debit_party) > 0 else "",
-                    "firstname": name_parts[0],
-                    "middlename": name_parts[1] if len(name_parts) > 1 else "",
-                    "lastname": name_parts[-1] if len(name_parts) > 2 else "",
-                }
-            )
-            if outcome != INSERTED:
-                error_msg = f"Duplicate transaction: Receipt No {receipt_no} already exists"
-                integration_request.status = "Failed"
-                integration_request.output = error_msg
-                integration_request.save(ignore_permissions=True)
-                frappe.db.commit()
+        if str(result_code) != "0":
+            error_msg = (f"Safaricom could not answer for {asked.get('transaction_id')}: "
+                         f"{result_data.get('ResultDesc') or 'no reason given'} ({result_code})")
+            _close(integration_request, "Failed", error_msg)
+            publish_transaction_status(asker, "error", error_msg)
+            return
 
-                frappe.publish_realtime(
-                    event="mpesa_transaction_status",
-                    message={"status": "error", "message": error_msg},
-                    user=frappe.session.user,
+        problem = "Result has no valid ConversationID or no receipt" if not receipt_no else _answer_problem(asked, receipt_no)
+        if problem:
+            _close(integration_request, "Failed", problem)
+            publish_transaction_status(asker, "error", problem)
+            return
+
+        payout = _payout_for(receipt_no, values)
+        if payout:
+            _answer_payout(integration_request, asker, payout, result_data, values)
+            return
+
+        rejection = _c2b_receipt_problem(asked, result_params, receipt_no, business_shortcode[0].strip())
+        if rejection:
+            ours = _paid_by_us(asked, values)
+            if ours:
+                from ...money_in.common import log_match
+
+                message = (
+                    f"Receipt {receipt_no} paid KES {flt(values.get('Amount')):,.2f} from {ours} to "
+                    f"{values.get('CreditPartyName') or 'an unnamed receiver'}, but no B2C or B2B payout of the ERP has "
+                    "it: money left the shortcode outside the ERP (a payment on the M-Pesa portal?)."
                 )
+                log_match("Ambiguous", "Bank Reconciliation", receipt=receipt_no, amount=flt(values.get("Amount")),
+                          details=message)
+                _close(integration_request, "Completed", message)
+                publish_transaction_status(asker, "warning", message)
                 return
-            frappe.db.commit()
-            mpesa_doc = frappe._dict(name=register_name)
+            # an answer, just not money paid to us: told to the asker, not an error
+            _close(integration_request, "Failed", rejection)
+            publish_transaction_status(asker, "error", rejection)
+            return
 
-            success_msg = "Transaction processed successfully"
-            integration_request.status = "Completed"
-            integration_request.output = success_msg
-            integration_request.reference_document = mpesa_doc.name
-            integration_request.save(ignore_permissions=True)
-            frappe.db.commit()
+        from ...money_in.receipts import INSERTED, insert_register
 
-            frappe.publish_realtime(
-                event="mpesa_transaction_status",
-                message={
-                    "status": "success",
-                    "message": success_msg,
-                    "doc_name": mpesa_doc.name,
-                },
-                user=frappe.session.user,
-            )
+        debit_party = str(result_params.get("DebitPartyName") or "").split(" - ")
+        name_parts = (
+            debit_party[1].split(" ") if len(debit_party) > 1 else ["", "", ""]
+        )
+        outcome, register_name = insert_register(
+            {
+                "full_name": result_params.get("DebitPartyName", ""),
+                "transactiontype": result_params.get("ReasonType", ""),
+                "transid": receipt_no,
+                "transtime": result_params.get("InitiatedTime", ""),
+                "transamount": flt(result_params.get("Amount", 0.0)),
+                "businessshortcode": business_shortcode[0].strip(),
+                # Transaction Status does not return the customer's account reference;
+                # leave billrefnumber empty rather than copy the receipt (it broke matching).
+                "invoicenumber": result_params.get("TransactionID", ""),
+                "orgaccountbalance": result_params.get("DebitAccountType", ""),
+                "thirdpartytransid": result_params.get("OriginatorConversationID", ""),
+                "msisdn": debit_party[0] if len(debit_party) > 0 else "",
+                "firstname": name_parts[0],
+                "middlename": name_parts[1] if len(name_parts) > 1 else "",
+                "lastname": name_parts[-1] if len(name_parts) > 2 else "",
+            }
+        )
+        if outcome != INSERTED:
+            error_msg = f"Receipt {receipt_no} is already recorded" + (f" ({register_name})" if register_name else "")
+            _close(integration_request, "Failed", error_msg)
+            publish_transaction_status(asker, "warning", error_msg, document_name=register_name)
+            return
+        frappe.db.commit()
 
-        else:
-            error_msg = "Transaction failed with non-zero result code"
-            integration_request.status = "Failed"
-            integration_request.output = error_msg
-            integration_request.save(ignore_permissions=True)
-            frappe.db.commit()
-
-            frappe.publish_realtime(
-                event="mpesa_transaction_status",
-                message={"status": "error", "message": error_msg},
-                user=frappe.session.user,
-            )
+        success_msg = f"Receipt {receipt_no} recorded as {register_name}"
+        integration_request.reference_document = register_name
+        _close(integration_request, "Completed", success_msg)
+        publish_transaction_status(asker, "success", success_msg, document_name=register_name)
 
     except Exception as e:
         error_message = f"Mpesa Processing Error: {str(e)}"
@@ -978,11 +1150,32 @@ def process_mpesa_integration_request(integration_request_name):
             f"{error_message}\nData: {integration_request.data}",
             "Mpesa Integration Error",
         )
-        frappe.publish_realtime(
-            event="mpesa_transaction_status",
-            message={"status": "error", "message": error_message},
-            user=frappe.session.user,
-        )
+        publish_transaction_status(asker, "error", error_message)
+
+
+def retry_waiting_status_results(limit: int = 50) -> None:
+    """Every two minutes: Transaction Status results still Queued a minute after they came (their
+    query's ack was not recorded yet, or their job was lost) are tried again; after
+    STATUS_WAIT_MINUTES, for the last time (rejected if the ack never came)."""
+    now = now_datetime()
+    rows = frappe.get_all(
+        "Integration Request",
+        filters={"integration_request_service": STATUS_RESULT, "status": "Queued",
+                 "creation": [">=", add_to_date(now, hours=-24)]},
+        fields=["name", "creation"],
+        order_by="creation asc",
+        limit=limit,
+    )
+    for row in rows:
+        created = get_datetime(row.creation)
+        if created > add_to_date(now, minutes=-1):
+            continue  # its own job is still on its way
+        try:
+            process_mpesa_integration_request(row.name, final=created <= add_to_date(now, minutes=-STATUS_WAIT_MINUTES))
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(frappe.get_traceback(), f"M-Pesa Transaction Status result {row.name} failed"[:140])
 
 
 @frappe.whitelist(allow_guest=True)
