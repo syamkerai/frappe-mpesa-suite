@@ -92,16 +92,18 @@ def flag_accounts(row, old_paybill: str = "") -> dict:
     blocked = {}
     for p in pa.PROFILES.values():
         accounts = frappe.get_all(p.doctype, filters={"bank_paybill": row.name, "docstatus": 1},
-                                  fields=["name", "shortcode", "needs_reapproval"])
+                                  fields=["name", "shortcode", "needs_reapproval", "reapproval_reason"])
         count = 0
         for acc in accounts:
             if cstr(acc.shortcode).strip() != cstr(row.paybill):
+                if cint(acc.needs_reapproval) and not _paybill_reason(acc, row):
+                    continue  # blocked for another reason (an approval without a second person): kept as it is
                 reason = (f"Bank paybill {row.name} changed from {acc.shortcode} to {row.paybill}: cancel and amend "
                           "this account so a manager approves the new number.")
                 frappe.db.set_value(p.doctype, acc.name, {"needs_reapproval": 1, "reapproval_reason": reason})
                 pa.note(p.doctype, acc.name, reason)
                 count += 1
-            elif cint(acc.needs_reapproval):
+            elif cint(acc.needs_reapproval) and _paybill_reason(acc, row):
                 frappe.db.set_value(p.doctype, acc.name, {"needs_reapproval": 0, "reapproval_reason": None})
                 pa.note(p.doctype, acc.name, f"Bank paybill {row.name} is {row.paybill} again, the number this "
                                              "account was approved with: it can be paid again.")
@@ -112,6 +114,13 @@ def flag_accounts(row, old_paybill: str = "") -> dict:
                      f"{count} approved {p.doctype}{'s are' if count > 1 else ' is'} blocked until cancelled, "
                      "amended and approved again.", row)
     return blocked
+
+
+def _paybill_reason(acc, row) -> bool:
+    """Whether the account is blocked because ``row``'s paybill changed (flag_accounts' own reason, or
+    none recorded): the paybill coming back unblocks only those."""
+    reason = cstr(acc.get("reapproval_reason")).strip()
+    return not reason or reason.startswith(f"Bank paybill {row.name} changed")
 
 
 # ---------------------------------------------------------------- the shipped list

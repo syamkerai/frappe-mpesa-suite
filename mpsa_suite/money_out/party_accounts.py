@@ -134,6 +134,7 @@ def validate_account(doc) -> None:
     same destination is approved already (``_check_unique``)."""
     p = profile(doc)
     party = doc.get(p.party_field)
+    _forget_the_last_approval(doc)
     if doc.account_type == OLD_BANK:
         doc.account_type = BANK  # a draft saved before the rename
     if doc.account_type not in p.types:
@@ -157,6 +158,16 @@ def validate_account(doc) -> None:
     doc.destination_key = destination_key(doc)
     _check_unique(doc, p, party)
     _note_who_entered(doc, p)
+
+
+def _forget_the_last_approval(doc) -> None:
+    """A draft starts unblocked and unpaid: Amend copies every field of the cancelled account, its
+    no-copy ones too (frappe.model.copy_doc with from_amend, v15 and v16), so without this the
+    account a manager approves again would stay blocked by the old account's bank paybill change,
+    name mismatch or unchecked approval, which cancel, amend and approve again are there to clear."""
+    for field in SET_BY_THE_SUITE:
+        if doc.get(field):
+            setattr(doc, field, 0 if field in ("name_mismatch", "needs_reapproval") else None)
 
 
 def _clear(doc, *fields) -> None:
@@ -470,6 +481,21 @@ def set_default(doc) -> None:
         note(p.doctype, other, f"No longer the default of this {p.label}: {doc.name} is.")
 
 
+# Submitted records that keep an account's name after it pays: a B2B request (Paid, Failed or Unknown
+# stays submitted) and an Expense Claim's M-Pesa Payees row. Each copied the destination when it was
+# made, and every send checks the account again (cancelled: refused), so they never stop the account
+# being cancelled (Frappe's back-link check reads doc.ignore_linked_doctypes from the instance).
+CANCEL_IGNORES = ("Mpesa B2B Payment Request", "Expense Claim")
+
+
+def before_cancel(doc) -> None:
+    """before_cancel. Cancelling is never refused (a compromised number must go at once, and
+    "cancel and amend" is how a blocked account is approved again): the payouts and claims that
+    name the account do not stop it."""
+    doc.ignore_linked_doctypes = CANCEL_IGNORES
+    doc.is_default = 0
+
+
 def after_cancel(doc) -> None:
     """on_cancel. Cancelling is never refused (a compromised number must go at once). The one
     account left becomes the default; with two or more left and no default, none is guessed: the
@@ -607,15 +633,32 @@ def accounts_of(doctype, party, types=None) -> list:
 
 
 def pick_account(doctype, party, types=None) -> str | None:
-    """The party's default approved account of ``types`` that can be paid now, or its only one of
-    them (a phone default with one bank account: B2B picks the bank account)."""
-    rows = [r for r in accounts_of(doctype, party, types) if not usable_problem(r, party, doctype)]
-    rows.sort(key=lambda r: 0 if r.is_default else 1)  # stable: keeps creation order otherwise
-    if not rows:
+    """The account a payment that names none goes to (plan B.4): the party's default when it is of
+    ``types`` and can be paid now; when the default cannot be paid (on hold, blocked), none: the
+    payment waits or the payer picks another account, never another one silently. With no default
+    of ``types``, the only one of them that can be paid now (a phone default with one bank account:
+    B2B picks the bank account)."""
+    rows = accounts_of(doctype, party, types)
+    default = next((r for r in rows if cint(r.is_default)), None)
+    if default:
+        return None if usable_problem(default, party, doctype) else default.name
+    usable = [r for r in rows if not usable_problem(r, party, doctype)]
+    return usable[0].name if len(usable) == 1 else None
+
+
+def pick_problem(doctype, party, types=None) -> str | None:
+    """Why ``pick_account`` picks nothing, when one reason stands: the default (of ``types``) cannot
+    be paid now, or no account of ``types`` can (the first one's reason)."""
+    rows = accounts_of(doctype, party, types)
+    default = next((r for r in rows if cint(r.is_default)), None)
+    if default:
+        problem = usable_problem(default, party, doctype)
+        if problem:
+            return (f"{problem.rstrip('.')}. It is the {profile(doctype).label}'s default: pick another approved "
+                    "account to pay now.")
         return None
-    if rows[0].is_default or len(rows) == 1:
-        return rows[0].name
-    return None
+    problems = [usable_problem(r, party, doctype) for r in rows]
+    return problems[0] if problems and all(problems) else None
 
 
 def default_account(doctype, party, types=None) -> str | None:
@@ -804,10 +847,17 @@ def accounts_for(doctype, party) -> list:
 
 
 # ---------------------------------------------------------------- migrate
+SELF_APPROVED = ("Approved by the person who entered it, before the second-person rule applied to every login: "
+                 "cancel and amend it, and have another M-Pesa Manager approve it.")
+ADMIN_APPROVED = ("Approved with the shared Administrator login, which may no longer approve accounts (M-Pesa Suite "
+                  "Settings): cancel and amend it, and have a named M-Pesa Manager approve it.")
+
+
 def after_migrate() -> None:
     """Idempotent, every migrate: the Employee type's old label renamed, the bank paybill of bank
-    accounts saved before the directory linked by their paybill, and the destination key of
-    accounts saved before it existed (the uniqueness check reads it)."""
+    accounts saved before the directory linked by their paybill, the destination key of accounts
+    saved before it existed (the uniqueness check reads it), and accounts approved without a second
+    named person blocked (``block_unchecked_approvals``)."""
     for p in PROFILES.values():
         if not frappe.db.exists("DocType", p.doctype) or not frappe.db.has_column(p.doctype, "destination_key"):
             continue
@@ -823,3 +873,59 @@ def after_migrate() -> None:
             key = destination_key(acc)
             if key:
                 frappe.db.set_value(p.doctype, acc.name, "destination_key", key, update_modified=False)
+    block_unchecked_approvals()
+
+
+def _refuses_administrator() -> bool:
+    """The Suite setting itself (permissions.administrator_refused is never true while migrating)."""
+    try:
+        value = frappe.db.get_single_value(SUITE, "refuse_administrator_payouts")
+    except Exception:
+        return True
+    return True if value in (None, "") else bool(cint(value))
+
+
+def unchecked_approval(acc, refuse_administrator: bool = True) -> str | None:
+    """Why an approved account never had a second named person, or None: approved by who created
+    it or entered its details (before round 4 the shared Administrator login was exempt from that
+    rule), or with the shared Administrator login while M-Pesa Suite Settings refuses it."""
+    approver = cstr(acc.get("approved_by")).strip()
+    if not approver:
+        return None  # approved before approvals were recorded: nothing to go on
+    if approver.lower() in {cstr(acc.get(f)).strip().lower() for f in ("owner", "entered_by")} - {""}:
+        return SELF_APPROVED
+    if approver == "Administrator" and refuse_administrator:
+        return ADMIN_APPROVED
+    return None
+
+
+def block_unchecked_approvals() -> dict:
+    """after_migrate: an approved account whose approval had no second named person (handover F3:
+    entered and approved by Administrator) is blocked (needs_reapproval) until it is cancelled,
+    amended and approved again; payouts are refused meanwhile. Once per account: one already
+    blocked is left as it is. One alert per DocType with a count (employee accounts: no names).
+    Returns {DocType: how many were blocked now}."""
+    refuse_administrator = _refuses_administrator()
+    blocked_now = {}
+    for p in PROFILES.values():
+        if not frappe.db.exists("DocType", p.doctype) or not all(
+                frappe.db.has_column(p.doctype, f) for f in ("approved_by", "needs_reapproval", "reapproval_reason")):
+            continue
+        fields = ["name", "owner", "approved_by"] + (["entered_by"] if frappe.db.has_column(p.doctype, "entered_by")
+                                                     else [])
+        count = 0
+        for acc in frappe.get_all(p.doctype, filters={"docstatus": 1, "needs_reapproval": 0}, fields=fields):
+            reason = unchecked_approval(acc, refuse_administrator)
+            if not reason:
+                continue
+            frappe.db.set_value(p.doctype, acc.name, {"needs_reapproval": 1, "reapproval_reason": reason},
+                                update_modified=False)
+            note(p.doctype, acc.name, f"Blocked by the M-Pesa Suite upgrade: {reason}")
+            count += 1
+        blocked_now[p.doctype] = count
+        if count:
+            many = count > 1
+            alert(f"M-Pesa Suite upgrade: {count} {p.doctype}{'s' if many else ''} approved without a second named "
+                  f"person {'are' if many else 'is'} blocked until cancelled, amended and approved again by an M-Pesa "
+                  "Manager.", frappe._dict(doctype=p.doctype, name=None))
+    return blocked_now

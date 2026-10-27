@@ -213,3 +213,27 @@ class TestConnections(IntegrationTestCase):
         self.assertGreaterEqual(counts[EXPRESS], 1)
         self.assertGreaterEqual(counts[B2C_REQUEST], 1)
         self.assertGreaterEqual(counts[B2B], 1)
+
+    # ------------------------------------------------------------ a claim's payouts (final review, area B)
+    def test_who_reads_a_claim_gets_its_mpesa_payouts_counted(self):
+        """Plan C.8: a claim's payouts are not salaries. An Accounts User who is also an Expense Approver (no
+        salary visibility) reads the claim, so its B2B request and B2C request are counted on it; an
+        employee's salary payouts are still not counted for them."""
+        if "hrms" not in frappe.get_installed_apps():
+            self.skipTest("HRMS is not installed")
+        reader = _user(f"claims@{DOMAIN}", "Accounts User")
+        frappe.get_doc("User", reader).add_roles("Expense Approver")
+        employee = "_T-EMP-CONNECTIONS"  # written as it stands: only the links are counted
+        claim = _raw("Expense Claim", employee=employee, company=t.COMPANY, posting_date=frappe.utils.nowdate(),
+                     approval_status="Approved")
+        _raw(B2B, employee=employee, expense_claim=claim, amount=10, mpesa_settings=t.SETTINGS, status="Initiated")
+        _raw(B2C_REQUEST, party_type="Employee", party=employee, reference_doctype="Expense Claim",
+             reference_name=claim, amount=10, mpesa_settings=t.SETTINGS)
+        with self.as_user(reader), _counting():  # as the desk asks: the salary rule applies
+            found = get_open_count("Expense Claim", claim)["count"]
+            claim_data = frappe.get_meta("Expense Claim").get_dashboard_data()
+            employee_data = frappe.get_meta("Employee").get_dashboard_data()
+        counts = {d["doctype"]: d["count"] for d in found["external_links_found"] + found["internal_links_found"]}
+        self.assertEqual((counts[B2B], counts[B2C_REQUEST]), (1, 1))
+        self.assertEqual(claim_data.non_standard_fieldnames[B2B], "expense_claim")
+        self.assertEqual(employee_data.non_standard_fieldnames[B2B], "name")  # salaries: still no count

@@ -183,6 +183,9 @@ _SALARY_DOCTYPES = (
 )
 permission_query_conditions = {dt: "mpsa_suite.money_out.salary_access.query_conditions" for dt in _SALARY_DOCTYPES}
 has_permission = {dt: "mpsa_suite.money_out.salary_access.has_permission" for dt in _SALARY_DOCTYPES}
+# their Versions too (System Manager reads every Version): salary_access.version_*
+permission_query_conditions["Version"] = "mpsa_suite.money_out.salary_access.version_query_conditions"
+has_permission["Version"] = "mpsa_suite.money_out.salary_access.version_has_permission"
 
 # DocType Class
 # ---------------
@@ -216,6 +219,8 @@ doc_events = {
     },
     "Journal Entry": {
         "before_insert": "mpsa_suite.money_in.payment_entry.journal_before_insert",
+        # HRMS: no bank or cash entry for a payroll while M-Pesa pays salaries of it (money_out.payroll)
+        "validate": "mpsa_suite.money_out.payroll.guard_bank_entry",
         "on_cancel": "mpsa_suite.money_out.b2b_entries.allow_cancel",
         "on_trash": "mpsa_suite.money_out.b2b_entries.unlink_deleted",
     },

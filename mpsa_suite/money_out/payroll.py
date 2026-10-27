@@ -11,7 +11,11 @@ Pay Selected after the 5-second confirm, and never before the line's Pay On.
 
 Nothing is paid by M-Pesa while the payroll has a bank or cash entry not made by M-Pesa (HRMS's
 Make Bank Entry, draft or submitted): checked when the schedule is made and again whenever one of
-its salaries is paid (owed.slip_problems), since HR may press Make Bank Entry after the schedule.
+its salaries is paid (owed.slip_problems). The other way round, no such entry is saved while
+M-Pesa pays salaries of the payroll, Paid (booked or not), on their way or planned
+(guard_bank_entry, a Journal Entry validate hook): a payroll is paid either through M-Pesa or
+through Make Bank Entry, or split into separate Payroll Entries; when Payroll Settings books
+payroll per employee, a bank entry made by hand may pay the employees M-Pesa does not.
 
 A Payroll Entry cannot be cancelled while M-Pesa salaries of it are paid or on their way: HRMS
 cancels every Journal Entry referencing it and deletes its salary slips. Nor can one of its
@@ -254,13 +258,20 @@ def salaries_paid_or_on_their_way(payroll_entry: str) -> list:
 def paid_or_on_their_way(slips: list, payroll_entry: str | None = None) -> list:
     """M-Pesa payouts of these salary slips (and B2B salaries naming the Payroll Entry) that are
     Paid or still on their way."""
+    return list(dict.fromkeys(label for label, _slip, _employee in _paying(slips, payroll_entry)))
+
+
+def _paying(slips: list, payroll_entry: str | None = None, planned: bool = False) -> list:
+    """(label, salary slip, employee) of each M-Pesa payout of these salary slips (and B2B salaries
+    naming the Payroll Entry) Paid or on its way; with ``planned``, schedule lines still planned too.
+    The employee is the B2B request's own; for the rest the caller maps the slip."""
     found = []
     if frappe.db.has_column(B2B, "salary_slip") and (slips or payroll_entry):
         named = " OR ".join((["salary_slip IN %(slips)s"] if slips else [])
                             + (["payroll_entry = %(payroll)s"] if payroll_entry else []))
-        found += [r[0] for r in frappe.db.sql(
+        found += [(r[0], r[1], r[2]) for r in frappe.db.sql(
             f"""
-            SELECT name FROM `tab{B2B}`
+            SELECT name, salary_slip, employee FROM `tab{B2B}`
             WHERE ({named})
               AND ((docstatus < 2 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
             ORDER BY creation
@@ -268,9 +279,9 @@ def paid_or_on_their_way(slips: list, payroll_entry: str | None = None) -> list:
             {"payroll": payroll_entry, "slips": tuple(slips) or ("",), "live": ("", *B2B_LIVE)},
         )]
     if slips:
-        found += [r[0] for r in frappe.db.sql(
+        found += [(r[0], r[1], None) for r in frappe.db.sql(
             f"""
-            SELECT name FROM `tab{B2C_REQUEST}`
+            SELECT name, reference_name FROM `tab{B2C_REQUEST}`
             WHERE reference_doctype = 'Salary Slip' AND reference_name IN %(slips)s
               AND ((docstatus = 1 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
             ORDER BY creation
@@ -278,9 +289,9 @@ def paid_or_on_their_way(slips: list, payroll_entry: str | None = None) -> list:
             {"slips": tuple(slips), "live": ("", *B2C_LIVE)},
         )]
         # rows of a submitted disbursement whose payout is not made yet
-        found += [r[0] for r in frappe.db.sql(
+        found += [(r[0], r[1], None) for r in frappe.db.sql(
             f"""
-            SELECT DISTINCT ref.parent FROM `tab{B2C_ROW}` ref
+            SELECT DISTINCT ref.parent, ref.reference_name FROM `tab{B2C_ROW}` ref
             JOIN `tabB2C Payment Disbursement` d ON d.name = ref.parent
             WHERE ref.reference_doctype = 'Salary Slip' AND ref.reference_name IN %(slips)s AND d.docstatus = 1
               AND COALESCE(ref.b2c_disbursement_request, '') = ''
@@ -288,15 +299,101 @@ def paid_or_on_their_way(slips: list, payroll_entry: str | None = None) -> list:
             """,
             {"slips": tuple(slips)},
         )]
-        found += [f"{r[0]} row {r[1]}" for r in frappe.db.sql(
+        found += [(f"{r[0]} row {r[1]}", r[2], None) for r in frappe.db.sql(
             f"""
-            SELECT parent, idx FROM `tab{LINE}`
+            SELECT parent, idx, reference_name FROM `tab{LINE}`
             WHERE reference_doctype = 'Salary Slip' AND reference_name IN %(slips)s AND status IN %(sent)s
             ORDER BY parent, idx
             """,
             {"slips": tuple(slips), "sent": LINE_SENT},
         )]
-    return list(dict.fromkeys(found))
+    if slips and planned:
+        # lines still to pay, on a schedule not closed (closing one cancels its planned lines)
+        found += [(f"{r[0]} row {r[1]}", r[2], None) for r in frappe.db.sql(
+            f"""
+            SELECT l.parent, l.idx, l.reference_name FROM `tab{LINE}` l
+            JOIN `tab{SCHEDULE}` s ON s.name = l.parent
+            WHERE l.parenttype = %(schedule)s AND l.reference_doctype = 'Salary Slip'
+              AND l.reference_name IN %(slips)s AND l.status = 'Planned' AND COALESCE(s.closed, 0) = 0
+            ORDER BY l.parent, l.idx
+            """,
+            {"slips": tuple(slips), "schedule": SCHEDULE},
+        )]
+    return found
+
+
+# ---------------------------------------------------------------- HRMS's bank entry for a payroll
+BANK_VOUCHERS = ("Bank Entry", "Cash Entry")
+# The Journal Entry Account fields M-Pesa tags its own salary entries with (salary_entries, journal_service)
+MPESA_TAGS = ("b2c_payment_disbursement", "mpesa_b2b_payment_request")
+
+
+def guard_bank_entry(doc, method=None) -> None:
+    """Journal Entry validate: no bank or cash entry for a Payroll Entry (HRMS's Make Bank Entry, or
+    one made by hand) while M-Pesa pays salaries of it: payouts Paid (booked or not) or on their
+    way, and schedule lines still planned. HRMS's entry pays the net pay of every slip of the
+    payroll and knows nothing of M-Pesa; the suite's own salary entry, which hides HRMS's button,
+    exists only once a payout is Paid and booked. The other direction is owed.slip_problems: no
+    M-Pesa salary while the payroll has such an entry.
+
+    So a payroll is paid either through M-Pesa or through Make Bank Entry (or split into separate
+    Payroll Entries). When Payroll Settings books payroll per employee, the entry's payable rows
+    name each employee: only the rows of employees M-Pesa pays or paid are refused, so a bank entry
+    made by hand for the others goes through. M-Pesa's own entries (a row tagged with its payout)
+    are left alone."""
+    if doc.get("voucher_type") not in BANK_VOUCHERS:
+        return
+    accounts = doc.get("accounts") or []
+    rows = [r for r in accounts if r.get("reference_type") == PAYROLL_ENTRY and cstr(r.get("reference_name")).strip()]
+    if not rows or any(cstr(r.get(tag)).strip() for r in accounts for tag in MPESA_TAGS):
+        return
+    if not owed.hrms_installed():
+        return
+    for payroll_entry in sorted({cstr(r.get("reference_name")).strip() for r in rows}):
+        mine = [r for r in rows if cstr(r.get("reference_name")).strip() == payroll_entry]
+        per_employee = all(r.get("party_type") == "Employee" and cstr(r.get("party")).strip() for r in mine)
+        employees = {cstr(r.get("party")).strip() for r in mine} if per_employee else None
+        paying = mpesa_salaries(payroll_entry, employees)
+        if paying:
+            frappe.throw(_bank_entry_refusal(payroll_entry, paying, per_employee), title="M-Pesa pays this payroll")
+
+
+def mpesa_salaries(payroll_entry: str, employees=None) -> dict:
+    """{employee: [payouts and planned lines]} of the Payroll Entry's salaries M-Pesa pays: Paid or
+    on their way, or planned on a schedule. ``employees``: only theirs (None: every employee)."""
+    filters = {"payroll_entry": payroll_entry}
+    if employees is not None:
+        if not employees:
+            return {}
+        filters["employee"] = ["in", sorted(employees)]
+    employee_of = {s.name: s.employee for s in frappe.get_all(owed.SLIP, filters=filters, fields=["name", "employee"])}
+    found = {}
+    for label, slip, employee in _paying(sorted(employee_of), payroll_entry, planned=True):
+        employee = cstr(employee or employee_of.get(slip)).strip()
+        if employees is not None and employee not in employees:
+            continue
+        labels = found.setdefault(employee, [])
+        if label not in labels:
+            labels.append(label)
+    return found
+
+
+def _bank_entry_refusal(payroll_entry: str, paying: dict, per_employee: bool) -> str:
+    """The refusal; the payouts are named only to who may see salaries."""
+    labels = list(dict.fromkeys(label for names in paying.values() for label in names))
+    many = len(labels) > 1
+    count = f"{len(labels)} M-Pesa payout{'s' if many else ''} or planned line{'s' if many else ''}"
+    if salary_access.can_see_salaries():
+        count += ": " + ", ".join(labels[:10]) + (f" and {len(labels) - 10} more" if len(labels) > 10 else "")
+    if per_employee:
+        employees = sorted(e for e in paying if e)
+        more = f" and {len(employees) - 10} more" if len(employees) > 10 else ""
+        return (f"M-Pesa pays the salaries of {', '.join(employees[:10])}{more} on {payroll_entry} ({count}). Leave "
+                "them out of this bank entry, or it would pay them twice.")
+    return (f"M-Pesa pays salaries of {payroll_entry} ({count}). A bank or cash entry for the whole payroll would pay "
+            "them twice: pay a payroll either through M-Pesa or through Make Bank Entry, or split it into separate "
+            "Payroll Entries. (When Payroll Settings books payroll per employee, a bank entry made by hand may pay "
+            "the employees M-Pesa does not.)")
 
 
 def _schedules(payroll_entry: str) -> list:

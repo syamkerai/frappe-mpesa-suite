@@ -49,6 +49,10 @@ def set_default(doc) -> None:
     pa.set_default(doc)
 
 
+def before_cancel(doc) -> None:
+    pa.before_cancel(doc)
+
+
 def after_cancel(doc) -> None:
     pa.after_cancel(doc)
 
@@ -100,10 +104,10 @@ def apply_destination(doc) -> None:
     if not doc.supplier_mpesa_account and doc.supplier:
         doc.supplier_mpesa_account = pick_account(doc.supplier)
         if not doc.supplier_mpesa_account:
-            # Say why the supplier's approved account can't be used (blocked, on hold, ...).
-            problems = pa.unusable_reasons(ACCOUNT_DOCTYPE, doc.supplier, B2B_TYPES)
-            if problems and all(problems):
-                frappe.throw(problems[0])
+            # Say why the supplier's default (or only) account can't be used (blocked, on hold, ...).
+            problem = pa.pick_problem(ACCOUNT_DOCTYPE, doc.supplier, B2B_TYPES)
+            if problem:
+                frappe.throw(problem)
 
     if doc.supplier_mpesa_account:
         acc = get_account(doc.supplier_mpesa_account)

@@ -10,6 +10,9 @@ const MPSA_SUPPLIER_B2B = ["Paybill", "Till (Buy Goods)", MPSA_SUPPLIER_BANK];
 frappe.ui.form.on("Supplier M-Pesa Account", {
 	setup(frm) {
 		frm.set_query("bank_paybill", () => ({ filters: { enabled: 1 } }));
+		// cancelling the account never offers to cancel the payouts or claims that name it: the
+		// server lets it go without them (party_accounts.before_cancel)
+		frm.ignore_doctypes_on_cancel_all = ["Mpesa B2B Payment Request", "Expense Claim"];
 	},
 
 	refresh(frm) {

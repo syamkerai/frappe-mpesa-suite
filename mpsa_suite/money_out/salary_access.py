@@ -10,15 +10,18 @@ Viewer, an Accounts User or Manager without an HR role) sees the supplier paymen
 - ``has_permission`` and ``query_conditions`` for ``DOCTYPES`` (registered in hooks.py): a single
   document, lists, report view, link search, exports, charts;
 - ``report_condition`` / ``visible`` for the reports that read these tables directly (M-Pesa
-  Payments Due, B2C Disbursement Summary).
-Employee M-Pesa Account is closed to the other roles by its DocPerms.
+  Payments Due, B2C Disbursement Summary);
+- ``version_has_permission`` and ``version_query_conditions`` for their Versions (track changes:
+  the rows and fields a save changed), which Frappe shows to System Manager.
+Employee M-Pesa Account is closed to the other roles by its DocPerms, and its Versions are too.
 
 A payout of an Expense Claim or Employee Advance is not a salary (plan C.8): a B2C row or request,
-a B2B request or a schedule line that pays an employee for one of them is shown by the DocType's
-own rights, to the Accounts roles who can read the claim (or advance): a role of theirs other than
-the employee's own has read on that DocType. To anyone else it stays hidden like a salary (who it
-paid, how much, to which phone or bank account). Salary Slips, payroll schedules and payments to
-an employee that name no document stay hidden.
+a B2B request or a schedule line that pays an employee for one of them, and a status query about
+such a B2C or B2B payout, is shown by the DocType's own rights, to the Accounts roles who can read
+the claim (or advance): a role of theirs other than the employee's own has read on that DocType.
+To anyone else it stays hidden like a salary (who it paid, how much, to which phone or bank
+account). Salary Slips, payroll schedules and payments to an employee that name no document stay
+hidden.
 """
 
 import frappe
@@ -73,15 +76,27 @@ _NOT_SALARY = {
 }
 
 
+def _b2b_links() -> list:
+    """The B2B request's claim and advance fields the site has (HRMS custom fields, migrate)."""
+    return [f for f in B2B_DOCUMENT_FIELDS if frappe.db.has_column(B2B, f)]
+
+
 def _not_salary(doctype: str, user: str | None = None) -> str:
     """SQL true for a row of ``doctype`` that is not salary data to ``user``: a B2B request for a
-    claim or advance too, where the site has those links; but a payout of a claim or advance the
-    user cannot read stays hidden like a salary."""
+    claim or advance too, where the site has those links, and a status query about one; but a
+    payout of a claim or advance the user cannot read stays hidden like a salary."""
     condition = _NOT_SALARY[doctype]
     if doctype == B2B:
-        links = [f"COALESCE(`tab{B2B}`.{f}, '') != ''" for f in B2B_DOCUMENT_FIELDS if frappe.db.has_column(B2B, f)]
+        links = [f"COALESCE(`tab{B2B}`.{f}, '') != ''" for f in _b2b_links()]
         if links:
             condition = f"({condition} OR {' OR '.join(links)})"
+    if doctype == STATUS:
+        links = [f"COALESCE(doc_b2b.{f}, '') != ''" for f in _b2b_links()]
+        if links:  # a query about a B2B payout of a claim or advance
+            condition = (f"({condition} OR (NOT EXISTS (SELECT 1 FROM `tab{B2C_REQUEST}` sal_req "
+                         f"WHERE sal_req.name = `tab{STATUS}`.b2c_request AND {SALARY_LINE_SQL.format(t='sal_req.')}) "
+                         f"AND EXISTS (SELECT 1 FROM `tab{B2B}` doc_b2b WHERE doc_b2b.name = `tab{STATUS}`.b2b_request "
+                         f"AND ({' OR '.join(links)}))))")
     unread = unread_documents(user)
     if unread:
         condition = f"({condition} AND NOT {_pays_documents_sql(doctype, unread)})"
@@ -118,13 +133,21 @@ def _pays_documents_sql(doctype: str, documents) -> str:
                 f"AND doc_row.parenttype = '{B2C}' AND {line('doc_row.')}))")
     if doctype == B2C_REQUEST:
         return line(f"`tab{B2C_REQUEST}`.")
+    fields = dict(zip(EMPLOYEE_DOCUMENTS, B2B_DOCUMENT_FIELDS))
+
+    def b2b(t: str) -> str | None:
+        links = [f"COALESCE({t}{fields[dt]}, '') != ''" for dt in documents if frappe.db.has_column(B2B, fields[dt])]
+        return f"(COALESCE({t}employee, '') != '' AND ({' OR '.join(links)}))" if links else None
+
     if doctype == B2B:
-        fields = dict(zip(EMPLOYEE_DOCUMENTS, B2B_DOCUMENT_FIELDS))
-        links = [f"COALESCE(`tab{B2B}`.{fields[dt]}, '') != ''" for dt in documents
-                 if frappe.db.has_column(B2B, fields[dt])]
-        return f"(COALESCE(`tab{B2B}`.employee, '') != '' AND ({' OR '.join(links)}))" if links else "1 = 0"
-    return (f"EXISTS (SELECT 1 FROM `tab{B2C_REQUEST}` doc_req WHERE doc_req.name = `tab{STATUS}`.b2c_request "
-            f"AND {line('doc_req.')})")
+        return b2b(f"`tab{B2B}`.") or "1 = 0"
+    condition = (f"EXISTS (SELECT 1 FROM `tab{B2C_REQUEST}` doc_req WHERE doc_req.name = `tab{STATUS}`.b2c_request "
+                 f"AND {line('doc_req.')})")
+    by_b2b = b2b("doc_b2b.")
+    if by_b2b:  # a query about a B2B payout of one of them
+        condition = (f"({condition} OR EXISTS (SELECT 1 FROM `tab{B2B}` doc_b2b "
+                     f"WHERE doc_b2b.name = `tab{STATUS}`.b2b_request AND {by_b2b}))")
+    return condition
 
 
 def pays_documents(doc, documents) -> bool:
@@ -145,7 +168,10 @@ def pays_documents(doc, documents) -> bool:
         request = doc.get("b2c_request")
         values = frappe.db.get_value(B2C_REQUEST, request, ["party_type", "reference_doctype"], as_dict=True) \
             if request else None
-        return bool(values) and line(values)
+        if values and line(values):
+            return True
+        b2b = _status_b2b(doc)  # a query about a B2B payout of one of them
+        return bool(b2b) and pays_documents(frappe._dict(b2b, doctype=B2B), documents)
     if doc.get("doctype") == B2C:
         header = doc.get("party_type") == "Employee" and doc.get("transaction_to_pay_against") in documents
         return header or any(line(r) for r in doc.get("references") or [])
@@ -203,9 +229,9 @@ def has_salaries(doc) -> bool:
             if request else None
         if values and is_salary_line(values):
             return True
-        # a query about a B2B payout to an employee (money_out.b2b_status)
-        b2b_request = doc.get("b2b_request")
-        return bool(b2b_request) and bool(cstr(frappe.db.get_value(B2B, b2b_request, "employee")).strip())
+        # a query about a B2B payout to an employee (money_out.b2b_status) for no claim or advance
+        b2b = _status_b2b(doc)
+        return bool(b2b) and has_salaries(frappe._dict(b2b, doctype=B2B))
     if doc.get("doctype") == B2C:
         header = doc.get("party_type") == "Employee" and doc.get("transaction_to_pay_against") not in EMPLOYEE_DOCUMENTS
         return header or any(is_salary_line(r) for r in doc.get("references") or [])
@@ -218,6 +244,14 @@ def has_salaries(doc) -> bool:
     return bool(name) and bool(frappe.db.sql(
         f"""SELECT 1 FROM `tab{LINE}` WHERE parent = %s AND parenttype = %s AND {SALARY_LINE_SQL.format(t='')}
         LIMIT 1""", (name, SCHEDULE)))
+
+
+def _status_b2b(doc):
+    """The B2B request a status query is about (its employee and claim or advance links), or None."""
+    name = cstr(doc.get("b2b_request")).strip()
+    if not name:
+        return None
+    return frappe.db.get_value(B2B, name, ["employee", *_b2b_links()], as_dict=True)
 
 
 def _own(doc, user: str) -> bool:
@@ -255,6 +289,45 @@ def schedule_query_conditions(user=None, doctype=None) -> str:
 
 def b2b_query_conditions(user=None, doctype=None) -> str:
     return query_conditions(user, B2B)
+
+
+# ---------------------------------------------------------------- Versions (track changes)
+VERSION = "Version"
+EMPLOYEE_ACCOUNT = "Employee M-Pesa Account"
+# DocTypes whose Versions may show salary data: what changed on a salary payout or schedule (who,
+# how much, to which phone or bank account), and every employee's phone and bank account
+VERSION_DOCTYPES = (*DOCTYPES, EMPLOYEE_ACCOUNT)
+
+
+def version_query_conditions(user=None, doctype=None) -> str:
+    """permission_query_conditions of Version: for who may not see salaries, the Versions of
+    ``DOCTYPES`` are listed only where the record itself is (``query_conditions``), and those of
+    Employee M-Pesa Account not at all. Every other Version is left as Frappe lists it."""
+    user = user or frappe.session.user
+    if can_see_salaries(user):
+        return ""
+    listed = ", ".join(frappe.db.escape(dt) for dt in VERSION_DOCTYPES)
+    shown = [f"COALESCE(`tab{VERSION}`.ref_doctype, '') NOT IN ({listed})"]
+    for dt in DOCTYPES:
+        shown.append(f"(`tab{VERSION}`.ref_doctype = {frappe.db.escape(dt)} AND EXISTS (SELECT 1 FROM `tab{dt}` "
+                     f"WHERE `tab{dt}`.name = `tab{VERSION}`.docname AND {query_conditions(user, dt)}))")
+    return "(" + " OR ".join(shown) + ")"
+
+
+def version_has_permission(doc, ptype=None, user=None, debug=False) -> bool:
+    """has_permission of Version: one of ``VERSION_DOCTYPES``'s is for who may see salaries, or who
+    the record itself passes (``has_permission``); one of Employee M-Pesa Account's only for who may
+    see salaries. A Version of a record that is gone stays hidden from the others."""
+    user = user or frappe.session.user
+    ref_doctype = cstr(doc.get("ref_doctype")).strip()
+    if ref_doctype not in VERSION_DOCTYPES or can_see_salaries(user):
+        return True
+    if ref_doctype == EMPLOYEE_ACCOUNT:
+        return False
+    docname = cstr(doc.get("docname")).strip()
+    if not docname or not frappe.db.exists(ref_doctype, docname):
+        return False
+    return has_permission(frappe.get_doc(ref_doctype, docname), "read", user)
 
 
 # ---------------------------------------------------------------- reports
