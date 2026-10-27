@@ -180,6 +180,71 @@ def test_a_paid_b2b_stops_counting_once_its_entry_is_allocated_to_the_claim(env)
     assert (result.parts, result.left) == ([], 0)
 
 
+def payees_held(env, monkeypatch, amount=3000):
+    """claim_payees.unpaid_lines for HR-EXP-1: one approved payee line of ``amount`` not paid yet."""
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    asked = []
+
+    def unpaid_lines(claim, exclude_lines=(), for_update=False):
+        asked.append((claim, sorted(exclude_lines or ()), for_update, list(env.locks)))
+        if claim != "HR-EXP-1" or "LN-1" in (exclude_lines or ()):
+            return []
+        return [fake_frappe._dict(kind="payee", name="LN-1", line="LN-1", amount=amount,
+                                  label=f"payee row #1 (Shell) {amount:,} not paid yet")]
+
+    monkeypatch.setattr(cp, "unpaid_lines", unpaid_lines)
+    return asked
+
+
+def test_a_claims_unpaid_payees_are_not_offered_to_its_employee(env, monkeypatch):
+    # final review: a claim of 5,000 approved with a 3,000 till line not paid yet offers its claimant 2,000
+    asked = payees_held(env, monkeypatch)
+    result = env.owed.employee_doc_left_to_pay(EC, "HR-EXP-1")
+    assert [(p.kind, p.name, p.amount) for p in result.parts] == [("payee", "LN-1", 3000)]
+    assert (result.owed, result.left) == (5000, 2000)
+    assert asked[-1] == ("HR-EXP-1", [], True, ["b2c-pay:Expense Claim:HR-EXP-1"])  # under the claim's lock
+    calls = [entry for entry in env.log if entry[0] == "row"]
+    assert calls[-1][1:3] == (EC, "HR-EXP-1")  # the claim's row read last (R4)
+    assert env.owed.employee_doc_left_to_pay(EC, "HR-EXP-1", exclude_payees=["LN-1"]).left == 5000  # its own share
+    advance(env)
+    assert env.owed.employee_doc_left_to_pay(EA, "HR-EAD-1").parts == []  # an advance has no payees
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User"}
+    status = env.ed.document_status(EC, "HR-EXP-1")
+    assert (status["left"], status["amount"], status["payees"]) == (2000, 2000, 3000)
+    out = env.ed.prepare_b2b(EC, "HR-EXP-1")  # Pay employee (bank / paybill / till): the rest only
+    assert (out["amount"], env.frappe.db.table(B2B)[out["name"]]["amount"]) == (2000, 2000)
+
+
+def test_a_b2b_request_to_the_employee_leaves_the_payees_share_and_a_payees_request_its_own(env, monkeypatch):
+    asked = payees_held(env, monkeypatch)
+    with pytest.raises(env.frappe.ValidationError, match="KES 2,500 is more than is left to pay. HR-EXP-1 owes "
+                                                         "5,000, less payee row #1 .Shell. 3,000 not paid yet: 2,000"):
+        env.b2b.validate_request(request(env, amount=2500))
+    env.b2b.validate_request(request(env, amount=2000))
+    cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    monkeypatch.setattr(cp, "check_b2b", lambda doc: None)  # the line's own checks (test_claim_payees)
+    asked.clear()
+    env.b2b.validate_request(request(env, amount=3000, claim_payee="LN-1", employee_mpesa_account=None,
+                                     command_id="BusinessBuyGoods", receiver_shortcode="835811"))
+    assert asked == [("HR-EXP-1", ["LN-1"], False, [])]  # a draft's save; its send reads under the lock
+
+
+def test_the_b2c_guards_take_off_draft_entries_and_the_claims_unpaid_payees(env, monkeypatch):
+    # owed.employee_doc_taken_off (B2C's submit and retry guards): what left_to_pay takes off that they
+    # do not read themselves. A draft entry carrying a receipt a B2B request or a Paid B2C payout counts
+    # already is skipped.
+    asked = payees_held(env, monkeypatch, 1000)
+    env.pe("ACC-PAY-9", None, [(EC, "HR-EXP-1", 500)], docstatus=0, party_type="Employee", party="EMP-1")
+    env.pe("ACC-PAY-8", "QB2B8", [(EC, "HR-EXP-1", 700)], docstatus=0, party_type="Employee", party="EMP-1")
+    parts = env.owed.employee_doc_taken_off(EC, "HR-EXP-1", [fake_frappe._dict(parent="MB2B-8", receipt="QB2B8")],
+                                            ["LN-2"])
+    assert [(p.kind, p.name, p.amount) for p in parts] == [("draft", "ACC-PAY-9", 500), ("payee", "LN-1", 1000)]
+    assert asked[-1][:3] == ("HR-EXP-1", ["LN-2"], True)
+    assert [(p.kind, p.name) for p in env.owed.employee_doc_taken_off(EC, "HR-EXP-1", [], ["LN-1"])] == [
+        ("draft", "ACC-PAY-8"), ("draft", "ACC-PAY-9")]
+    assert env.owed.employee_doc_taken_off("Purchase Invoice", "PINV-1") == []
+
+
 def test_b2b_open_needs_the_hrms_link_and_the_old_lookup_no_longer_fails(env):
     env.frappe.db.columns = env.frappe.db.columns - {(B2B, "expense_claim")}
     assert env.owed.b2b_open(EC, "HR-EXP-1") == []  # before the migrate makes the field (was a KeyError)
@@ -234,6 +299,26 @@ def test_the_workflow_states_listed_in_the_settings_may_be_paid(env):
     assert env.ed.payable_problem(doc) is None  # the list is blank: any submitted, approved claim
 
 
+def test_an_advance_under_its_own_workflow_takes_only_the_listed_states_its_workflow_has(env):
+    # final review: the list is the Expense Claim's (its label says so). A site running workflows on both,
+    # listing its claim states, refused every advance in its own final state.
+    advance(env, workflow_state="Approved by HOD")
+    doc = fake_frappe._dict(doctype=EA, name="HR-EAD-1")
+    lock_on(env, "Approved\nPending Attachment")
+    env.frappe.db.table("Workflow")["Advances"] = {"name": "Advances", "document_type": EA, "is_active": 1,
+                                                   "workflow_state_field": "workflow_state"}
+    for state in ("Draft", "Approved by HOD"):
+        env.frappe.db.table("Workflow Document State")[f"WDS-{state}"] = {
+            "name": f"WDS-{state}", "parent": "Advances", "parenttype": "Workflow", "state": state}
+    assert env.ed.payable_problem(doc) is None  # none of the listed states is the advance workflow's
+    env.settings.claim_payable_workflow_states = "Approved\nApproved by HOD"
+    assert env.ed.payable_problem(doc) is None
+    env.frappe.db.table(EA)["HR-EAD-1"]["workflow_state"] = "Draft"
+    assert env.ed.payable_problem(doc) == ("HR-EAD-1 is in workflow state Draft, which M-Pesa Suite Settings does not "
+                                           "list among the workflow states that may be paid.")
+    assert env.ed.payable_states_of(EC) == ["Approved", "Approved by HOD"]  # a claim: the whole list
+
+
 # ---------------------------------------------------------------- B2B for a claim or advance
 def test_a_b2b_request_for_a_claim_pays_its_employee_to_an_approved_account(env):
     doc = request(env)
@@ -265,6 +350,36 @@ def test_b2b_request_checks_for_a_claim(env, values, msg):
                                                  account_number="9999")
     with pytest.raises(env.frappe.ValidationError, match=msg):
         env.b2b.validate_request(request(env, **values))
+
+
+def test_a_b2b_to_an_employee_for_a_slip_or_no_claim_is_for_who_may_see_salaries(env, monkeypatch):
+    # final review (decision D4): its save would show the slip's net pay and copy the employee's approved
+    # bank account, paybill or till into a draft its maker reads
+    sa = importlib.import_module("mpsa_suite.money_out.salary_access")
+    seen = {"salaries": False}
+    monkeypatch.setattr(sa, "can_see_salaries", lambda user=None: seen["salaries"])
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User"}
+    doc = request(env, expense_claim=None, employee="EMP-1", employee_mpesa_account=None)
+    with pytest.raises(env.frappe.PermissionError, match="salaries are shown only to who may read Salary Slips"):
+        env.b2b.validate_request(doc)
+    assert not doc.get("employee_mpesa_account") and not doc.get("receiver_shortcode")  # nothing read
+    slip = request(env, expense_claim=None, employee="EMP-1", salary_slip="SAL-1", employee_mpesa_account=None)
+    with pytest.raises(env.frappe.PermissionError, match="salaries are shown only"):
+        env.b2b.validate_request(slip)
+    env.b2b.validate_request(request(env))  # a claim's payout is not salary data
+    seen["salaries"] = True
+    env.denied.add(("Salary Slip", "read"))
+    with pytest.raises(env.frappe.PermissionError):
+        env.b2b.validate_request(request(env, expense_claim=None, employee="EMP-1", salary_slip="SAL-1"))
+    env.b2b.validate_request(request(env, expense_claim=None, employee="EMP-1", amount=1500))
+    seen["salaries"] = False
+    sent = request(env, expense_claim=None, employee="EMP-1", amount=1500, docstatus=1)
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    env.b2b.validate_request(sent, at_submit=True)  # the send: the payer is not asked again
+    scheduled = request(env, expense_claim=None, employee="EMP-1", amount=1500)
+    scheduled.flags.mpesa_from_schedule = True
+    env.frappe.user_roles = {"Accounts User"}
+    env.b2b.validate_request(scheduled)  # Pay Selected checked its preparer
 
 
 def test_b2b_counts_b2c_payouts_of_the_claim_and_refuses_one_not_payable(env):
@@ -426,6 +541,32 @@ def test_make_entry_books_a_claim_and_only_a_manager_moves_it(env):
     assert env.entries.entry_facts("MB2B-P1")["expense_claim"] == "HR-EXP-1"
 
 
+def test_only_a_named_manager_moves_a_paid_payout_and_never_a_payees_or_a_schedule_lines(env):
+    # final review: the shared Administrator login (it holds M-Pesa Manager) could move a paid payout off
+    # the claim it paid, freeing the claim to be paid again; a payee's payout would leave its line Paid
+    claim(env, "HR-EXP-2")
+    paid_request(env, "MB2B-P2", transaction_id="QEXP2", entry_mode="Make the entry later")
+    env.frappe.session.user = "Administrator"
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        env.entries.make_entry("MB2B-P2", EC, expense_claim="HR-EXP-2")
+    env.frappe.session.user, env.frappe.user_roles = "manager@example.com", {"M-Pesa Manager", "Accounts Manager"}
+    paid_request(env, "MB2B-P3", transaction_id="QEXP3", entry_mode="Make the entry later", claim_payee="LN-1")
+    with pytest.raises(env.frappe.ValidationError, match="paid a payee of HR-EXP-1 .Expense Claim payee LN-1.: its "
+                                                         "entry is made on HR-EXP-1, never moved"):
+        env.entries.make_entry("MB2B-P3", EC, expense_claim="HR-EXP-2")
+    paid_request(env, "MB2B-P4", transaction_id="QEXP4", entry_mode="Make the entry later", schedule_line="MPSL-1",
+                 payment_schedule="MPS-1")
+    with pytest.raises(env.frappe.ValidationError, match="paid a line of M-Pesa Payment Schedule MPS-1 for HR-EXP-1"):
+        env.entries.make_entry("MB2B-P4", EC, expense_claim="HR-EXP-2")
+    env.entries.make_entry("MB2B-P2", EC, expense_claim="HR-EXP-2")  # a named manager moves a plain one
+    assert env.frappe.db.table(B2B)["MB2B-P2"]["expense_claim"] == "HR-EXP-2"
+    # money paid after its request was cancelled: booked by a named manager only
+    paid_request(env, "MB2B-P5", transaction_id="QEXP5", docstatus=2, entry_mode="Make the entry later")
+    env.frappe.session.user = "Administrator"
+    with pytest.raises(env.frappe.PermissionError, match="Use your own login"):
+        env.entries.make_entry("MB2B-P5", EC, expense_claim="HR-EXP-1")
+
+
 # ---------------------------------------------------------------- B2C: booking, cross-guard, rows, requests
 def test_a_b2c_claim_payout_is_booked_to_the_claims_employee_and_payable(env, monkeypatch):
     made = []
@@ -446,6 +587,42 @@ def test_a_b2c_claim_payout_is_booked_to_the_claims_employee_and_payable(env, mo
                             reference_name="PINV-1", reference_date=None, reference_no="QB2C2")
     service.create_payment_entry_for_doc(disbursement, ref)
     assert made[-1][1]["party_account"] == COMPANY_PAYABLE  # other documents keep the disbursement's
+
+
+def test_a_b2c_claim_payout_takes_only_what_the_claim_still_owes_and_alerts_the_rest(env, monkeypatch):
+    # final review: paid in part another way since the send (an HRMS bank entry), the claim takes what it
+    # still owes; the rest stays unallocated on the employee's entry and staff are told, once, as for B2B.
+    # Before, ERPNext refused the entry on every sweep for 30 days, with no alert.
+    made = []
+    api = types.ModuleType("mpsa_suite.mpsa_suite.api.payment_entry")
+    api.create_payment_entry = lambda *a, **kw: made.append((a, kw))
+    monkeypatch.setitem(sys.modules, api.__name__, api)
+    monkeypatch.delitem(sys.modules, "mpsa_suite.accounting.payment_entry_service", raising=False)
+    service = importlib.import_module("mpsa_suite.accounting.payment_entry_service")
+    pa = importlib.import_module("mpsa_suite.money_out.party_accounts")
+    alerts = []
+    monkeypatch.setattr(pa, "alert", lambda message, doc, roles=None: alerts.append((doc.name, message)))
+    env.frappe.db.table(EC)["HR-EXP-1"].update(total_amount_reimbursed=3000)  # 2,000 left of 5,000
+    disbursement = fake_frappe._dict(paid_to=COMPANY_PAYABLE, company="Astral", mode_of_payment="Mpesa-X", name="D-1")
+    ref = fake_frappe._dict(party_type="Employee", party="EMP-1", allocated_amount=5000, reference_doctype=EC,
+                            reference_name="HR-EXP-1", reference_date=None, reference_no="QB2C1",
+                            b2c_disbursement_request="B2C-9")
+    service.create_payment_entry_for_doc(disbursement, ref)
+    args, kw = made[-1]
+    assert args[2] == 5000  # the whole payout is on the entry
+    assert kw["references"] == [{"reference_doctype": EC, "reference_name": "HR-EXP-1", "allocated_amount": 2000,
+                                 "b2c_payment_disbursement": "D-1"}]
+    (alert,) = alerts
+    assert alert[0] == "B2C-9"
+    assert "HR-EXP-1 could take only KES 2,000 of this payment, so KES 3,000 is unallocated" in alert[1]
+    assert "Check that the employee was not paid twice." in alert[1]
+    env.frappe.db.table(EC)["HR-EXP-1"].update(total_amount_reimbursed=5000, status="Paid")  # nothing left
+    service.create_payment_entry_for_doc(disbursement, ref)
+    assert made[-1][1]["references"] == [] and len(alerts) == 2  # all of it unallocated, said so
+    alerts.clear()
+    env.frappe.db.table(EC)["HR-EXP-1"].update(total_amount_reimbursed=0, status="Unpaid")
+    service.create_payment_entry_for_doc(disbursement, fake_frappe._dict(ref, allocated_amount=500))
+    assert made[-1][1]["references"][0]["allocated_amount"] == 500 and alerts == []  # the usual case
 
 
 def test_the_b2c_guard_counts_b2b_requests_for_the_claim_and_its_payable_gate(env):
@@ -549,7 +726,7 @@ def test_a_row_paying_a_payee_of_the_claim_is_left_to_claim_payees(env, monkeypa
 
 def test_a_b2c_request_made_by_hand_is_held_to_the_same_rules(env):
     lock_on(env)
-    req = fake_frappe._dict(reference_doctype=SLIP, reference_name="SAL-2", party_type="Employee", party="EMP-2",
+    req = fake_frappe._dict(reference_doctype=None, reference_name=None, party_type="Employee", party="EMP-2",
                             phone_number="254733000000", docstatus=0, flags=fake_frappe._dict())
     with pytest.raises(env.frappe.ValidationError, match="is not a phone approved for EMP-2"):
         env.ed.check_b2c_request(req)
@@ -560,6 +737,26 @@ def test_a_b2c_request_made_by_hand_is_held_to_the_same_rules(env):
     with pytest.raises(env.frappe.PermissionError, match="You are EMP-2"):
         env.ed.check_b2c_request(req)
     req.flags.mpesa_from_disbursement = True  # its disbursement's rows were checked
+    env.ed.check_b2c_request(req)
+
+
+def test_a_b2c_request_made_by_hand_never_pays_a_salary_and_no_document_is_a_managers(env):
+    # final review: nothing caps a hand-made request by what the slip owes, or counts it while on its way
+    req = fake_frappe._dict(reference_doctype=SLIP, reference_name="SAL-2", party_type="Employee", party="EMP-2",
+                            phone_number=PHONE, amount=30000, docstatus=0, flags=fake_frappe._dict())
+    with pytest.raises(env.frappe.ValidationError, match="A Salary Slip is paid from an M-Pesa Payment Schedule line"):
+        env.ed.check_b2c_request(req)
+    req.flags.mpesa_from_schedule = True  # the schedule's own payout of the slip's line
+    env.ed.check_b2c_request(req)
+    # an employee paid for no document: sent by an M-Pesa Manager only, as a B2B request with none
+    req = fake_frappe._dict(reference_doctype=None, reference_name=None, party_type="Employee", party="EMP-2",
+                            phone_number=PHONE, amount=1500, docstatus=0, flags=fake_frappe._dict())
+    env.frappe.session.user, env.frappe.user_roles = "payer@example.com", {"M-Pesa Payer"}
+    env.ed.check_b2c_request(req)  # a draft
+    req.docstatus = 1
+    with pytest.raises(env.frappe.PermissionError, match="paid by an M-Pesa Manager"):
+        env.ed.check_b2c_request(req)
+    env.frappe.user_roles = {"M-Pesa Manager"}
     env.ed.check_b2c_request(req)
 
 
@@ -677,6 +874,66 @@ def test_the_name_check_runs_for_a_row_locked_to_an_approved_phone(env, monkeypa
     assert len(checked) == 1
 
 
+def supplier_phone(env, name="MSA-P1", phone="254711222333", **kw):
+    """An approved Phone (B2C) Supplier M-Pesa Account of ACME."""
+    env.frappe.db.table("Supplier M-Pesa Account")[name] = {
+        "name": name, "docstatus": 1, "supplier": "ACME", "account_type": PHONE_TYPE, "phone": phone,
+        "shortcode": None, "account_number": None, "expected_name": "ACME", "active_from": NOW - datetime.timedelta(days=1),
+        "is_default": 1, "name_mismatch": 0, "needs_reapproval": 0, "creation": NOW, **kw}
+    return name
+
+
+PHONE_TYPE = "Phone (B2C)"
+
+
+def test_a_supplier_row_pays_its_approved_phone_once_it_has_one(env):
+    # final review: a supplier's approved Phone (B2C) account (second approver, proof, hold) was never used:
+    # the row took the Contact's number, which anyone could edit. With an approved phone it pays only that.
+    row = row_of(env, party_type="Supplier", party="ACME", reference_doctype="Purchase Invoice",
+                 reference_name="PINV-1", partyb="0733000999")
+    row.validate()  # no approved phone account: the Contact's phone, as before
+    assert row.payee_account is None
+    supplier_phone(env)
+    with pytest.raises(env.frappe.ValidationError, match="Row #1: 254733000999 is not a phone approved for ACME. "
+                                                         "ACME has approved M-Pesa phone accounts"):
+        row.validate()
+    row.partyb = "0711222333"
+    row.validate()
+    assert (row.partyb, row.payee_account_doctype, row.payee_account) == (
+        "254711222333", "Supplier M-Pesa Account", "MSA-P1")
+    env.frappe.db.table("Supplier M-Pesa Account")["MSA-P1"]["needs_reapproval"] = 1  # e.g. a name mismatch
+    with pytest.raises(env.frappe.ValidationError, match="Row #1: .*MSA-P1"):
+        row.validate()
+
+
+def test_get_references_takes_the_suppliers_approved_phone(env):
+    identify = env.disb.B2CPaymentDisbursement.get_party_identifier
+    env.frappe.db.table("Contact")["C-1"] = {"name": "C-1", "link_name": "ACME", "phone": "0733000999",
+                                             "mobile_no": None}
+    entry = fake_frappe._dict(party="ACME")
+    assert identify(None, entry, "Supplier", "Mpesa Disbursement") == {"account_number": "0733000999"}
+    supplier_phone(env)
+    assert identify(None, entry, "Supplier", "Mpesa Disbursement") == {"account_number": "254711222333"}
+    env.frappe.db.table("Supplier M-Pesa Account")["MSA-P1"]["active_from"] = NOW + datetime.timedelta(days=1)
+    assert identify(None, entry, "Supplier", "Mpesa Disbursement") == {"account_number": ""}  # on hold: none
+
+
+def test_the_name_check_runs_for_a_suppliers_approved_phone(env, monkeypatch):
+    service = importlib.import_module("mpsa_suite.services.b2c_response_service")
+    pa = importlib.import_module("mpsa_suite.money_out.party_accounts")
+    checked = []
+    monkeypatch.setattr(pa, "record_receiver_name",
+                        lambda doctype, account, name, payout, notify=None: checked.append((doctype, account, name)))
+    env.frappe.db.table(ROW)["R1"] = {"name": "R1", "payment_status": "Initiated", "payee_account": "MSA-P1",
+                                      "payee_account_doctype": "Supplier M-Pesa Account",
+                                      "mpesa_schedule_line": None, "b2c_disbursement_request": "B2C-1"}
+    env.frappe.db.table(REQ)["B2C-1"] = {"name": "B2C-1", "docstatus": 1, "status": "Paid", "transaction_id": "QB2C9",
+                                         "transaction_completed_datetime": NOW, "b2c_payment_disbursement_reference": "R1",
+                                         "receiver_public_name": "254711***333 - ACME LTD"}
+    service.update_b2c_reference_status("B2C-1")
+    assert checked == [("Supplier M-Pesa Account", "MSA-P1", "254711***333 - ACME LTD")]
+
+
 def test_maker_checker_watches_the_approved_account_of_a_b2c_row(env):
     from mpsa_suite.money_out.maker_checker import PAID
 
@@ -789,6 +1046,45 @@ def test_a_claim_is_not_cancelled_while_a_payout_of_it_is_paid_or_on_its_way(env
                                                          "paid or on their way: MB2B-C, B2C-I, D-1"):
         env.ed.before_cancel(doc)
     assert env.ed.before_cancel(fake_frappe._dict(doctype=EC)) is None  # nothing named: nothing to find
+
+
+def test_a_draft_b2b_request_does_not_hold_the_cancel_but_a_submitted_one_does(env):
+    doc = fake_frappe._dict(doctype=EC, name="HR-EXP-1")
+    paid_request(env, "MB2B-D", docstatus=0, status="Not Initiated")
+    env.ed.before_cancel(doc)  # a draft is never sent once the claim is cancelled (payable_problem)
+    paid_request(env, "MB2B-S", docstatus=1, status="Not Initiated")  # submitted, its send not made yet
+    with pytest.raises(env.frappe.ValidationError, match="on their way: MB2B-S"):
+        env.ed.before_cancel(doc)
+
+
+@pytest.mark.parametrize("doctype", [EC, EA])
+def test_failed_payouts_do_not_hold_the_cancel_once_nothing_is_paid_or_on_its_way(env, doctype):
+    # HRMS's on_cancel sets the ledger DocTypes it ignores; the payouts are added after it (Frappe's back-link
+    # check runs after on_cancel and would refuse the cancel for a failed submitted payout naming the document)
+    hrms = ("GL Entry", "Stock Ledger Entry", "Payment Ledger Entry")
+    doc = fake_frappe._dict(doctype=doctype, name="DOC-1", ignore_linked_doctypes=hrms, mpesa_payees=[])
+    if doctype == EC:
+        importlib.import_module("mpsa_suite.money_out.claim_payees").on_cancel_claim(doc)
+    else:
+        env.ed.on_cancel(doc)
+    assert doc.ignore_linked_doctypes == (*hrms, B2B, DISB, ROW, REQ)
+    env.ed.on_cancel(doc)  # twice: nothing added twice
+    assert doc.ignore_linked_doctypes == (*hrms, B2B, DISB, ROW, REQ)
+    blank = fake_frappe._dict(doctype=doctype, name="DOC-2")
+    env.ed.ignore_payout_links(blank)
+    assert blank.ignore_linked_doctypes == (B2B, DISB, ROW, REQ)
+
+
+def test_the_advance_cancel_hook_is_wired_after_hrms():
+    import ast
+    from pathlib import Path
+
+    hooks = ast.literal_eval(ast.unparse(next(
+        node.value for node in ast.parse((Path(__file__).resolve().parents[2] / "mpsa_suite" / "hooks.py")
+                                         .read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "doc_events")))
+    assert hooks["Employee Advance"]["on_cancel"] == "mpsa_suite.money_out.employee_documents.on_cancel"
+    assert hooks["Expense Claim"]["on_cancel"] == "mpsa_suite.money_out.claim_payees.on_cancel_claim"
 
 
 # ---------------------------------------------------------------- not salaries

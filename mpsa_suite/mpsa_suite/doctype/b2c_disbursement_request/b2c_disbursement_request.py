@@ -199,6 +199,7 @@ class B2CDisbursementRequest(Document):
             b2b_open,
             b2b_slip_open,
             billed_order,
+            employee_doc_taken_off,
             order_advances,
             planned_lines,
             slip_bank_problem,
@@ -220,6 +221,7 @@ class B2CDisbursementRequest(Document):
                 paid = paid_without_entry(dt, dn)
                 elsewhere |= {o.parent for o in paid if mine not in (o.parents or [o.parent])}
                 others += paid
+            b2b = []
             if dt in DOC_FIELDS or dt in EMPLOYEE_DOC_FIELDS or dt == SLIP:  # B2B for it (same lock, locking read)
                 b2b = b2b_slip_open(dn, for_update=True) if dt == SLIP else b2b_open(dt, dn, for_update=True)
                 elsewhere |= {o.parent for o in b2b}
@@ -244,6 +246,11 @@ class B2CDisbursementRequest(Document):
             # document, are taken off, as on submit (R3)
             advances = order_advances(dn, for_update=True) if dt == "Purchase Invoice" else []
             advances += planned_lines(dt, dn, for_update=True)
+            if dt in EMPLOYEE_DOC_FIELDS:
+                # draft entries allocated to the claim or advance, and a claim's approved payee lines
+                # not paid yet but the one this payout pays: taken off, as owed.left_to_pay does
+                payee = self._claim_payee()
+                advances += employee_doc_taken_off(dt, dn, b2b, [payee] if payee else ())
             owed = current_outstanding(dt, dn, for_update=True)  # the document row last (R4)
             billed = billed_order(dn, for_update=True) if dt == "Purchase Order" else None
             if billed:  # its invoices are paid instead (B2B may have paid them already)
@@ -272,6 +279,14 @@ class B2CDisbursementRequest(Document):
                     ),
                     title=_("Already Paid"),
                 )
+
+
+    def _claim_payee(self) -> str | None:
+        """The Expense Claim payee line this payout's disbursement row pays (money_out.claim_payees)."""
+        ref = getattr(self, "b2c_payment_disbursement_reference", None)
+        if not ref or not frappe.get_meta("B2C Payment Disbursement Reference").has_field("claim_payee"):
+            return None
+        return frappe.db.get_value("B2C Payment Disbursement Reference", ref, "claim_payee") or None
 
 
 def _erpnext_installed() -> bool:

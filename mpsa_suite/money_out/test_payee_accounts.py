@@ -369,9 +369,16 @@ class TestPayeeAccounts(IntegrationTestCase):
     def test_an_employees_till_is_paid_by_buy_goods_with_no_account_number(self):
         till = _approved(EMP, "_T-MEA-PAYEE-TL", employee=self.other_employee, account_type=TILL, shortcode="835819",
                          expected_name="Test Till", is_default=1)
-        with _as(PREPARER):
-            request = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 1200, "company": t.COMPANY,
-                                      "employee": self.other_employee, "remarks": "T payee till"}).insert()
+        # a payment to an employee that no document caps is salary data (decision D4): prepared by an
+        # Accounts User who may also see salaries (HR User), never by an Accounts role alone
+        frappe.get_doc("User", PREPARER).add_roles("HR User")
+        try:
+            with _as(PREPARER):
+                request = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "amount": 1200,
+                                          "company": t.COMPANY, "employee": self.other_employee,
+                                          "remarks": "T payee till"}).insert()
+        finally:
+            frappe.get_doc("User", PREPARER).remove_roles("HR User")
         self.assertEqual((request.employee_mpesa_account, request.command_id, request.receiver_shortcode,
                           request.account_reference or None, request.entry_mode),
                          (till, "BusinessBuyGoods", "835819", None, "Make the entry later"))

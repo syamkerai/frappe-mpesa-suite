@@ -240,6 +240,7 @@ doc_events = {
     },
     "Employee Advance": {
         "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
+        "on_cancel": "mpsa_suite.money_out.employee_documents.on_cancel",  # its failed payouts do not hold it
     },
 }
 

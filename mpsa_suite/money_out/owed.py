@@ -426,13 +426,15 @@ def outstanding(dt: str, dn: str, for_update: bool = False) -> float:
 
 
 def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
-                for_update: bool = False):
+                exclude_payees=(), for_update: bool = False):
     """_dict(owed, parts, left): what the document owes, what is already on its way, and the rest.
 
     ``exclude_request``: the B2B request being checked. ``exclude_line`` / ``exclude_schedule``:
     the payment schedule line being checked, or the schedule being saved (planned_lines).
-    Payouts and planned lines are read before the document row (R4). A Salary Slip has its own
-    reading (slip_left_to_pay).
+    An Expense Claim's approved payee lines that no counted payout represents are its merchants'
+    and casual payees' money (claim_payees.unpaid_lines): taken off too, but ``exclude_payees``,
+    the lines the payout being checked pays. Payouts, planned lines and payee lines are read before
+    the document row (R4). A Salary Slip has its own reading (slip_left_to_pay).
     """
     if dt == SLIP:
         return slip_left_to_pay(dn, exclude_request=exclude_request, exclude_line=exclude_line,
@@ -453,17 +455,22 @@ def left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, ex
     parts += planned_lines(dt, dn, exclude_line, exclude_schedule, for_update)
     if dt == "Purchase Invoice":
         parts += order_advances(dn, for_update, exclude_request)
+    if dt == "Expense Claim":
+        from .claim_payees import unpaid_lines
+
+        parts += unpaid_lines(dn, exclude_payees, for_update)
     owed = outstanding(dt, dn, for_update)  # last: the document row (R4)
     left = max(0.0, flt(owed - sum(flt(p.amount) for p in parts), 2))
     return frappe._dict(owed=owed, parts=parts, left=left)
 
 
 def employee_doc_left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_line=None, exclude_schedule=None,
-                             for_update: bool = True):
+                             exclude_payees=(), for_update: bool = True):
     """left_to_pay of an Expense Claim or Employee Advance: HRMS's outstanding (utils.payouts.owed)
     less every payout of it on its way, whoever it pays (a merchant or casual payee of a claim
     too): B2C disbursement rows and Paid B2C requests naming it, B2B requests with its link, draft
-    entries and planned lines. _dict(owed, parts, left), as left_to_pay.
+    entries and planned lines; and a claim's approved payee lines not paid yet, but
+    ``exclude_payees`` (claim_payees.unpaid_lines). _dict(owed, parts, left), as left_to_pay.
 
     By default under the document's lock (held until commit), the one B2C, B2B and the schedule
     take, with locking reads, payouts first and the document row last (R4): what a check that
@@ -473,7 +480,29 @@ def employee_doc_left_to_pay(dt: str, dn: str, *, exclude_request=None, exclude_
         frappe.throw(f"{dt} is not an Expense Claim or Employee Advance.")
     with doc_lock(dt, dn) if for_update else contextlib.nullcontext():
         return left_to_pay(dt, dn, exclude_request=exclude_request, exclude_line=exclude_line,
-                           exclude_schedule=exclude_schedule, for_update=for_update)
+                           exclude_schedule=exclude_schedule, exclude_payees=exclude_payees, for_update=for_update)
+
+
+def employee_doc_taken_off(dt: str, dn: str, b2b=(), exclude_payees=()) -> list:
+    """For B2C's double-payout guards (the disbursement's submit, the retry of a payout) of an
+    Expense Claim or Employee Advance: what left_to_pay also takes off that they do not read
+    themselves, so a B2C payout of the document is held to what a B2B one is. Draft Payment and
+    Journal Entries allocated to it (one carrying a receipt the B2B requests ``b2b`` or the Paid B2C
+    payouts already count is skipped), and a claim's approved payee lines no payout represents
+    (claim_payees.unpaid_lines) but ``exclude_payees``, the lines the payout pays. Locking reads,
+    under the document's lock the caller holds. Parts {kind, name, amount, label}."""
+    if dt not in EMPLOYEE_DOC_FIELDS:
+        return []
+    parts = []
+    skip = {r.receipt for r in b2b or () if r.get("receipt")} | b2c_receipts(dt, dn)
+    for entry in draft_entries(dt, dn, skip, for_update=True):
+        parts.append(frappe._dict(kind="draft", name=entry.name, amount=entry.amount,
+                                  label=f"draft {entry.doctype} {entry.name} {money(entry.amount)}"))
+    if dt == "Expense Claim":
+        from .claim_payees import unpaid_lines
+
+        parts += unpaid_lines(dn, exclude_payees, for_update=True)
+    return parts
 
 
 def summary(result) -> dict:

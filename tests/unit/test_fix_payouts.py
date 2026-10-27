@@ -472,8 +472,24 @@ def test_salary_slip_without_payroll_entry_counts_b2c_only(env):
     assert env.mod.current_outstanding("Salary Slip", "SS-1") == 35123
 
 
-def test_get_references_skips_slips_b2c_already_paid(env):
+def _reads_slips(env, monkeypatch, denied=()):
+    """frappe.has_permission on Salary Slips: the user reads every slip but ``denied``."""
+    asked = []
+
+    def has_permission(doctype, ptype="read", doc=None, throw=False, **kw):
+        asked.append((doctype, ptype, doc))
+        allowed = doc not in denied
+        if throw and not allowed:
+            raise env.frappe.PermissionError(f"No {ptype} on {doctype} {doc}")
+        return allowed
+
+    monkeypatch.setattr(env.frappe, "has_permission", has_permission, raising=False)
+    return asked
+
+
+def test_get_references_skips_slips_b2c_already_paid(env, monkeypatch):
     # SS-1 was paid by B2C: its Journal Entry debits 45,123, which never equals net_pay 45,123.40
+    _reads_slips(env, monkeypatch)
     _slip(env)
     _slip(env, name="SS-2", employee="EMP-2", rounded_total=30000, net_pay=30000)
     _b2c_paid(env, "B2C-1", 45123)
@@ -486,7 +502,82 @@ def test_get_references_skips_slips_b2c_already_paid(env):
     assert [s.name for s in found] == ["SS-2"]
 
 
-def test_get_references_without_bank_entries_still_skips_paid_slips(env):
+def test_get_references_lists_only_the_slips_the_user_may_read(env, monkeypatch):
+    # final review (decision D4): each slip is read by its own rights (HRMS, User Permissions)
+    asked = _reads_slips(env, monkeypatch, denied={"SS-1"})
+    _slip(env)
+    _slip(env, name="SS-2", employee="EMP-2", rounded_total=30000, net_pay=30000)
+    slips = [fake_frappe._dict(name="SS-1", employee="EMP-1", net_pay=45123.40),
+             fake_frappe._dict(name="SS-2", employee="EMP-2", net_pay=30000)]
+    env.frappe.qb.results[:] = [slips, []]
+    found = env.Doc(name="D2")._fetch_unpaid_salary_slips("Salary Slip", {"payroll_entry": "PE-1"}, {})
+    assert [s.name for s in found] == ["SS-2"]
+    assert ("Salary Slip", "read", "SS-1") in asked
+
+
+def test_salary_references_are_for_who_may_see_salaries_and_read_the_payroll(env, monkeypatch):
+    # final review (decision D4): an Accounts Manager (prepare rights on the disbursement, no HR role) is
+    # refused Get References for Salary Slips (each employee's net pay and phone) before anything is read
+    payroll = importlib.import_module("mpsa_suite.money_out.payroll")
+    seen = {"salaries": False}
+
+    def require_salary_reader():
+        if not seen["salaries"]:
+            raise env.frappe.PermissionError(payroll.SALARIES_HIDDEN)
+
+    monkeypatch.setattr(payroll, "require_salary_reader", require_salary_reader)
+    asked = _reads_slips(env, monkeypatch, denied={"PE-9"})
+    fetched = []
+    monkeypatch.setattr(env.Doc, "_check_can_prepare", lambda self: None)
+    monkeypatch.setattr(env.Doc, "_fetch_entries", lambda self, *a: fetched.append(a[0]) or [])
+    doc = env.Doc(name="D2")
+    args = {"transaction_to_pay_against": "Salary Slip", "payroll_entry": "PE-1", "company": "Astral"}
+    with pytest.raises(env.frappe.PermissionError, match="salaries are shown only"):
+        doc.get_outstanding_reference_documents(args)
+    seen["salaries"] = True
+    with pytest.raises(env.frappe.PermissionError, match="No read on Payroll Entry PE-9"):
+        doc.get_outstanding_reference_documents(dict(args, payroll_entry="PE-9"))
+    assert fetched == []
+    assert doc.get_outstanding_reference_documents(args) == [] and fetched == ["Salary Slip"]
+    assert ("Payroll Entry", "read", "PE-1") in asked
+    seen["salaries"] = False  # an invoice's references ask nothing of salaries
+    doc.get_outstanding_reference_documents({"transaction_to_pay_against": "Purchase Invoice", "company": "Astral"})
+    assert fetched[-1] == "Purchase Invoice"
+
+
+def test_a_salary_row_is_saved_only_by_who_may_see_salaries_and_read_its_slip(env, monkeypatch):
+    payroll = importlib.import_module("mpsa_suite.money_out.payroll")
+    seen = {"salaries": False}
+
+    def require_salary_reader():
+        if not seen["salaries"]:
+            raise env.frappe.PermissionError(payroll.SALARIES_HIDDEN)
+
+    monkeypatch.setattr(payroll, "require_salary_reader", require_salary_reader)
+    _reads_slips(env, monkeypatch, denied={"SS-9"})
+    row = fake_frappe._dict(reference_doctype="Salary Slip", reference_name="SS-1")
+    doc = env.Doc(name="D2", docstatus=0, transaction_to_pay_against="Salary Slip", references=[row],
+                  flags=fake_frappe._dict())
+    with pytest.raises(env.frappe.PermissionError, match="salaries are shown only"):
+        doc.check_salary_reader()
+    seen["salaries"] = True
+    doc.check_salary_reader()
+    row.reference_name = "SS-9"
+    with pytest.raises(env.frappe.PermissionError, match="No read on Salary Slip SS-9"):
+        doc.check_salary_reader()
+    seen["salaries"] = False
+    doc.docstatus = 1  # the send: the payer's roles see salaries, and HRMS gives them no slip
+    doc.check_salary_reader()
+    doc.docstatus = 0
+    doc.flags.mpesa_from_schedule = True  # Pay Selected checked its preparer
+    doc.check_salary_reader()
+    claims = env.Doc(name="D3", docstatus=0, transaction_to_pay_against="Expense Claim", flags=fake_frappe._dict(),
+                     references=[fake_frappe._dict(reference_doctype="Expense Claim", reference_name="EC-1")])
+    claims.check_salary_reader()  # not salary data
+
+
+def test_get_references_without_bank_entries_still_skips_paid_slips(env, monkeypatch):
+    _reads_slips(env, monkeypatch)
     _slip(env)
     _b2c_paid(env, "B2C-1", 45123, accounting_booked=0)  # paid, entry not made yet
     env.frappe.qb.results[:] = [[fake_frappe._dict(name="SS-1", employee="EMP-1", net_pay=45123.40)], []]

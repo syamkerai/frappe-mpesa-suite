@@ -348,6 +348,7 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
         frappe.throw("A payment to an employee cannot pay a Purchase Invoice or Purchase Order.")
     _check_payer(doc, at_submit)
     slip = salary_slip(doc)
+    _check_salary_reader(doc, slip)  # before the slip or the employee's account is read
     if slip:
         _take_from_slip(doc, slip)
     dt, dn = _take_from_employee_document(doc, slip)
@@ -375,6 +376,27 @@ def _validate_employee_request(doc, at_submit: bool) -> None:
                 _check_employee_document(doc, dt, dn, for_update=True)
         else:
             _check_employee_document(doc, dt, dn)
+
+
+def _check_salary_reader(doc, slip) -> None:
+    """Decision D4: a payment to an employee for a Salary Slip, or for no Expense Claim or Employee
+    Advance, is salary data (what the employee is paid, to which bank account, paybill or till).
+    Who may not see salaries (money_out.salary_access: an Accounts role alone) cannot make or change
+    one: its save would answer with the slip's net pay and copy the employee's approved account into
+    a draft its maker reads. A Salary Slip is also read by its own rights (HRMS). Checked on a
+    draft's save, before anything is read; not for a payment schedule's request (Pay Selected
+    checked its preparer), nor at the send (the payer's roles see salaries)."""
+    if (getattr(doc, "flags", None) or {}).get("mpesa_from_schedule") or cint(doc.get("docstatus")) != 0:
+        return
+    if not slip and owed.employee_document_of(doc)[0]:
+        return  # a claim's or advance's payout is not salary data (plan C.8)
+    from . import salary_access
+    from .payroll import SALARIES_HIDDEN
+
+    if not salary_access.can_see_salaries():
+        frappe.throw(SALARIES_HIDDEN, frappe.PermissionError)
+    if slip:
+        frappe.has_permission("Salary Slip", "read", doc=slip, throw=True)
 
 
 def _check_payer(doc, sending: bool) -> None:
@@ -414,11 +436,14 @@ def _take_from_employee_document(doc, slip) -> tuple:
 
 def _check_employee_document(doc, dt: str, dn: str, for_update: bool = False) -> None:
     """The claim or advance may be paid now and has at least this amount left, every payout of it
-    counted, whoever it pays (under its lock at submit and send: payouts first, R4)."""
+    counted, whoever it pays, and a claim's approved payee lines not paid yet but the one this
+    request pays (under its lock at submit and send: payouts first, R4)."""
     from . import employee_documents
 
+    payee = cstr(doc.get("claim_payee")).strip()
     result = owed.employee_doc_left_to_pay(dt, dn, exclude_request=doc.name,
-                                           exclude_line=doc.get("schedule_line") or None, for_update=for_update)
+                                           exclude_line=doc.get("schedule_line") or None,
+                                           exclude_payees=[payee] if payee else (), for_update=for_update)
     values = employee_documents.read_document(dt, dn, for_update=for_update)
     problem = employee_documents.payable_problem(values, dt)
     if problem:

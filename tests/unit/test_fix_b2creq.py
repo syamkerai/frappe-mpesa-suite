@@ -263,6 +263,22 @@ def test_unallocated_entry_for_the_receipt_books_nothing_more(book):
     assert "not allocated: allocate it to Purchase Invoice PI-1" in request["accounting_error"]
 
 
+def test_a_claims_payout_it_could_take_none_of_is_booked_unallocated_and_said_so(book, monkeypatch):
+    # final review: payment_entry_service books a claim's payout the claim can no longer take as an unallocated
+    # Payment Entry to the employee (and alerts): the first pass already says where it is, not "a draft"
+    def unallocated(disb, ref, submit=False):
+        book.add_entry(PE, PER, {"docstatus": 1, "payment_type": "Pay", "reference_no": ref.reference_no}, [])
+
+    monkeypatch.setattr(book.mod, "create_payment_entry_for_doc", unallocated)
+    _paid_row(book, 1, "SKT1AAAAAA", doctype="Expense Claim", name="HR-EXP-1", amount=3000, party="EMP-1")
+    assert book.mod.handle_successful_payment("D-1", "R1") is False
+    assert book.mod.handle_successful_payment("D-1", "R1") is False  # the sweep: nothing booked again
+    assert len(book.frappe.db.table(PE)) == 1
+    request = book.frappe.db.table(REQ)["B2C-1"]
+    assert request["accounting_booked"] == 0  # the double-payout guards still count it
+    assert "not allocated: allocate it to Expense Claim HR-EXP-1" in request["accounting_error"]
+
+
 def test_journal_entry_carrying_the_receipt_books_nothing_more(book):
     # Bank Reconciliation's Create Voucher copies the receipt into a Journal Entry's Cheque No
     book.add_entry(JE, JEA, {"docstatus": 1, "cheque_no": "SKT1AAAAAA"}, [{"reference_type": None, "reference_name": None}])
@@ -564,6 +580,14 @@ def retry(monkeypatch):
 
             monkeypatch.setattr(owed_mod, "planned_lines", planned_lines)
             monkeypatch.setattr(owed_mod, "slip_bank_problem", lambda slip: env.bank)
+            env.taken = []
+
+            def employee_doc_taken_off(dt, dn, b2b=(), exclude_payees=()):
+                frappe.calls.append(("employee_doc_taken_off", dt, dn, [o.parent for o in b2b], list(exclude_payees),
+                                     list(frappe.locks_held)))
+                return [fake_frappe._dict(o) for o in env.taken]
+
+            monkeypatch.setattr(owed_mod, "employee_doc_taken_off", employee_doc_taken_off)
             env.use_real_outstanding = lambda: monkeypatch.setattr(
                 disb, "current_outstanding", real_current_outstanding
             )
@@ -718,6 +742,30 @@ def test_retry_of_another_document_does_not_ask_about_order_advances(retry, monk
     assert not [c for c in retry.frappe.calls if c[0] == "order_advances"]
     # round 4: a B2B request may pay an Expense Claim too (money_out.employee_documents)
     assert [c[:3] for c in retry.frappe.calls if c[0] == "b2b_open"] == [("b2b_open", "Expense Claim", "EC-1")]
+
+
+def test_a_retry_of_a_claim_is_refused_by_a_draft_entry_on_it_and_its_payees_share(retry, monkeypatch):
+    # final review: the retry guard takes off what owed.left_to_pay also takes off (draft entries, a claim's
+    # unpaid payee lines), as the send does; an invoice's retry asks nothing more
+    import importlib
+
+    documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    monkeypatch.setattr(documents, "check_b2c_retry", lambda doc: None)
+    retry.owed = 5000
+    retry.taken = [{"kind": "draft", "name": "ACC-PAY-1", "amount": 5000, "label": "draft Payment Entry ACC-PAY-1 5,000"}]
+    request = retry.failed(amount=5000, doctype="Employee Advance", reference="EA-1")
+    with pytest.raises(fake_frappe.ValidationError, match="EA-1 owes 5000.0, less draft Payment Entry ACC-PAY-1 5,000"):
+        request.retry_failed_payment()
+    assert retry.sends == []
+    (asked,) = [c for c in retry.frappe.calls if c[0] == "employee_doc_taken_off"]
+    assert asked[:5] == ("employee_doc_taken_off", "Employee Advance", "EA-1", [], [])
+    assert "b2c-pay:Employee Advance:EA-1" in asked[5]  # under the document's lock
+    retry.taken = []
+    request.retry_failed_payment()
+    assert len(retry.sends) == 1
+    retry.frappe.calls.clear()
+    retry.failed(name="B2C-PI", amount=1000).retry_failed_payment()  # an invoice
+    assert not [c for c in retry.frappe.calls if c[0] == "employee_doc_taken_off"]
 
 
 def test_retry_reads_the_status_a_concurrent_retry_committed(retry):

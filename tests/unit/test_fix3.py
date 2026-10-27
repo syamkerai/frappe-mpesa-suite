@@ -324,6 +324,14 @@ def payout(monkeypatch):
 
             monkeypatch.setattr(owed_mod, "planned_lines", planned_lines)
             monkeypatch.setattr(owed_mod, "slip_bank_problem", lambda slip: env.bank)
+            env.taken = []
+
+            def employee_doc_taken_off(dt, dn, b2b=(), exclude_payees=()):
+                env.calls.append(("employee_doc_taken_off", dt, dn, [o.parent for o in b2b], list(exclude_payees),
+                                  list(env.locks)))
+                return [fake_frappe._dict(o) for o in env.taken]
+
+            monkeypatch.setattr(owed_mod, "employee_doc_taken_off", employee_doc_taken_off)
 
             def disbursement(name, *rows):
                 doc = disb.B2CPaymentDisbursement()
@@ -375,6 +383,52 @@ def test_b2b_is_asked_about_for_a_claim_too_but_not_order_advances(payout, monke
     doc.validate_no_double_payout()
     assert ("b2b_open", "Expense Claim", "EC-1", True, ["b2c-pay:Expense Claim:EC-1"]) in payout.calls
     assert not [c for c in payout.calls if c[0] == "order_advances"]
+
+
+@pytest.mark.parametrize("doctype", ["Expense Claim", "Employee Advance"])
+def test_a_draft_entry_on_the_claim_refuses_the_b2c_send_as_it_refuses_b2b(payout, monkeypatch, doctype):
+    # final review: HRMS's Make Payment Entry left as a draft for the whole claim. Prepare and B2B refuse
+    # ("Nothing is left to pay"), and so does the B2C send now: what owed.left_to_pay also takes off
+    # (owed.employee_doc_taken_off: draft entries, a claim's unpaid payee lines) is taken off here too.
+    employee_documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    monkeypatch.setattr(employee_documents, "payable_problem", lambda doc, doctype=None: None)
+    payout.owed = 5000
+    payout.taken = [{"kind": "draft", "name": "ACC-PAY-1", "amount": 5000, "label": "draft Payment Entry ACC-PAY-1 5,000"}]
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 5000, "reference_doctype": doctype,
+                                        "reference_name": "DOC-1"})
+    with pytest.raises(payout.frappe.ValidationError, match=f"{doctype} DOC-1 owes 5000.0, less draft Payment Entry "
+                                                            "ACC-PAY-1 5,000; this disbursement allocates 5000.0"):
+        doc.validate_no_double_payout()
+    key = f"b2c-pay:{doctype}:DOC-1"
+    asked = [c for c in payout.calls if c[0] == "employee_doc_taken_off"]
+    assert asked == [("employee_doc_taken_off", doctype, "DOC-1", [], [], [key])]  # under the document's lock
+    calls = [c[0] for c in payout.calls]
+    assert calls.index("employee_doc_taken_off") < calls.index("current_outstanding")  # the document row last (R4)
+    payout.taken = []
+    doc.validate_no_double_payout()  # once the draft entry is gone
+
+
+def test_a_claims_payee_batch_names_its_own_lines_and_an_invoice_asks_nothing_more(payout, monkeypatch):
+    employee_documents = importlib.import_module("mpsa_suite.money_out.employee_documents")
+    monkeypatch.setattr(employee_documents, "payable_problem", lambda doc, doctype=None: None)
+    doc = payout.disbursement("D-NEW", {"allocated_amount": 800, "reference_doctype": "Expense Claim",
+                                        "reference_name": "EC-1", "claim_payee": "LN-2"},
+                              {"allocated_amount": 700, "reference_doctype": "Expense Claim",
+                               "reference_name": "EC-1", "claim_payee": "LN-1"})
+    payout.b2b = [{"parent": "MB2B-3", "allocated_amount": 2000, "request_status": "Not Initiated", "receipt": ""}]
+    claim_payees = importlib.import_module("mpsa_suite.money_out.claim_payees")
+    monkeypatch.setattr(claim_payees, "paid_in_parts", lambda dt, dn: True)  # its till's draft is taken off
+    payout.owed = 5000
+    payout.taken = [{"kind": "payee", "name": "LN-3", "amount": 1500, "label": "payee row #3 (Jane) 1,500 not paid yet"}]
+    doc.validate_no_double_payout()  # 1,500 of 5,000 less 2,000 (the till's draft) less 1,500 (row #3)
+    (asked,) = [c for c in payout.calls if c[0] == "employee_doc_taken_off"]
+    assert asked[3:5] == (["MB2B-3"], ["LN-1", "LN-2"])  # its B2B requests' receipts skipped; its own lines its share
+    payout.taken[0]["amount"] = 1501
+    with pytest.raises(payout.frappe.ValidationError, match="less MB2B-3 Not Initiated 2,000; payee row #3"):
+        doc.validate_no_double_payout()
+    payout.calls.clear()
+    payout.disbursement("D-PI", {"allocated_amount": 500}).validate_no_double_payout()  # an invoice
+    assert not [c for c in payout.calls if c[0] == "employee_doc_taken_off"]
 
 
 def test_submit_takes_off_an_advance_still_on_the_invoices_order(payout):

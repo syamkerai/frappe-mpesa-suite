@@ -192,12 +192,21 @@ class TestEmployeePayouts(_Base):
 
     def test_b2b_to_an_employee_bank_paybill_without_a_slip_waits_for_make_entry(self):
         employee = self.employees["_T Pay Bank"]
+        values = {"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
+                  "remarks": "Allowance", "employee": employee}
+        # decision D4: a payment to an employee that no document caps is salary data (its save copies the
+        # employee's bank account): an Accounts User alone may not make it; one who may see salaries does
         with _as(PREPARER):
-            req = frappe.get_doc({"doctype": B2B, "mpesa_settings": SETTINGS, "company": t.COMPANY, "amount": 1500,
-                                  "remarks": "Allowance", "employee": employee})
-            req.insert()
-            self.assertEqual((req.employee_mpesa_account, req.receiver_shortcode, req.entry_mode, req.supplier),
-                             (self.accounts["_T Pay Bank"], "247247", "Make the entry later", None))
+            self.assertRaisesRegex(frappe.PermissionError, "salaries are shown only", frappe.get_doc(dict(values)).insert)
+        frappe.get_doc("User", PREPARER).add_roles("HR User")
+        try:
+            with _as(PREPARER):
+                req = frappe.get_doc(dict(values))
+                req.insert()
+                self.assertEqual((req.employee_mpesa_account, req.receiver_shortcode, req.entry_mode, req.supplier),
+                                 (self.accounts["_T Pay Bank"], "247247", "Make the entry later", None))
+        finally:
+            frappe.get_doc("User", PREPARER).remove_roles("HR User")
         # another person sends what Accounts prepared (maker-checker on direct payouts, decision D3)
         # (a payment no Salary Slip caps is sent by an M-Pesa Manager, with Send via M-Pesa)
         with patch("mpsa_suite.money_out.b2b.post", side_effect=self._ack):

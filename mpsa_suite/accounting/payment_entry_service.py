@@ -8,6 +8,23 @@ from mpsa_suite.mpsa_suite.api.payment_entry import (
 from mpsa_suite.wallet.accounts import b2c_utility_gl
 
 
+def _not_taken(request, problem: str) -> None:
+    """The claim or advance took only part (or none) of a B2C payout: a possible double payment.
+    A Comment on the payout and an alert to the Notify Role (M-Pesa Suite Settings), once: the entry
+    is made now, so the booking is not tried again. Never raises."""
+    from mpsa_suite.money_out.party_accounts import alert
+
+    doc = frappe._dict(doctype="B2C Disbursement Request", name=request)
+    message = f"{request}: {problem}"
+    try:
+        if request:
+            frappe.get_doc("B2C Disbursement Request", request).add_comment("Comment", problem)
+    except Exception:
+        frappe.log_error(title="M-Pesa B2C booking comment failed", message=f"{request}\n{frappe.get_traceback()}")
+    frappe.log_error(title="M-Pesa B2C payout not all on its document", message=message)
+    alert(message, doc)
+
+
 def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=False):
     """
     Create a Payment Entry for various reference doctypes.
@@ -52,6 +69,16 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
                 "b2c_payment_disbursement": b2c_disbursement.name,
             }
         ]
+        problem = None
+        if booking:
+            # The claim or advance takes what HRMS says it still owes (read last, a locking read), as a
+            # B2B payout's entry does: paid in part another way since the send (a bank entry), the rest
+            # stays on the entry unallocated and staff are told, instead of ERPNext refusing the entry
+            # ("Allocated Amount cannot be greater than outstanding") on every sweep.
+            from mpsa_suite.money_out.b2b_entries import employee_reference_rows
+
+            rows, problem = employee_reference_rows(dt, dn, amount, booking.employee)
+            references = [dict(row, b2c_payment_disbursement=b2c_disbursement.name) for row in rows]
 
         create_payment_entry(
             company,
@@ -71,6 +98,8 @@ def create_payment_entry_for_doc(b2c_disbursement, b2c_disbursement_ref, submit=
             party_account=party_account,
             bank_gl=b2c_utility_gl(b2c_disbursement_ref),
         )
+        if problem:
+            _not_taken(request, problem)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Payment Entry Service Error")
         raise  # the caller rolls back and the B2C accounting sweep retries

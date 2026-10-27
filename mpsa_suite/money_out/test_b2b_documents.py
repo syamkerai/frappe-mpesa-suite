@@ -134,6 +134,9 @@ class TestB2BDocuments(IntegrationTestCase):
         cls.cost_center = frappe.get_cached_value("Company", t.COMPANY, "cost_center")
         cls.payer = t.payer()  # sends the requests (Send via M-Pesa)
         cls.manager = t.manager()  # cancels one that may have been paid, having checked the statement
+        # moves a paid payout to another document, or books one paid after its request was cancelled: a named
+        # M-Pesa Manager (never the shared Administrator login) who may make Payment Entries
+        cls.booker = t.named_user("_t-b2b-booker@example.com", "M-Pesa Manager", "Accounts Manager")
         # Requests an interrupted run committed would show as earlier payouts to the test supplier
         # (it exists only for these tests).
         frappe.db.delete(B2B, {"supplier": cls.supplier})
@@ -471,8 +474,12 @@ class TestB2BDocuments(IntegrationTestCase):
         req = self._request(10000, purchase_order=po.name, entry_mode="Make the entry later")
         receipt = self._pay(req.name)
         pi = self._invoice_from_order_without_advances(po.name)
-        # the payout must not count against itself as an advance still on the order
-        b2b_entries.make_entry(req.name, PI, purchase_invoice=pi.name)
+        # the payout must not count against itself as an advance still on the order. Moving it off the order
+        # is a named manager's (the shared Administrator login is refused)
+        frappe.db.set_single_value("M-Pesa Suite Settings", "refuse_administrator_payouts", 1)
+        self.assertRaisesRegex(frappe.PermissionError, "Use your own login", b2b_entries.make_entry, req.name, PI,
+                               purchase_invoice=pi.name)
+        self._make_entry_as_booker(req.name, PI, purchase_invoice=pi.name)
         (pe,) = self._entries(receipt)
         self.assertEqual(self._refs(pe.name), [(PI, pi.name, 10000, None)])
         state = self._state(req.name)
@@ -700,6 +707,13 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual((row.status, row.transaction_id, row.entry_status or None), ("Initiated", None, None))
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
 
+    def _make_entry_as_booker(self, *args, **kwargs):
+        frappe.set_user(self.booker)
+        try:
+            return b2b_entries.make_entry(*args, **kwargs)
+        finally:
+            frappe.set_user("Administrator")
+
     def _cancel_as_manager(self, name):
         """An M-Pesa Manager cancels the request, having checked the statement."""
         frappe.set_user(self.manager)
@@ -886,7 +900,11 @@ class TestB2BDocuments(IntegrationTestCase):
         self._send(req, answer=(None, "unknown"))  # no answer from M-Pesa
         req = frappe.get_doc(B2B, req.name)
         self.assertEqual(req.status, "Unknown")
-        req.cancel()  # an admin checked the statement and found nothing (yet)
+        # A named M-Pesa Manager checked the statement and found nothing (yet). The shared
+        # Administrator login may not cancel a request that may have paid (decision 1).
+        self._cancel_as_manager(req.name)
+        req = frappe.get_doc(B2B, req.name)
+        self.assertEqual(req.docstatus, 2)
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 10000)
 
         with patch("mpsa_suite.money_out.supplier_accounts._alert") as alert:
@@ -900,7 +918,7 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual(self._line(receipt).status, "Unreconciled")  # its line and charge are still made
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)  # and it counts against the invoice
 
-        b2b_entries.make_entry(req.name, PI, purchase_invoice=pi.name)  # a manager books it
+        self._make_entry_as_booker(req.name, PI, purchase_invoice=pi.name)  # a named manager books it
         self.assertEqual(self._state(req.name).entry_status, "Entry Made")
         self.assertEqual(self._outstanding(pi.name), 6000)
 

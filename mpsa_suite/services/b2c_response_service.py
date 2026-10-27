@@ -98,11 +98,18 @@ def _payee_account(ref_name: str | None) -> str | None:
 
 
 def _check_receiver_name(req, line: str | None, account: str | None = None) -> None:
-    """The name M-Pesa paid against the employee's approved phone account (the row's, else its
-    schedule line's): a mismatch blocks the account until a manager confirms it. Never raises."""
+    """The name M-Pesa paid against the approved phone account the row names (an employee's, or a
+    supplier's Phone (B2C) account), else its schedule line's: a mismatch blocks the account until a
+    manager confirms it. Never raises."""
     try:
-        from mpsa_suite.money_out import employee_accounts
+        from mpsa_suite.money_out import employee_accounts, party_accounts, supplier_accounts
 
+        doctype = account and frappe.db.get_value("B2C Payment Disbursement Reference",
+                                                  req.b2c_payment_disbursement_reference, "payee_account_doctype")
+        if doctype == party_accounts.SUPPLIER_ACCOUNT:
+            party_accounts.record_receiver_name(doctype, account, req.receiver_public_name, req,
+                                                notify=supplier_accounts._alert)
+            return
         account = account or frappe.db.get_value("M-Pesa Payment Schedule Line", line, "payee_account")
         employee_accounts.record_receiver_name(req, account, req.receiver_public_name)
     except Exception:

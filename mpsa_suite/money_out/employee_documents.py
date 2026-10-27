@@ -36,6 +36,7 @@ from frappe.utils import cint, cstr, flt, nowdate
 
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
+from ..utils.phone import normalize_msisdn
 from ..permissions import PREPARE_ROLES, require
 from . import employee_accounts, owed, party_accounts
 
@@ -45,6 +46,7 @@ B2B = owed.B2B
 DISB, DISB_ROW, B2C_REQUEST = "B2C Payment Disbursement", "B2C Payment Disbursement Reference", "B2C Disbursement Request"
 LINE = owed.SCHEDULE_LINE
 EMPLOYEE_ACCOUNT = party_accounts.EMPLOYEE_ACCOUNT
+SUPPLIER_ACCOUNT = party_accounts.SUPPLIER_ACCOUNT
 PHONE = party_accounts.PHONE
 # The account types B2B pays (a phone is paid by B2C)
 B2B_TYPES = party_accounts.B2B_TYPES
@@ -91,6 +93,23 @@ def workflow_state_field(doctype: str) -> str | None:
     if not workflow:
         return None
     return workflow.workflow_state_field or "workflow_state"
+
+
+def payable_states_of(doctype: str) -> list:
+    """The listed payable workflow states (payable_states) that apply to ``doctype``. The setting is
+    the Expense Claim's (its label says so): the whole list applies to a claim. An Employee
+    Advance under a Workflow of its own takes only the listed states its Workflow has: a site that
+    lists its claim states ('Approved', 'Pending Attachment') does not refuse every advance in its
+    own final state ('Approved by HOD'), and one that lists an advance state holds advances to it."""
+    states = payable_states()
+    if doctype != ADVANCE or not states:
+        return states
+    workflow = frappe.db.get_value("Workflow", {"document_type": doctype, "is_active": 1}, "name")
+    if not workflow:
+        return []
+    own = set(frappe.get_all("Workflow Document State", filters={"parent": workflow, "parenttype": "Workflow"},
+                             pluck="state"))
+    return [s for s in states if s in own]
 
 
 def _check_doctype(doctype: str) -> None:
@@ -176,7 +195,7 @@ def payable_problems(dt: str, values) -> list:
             problems.append(f"{name} was paid when it was entered (Is Paid).")
     if not party_account(dt, values):
         problems.append(f"{name} has no {'Payable Account' if dt == EXPENSE_CLAIM else 'Advance Account'}.")
-    states = payable_states()
+    states = payable_states_of(dt)
     if values.get("state_field") and states:
         state = cstr(values.get(values.state_field)).strip()
         if state not in states:
@@ -291,6 +310,9 @@ def check_b2c_row(row) -> None:
         problem = not_its_employee(dt, dn, values.employee, party_type, party)
         if problem:
             frappe.throw(f"Row #{row.idx}: {problem}")
+    if party_type == "Supplier" and party:
+        check_supplier_b2c_row(row)
+        return
     if party_type != "Employee" or not party or getattr(row, "mpesa_schedule_line", None):
         return
     acc = _approved_phone(party, getattr(row, "partyb", None))
@@ -301,13 +323,51 @@ def check_b2c_row(row) -> None:
         frappe.throw(f"Row #{row.idx}: {problem}")
 
 
+def supplier_b2c_phone(supplier):
+    """The phone a B2C payout to ``supplier`` goes to when it has approved Phone (B2C) Supplier M-Pesa
+    Accounts: its default (or only) one that can be paid now, or "" when none can be paid now. None
+    when it has none: the Supplier's Contact phone is used, as before the payee accounts."""
+    if not supplier or not party_accounts.accounts_of(SUPPLIER_ACCOUNT, supplier, (PHONE,)):
+        return None
+    account = party_accounts.pick_account(SUPPLIER_ACCOUNT, supplier, (PHONE,))
+    return cstr(party_accounts.get_account(SUPPLIER_ACCOUNT, account).phone).strip() if account else ""
+
+
+def check_supplier_b2c_row(row) -> None:
+    """A B2C Payment Disbursement row paying a supplier that has approved Phone (B2C) Supplier
+    M-Pesa Accounts (approved by a second person with proof and a hold period): it pays one of them
+    that can be paid now, never a Contact number nobody approved, and names it (the name M-Pesa paid
+    is checked against it, and maker-checker watches it). On every save and at the send. A supplier
+    with no approved phone account is paid to its Contact's phone, as before."""
+    supplier = getattr(row, "party", None)
+    phones = party_accounts.accounts_of(SUPPLIER_ACCOUNT, supplier, (PHONE,))
+    phone = normalize_msisdn(getattr(row, "partyb", None))
+    matches = [a for a in phones if phone and normalize_msisdn(a.phone) == phone]
+    usable = [a for a in matches if not party_accounts.usable_problem(a, supplier, SUPPLIER_ACCOUNT)]
+    acc = (usable or matches or [None])[0]
+    row.payee_account_doctype = SUPPLIER_ACCOUNT if acc else None
+    row.payee_account = acc.name if acc else None
+    if not phones:
+        return
+    if not acc:
+        frappe.throw(f"Row #{row.idx}: {cstr(getattr(row, 'partyb', None)).strip() or 'No number'} is not a phone "
+                     f"approved for {supplier}. {supplier} has approved M-Pesa phone accounts, so B2C pays only one of "
+                     "them (Supplier > M-Pesa Accounts).")
+    problem = party_accounts.usable_problem(acc, supplier, SUPPLIER_ACCOUNT)
+    if problem:
+        frappe.throw(f"Row #{row.idx}: {problem}")
+
+
 def check_b2c_request(doc) -> None:
     """A B2C Disbursement Request made by hand (not by its disbursement's job or a payment
-    schedule, whose rows were checked). It never pays an Expense Claim or Employee Advance: no
-    amount check or lock guards it, and nothing counts it against the document while it is on its
-    way (owed.b2c_open lists disbursement rows), so they are paid by a disbursement (Pay employee
-    (phone)). An employee is paid to an approved phone (as a disbursement row is), and nobody
-    sends a payout to themselves."""
+    schedule, whose rows were checked). It never pays an Expense Claim, Employee Advance or Salary
+    Slip: no amount check or lock guards it, and nothing counts it against the document while it is
+    on its way (owed.b2c_open and b2c_slip_open list disbursement rows), so a second payout of the
+    document could pass, or it could pay more than is owed. They are paid by a disbursement (Pay
+    employee (phone)) or, a salary, from a payment schedule line. An employee is paid to an approved
+    phone (as a disbursement row is), nobody sends a payout to themselves, and a payment to an
+    employee that no document caps is sent by an M-Pesa Manager only (as a B2B request or a
+    schedule line with none)."""
     flags = getattr(doc, "flags", None) or frappe._dict()
     if flags.get("mpesa_from_disbursement") or flags.get("mpesa_from_schedule"):
         return
@@ -315,6 +375,10 @@ def check_b2c_request(doc) -> None:
     if dt in DOCTYPES:
         frappe.throw(f"An {dt} is paid by a B2C Payment Disbursement (Pay employee (phone) on the {dt}), not by a "
                      "B2C Disbursement Request made by hand.")
+    if dt == owed.SLIP:
+        frappe.throw("A Salary Slip is paid from an M-Pesa Payment Schedule line (Pay by M-Pesa on the slip or its "
+                     "Payroll Entry) or a B2C Payment Disbursement row, not by a B2C Disbursement Request made by "
+                     "hand.")
     if doc.get("party_type") == "Employee" and doc.get("party"):
         problem = phone_lock_problem(doc.party, doc.get("phone_number"))
         if problem:
@@ -323,6 +387,10 @@ def check_b2c_request(doc) -> None:
             problem = employee_accounts.own_payment_problem(doc.party)
             if problem:
                 frappe.throw(problem, frappe.PermissionError)
+            if not employee_accounts.is_manager():
+                from .b2b import NO_DOCUMENT
+
+                frappe.throw(NO_DOCUMENT, frappe.PermissionError)
 
 
 def _row_claim_payee(doc) -> str | None:
@@ -491,6 +559,8 @@ def document_status(doctype: str, name: str) -> dict:
         "in_flight": flt(sum(flt(p.amount) for p in sent if p.get("status") != "Paid"), 2),
         "unbooked": flt(sum(flt(p.amount) for p in sent if p.get("status") == "Paid"), 2),
         "drafts_planned": flt(sum(flt(p.amount) for p in result.parts if p.kind in ("draft", "planned")), 2),
+        # a claim's merchants and casual payees not paid yet: theirs, not the employee's (claim_payees)
+        "payees": flt(sum(flt(p.amount) for p in result.parts if p.kind == "payee"), 2),
         "parts": [p.label for p in result.parts],
         "problem": payable_problem(values, doctype),
         "can_prepare": can_prepare(),
@@ -759,10 +829,16 @@ def _inserted(doc, savepoint: str) -> str | None:
 
 
 # ---------------------------------------------------------------- the document's cancel
+# Payouts whose submitted records name a claim or advance (a Link, or a Dynamic Link of the row or
+# request): Frappe's back-link check would refuse the document's cancel for a failed one too
+PAYOUT_LINKS = (B2B, DISB, DISB_ROW, B2C_REQUEST)
+
+
 def paid_or_on_their_way(dt: str, dn: str) -> list:
     """M-Pesa payouts of the document that are Paid (also once cancelled: the money left) or still
-    on their way: B2B requests naming it, B2C requests paying it, rows of a submitted disbursement
-    not sent yet, and payment schedule lines sent for it."""
+    on their way: submitted B2B requests naming it (a draft is not: once the document is cancelled
+    it can no longer be sent, payable_problem), B2C requests paying it, rows of a submitted
+    disbursement not sent yet, and payment schedule lines sent for it."""
     found = []
     field = owed.EMPLOYEE_DOC_FIELDS[dt]
     if frappe.db.has_column(B2B, field):
@@ -770,7 +846,7 @@ def paid_or_on_their_way(dt: str, dn: str) -> list:
             f"""
             SELECT name FROM `tab{B2B}`
             WHERE `{field}` = %(dn)s
-              AND ((docstatus < 2 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
+              AND ((docstatus = 1 AND COALESCE(status, '') IN %(live)s) OR (docstatus IN (1, 2) AND status = 'Paid'))
             ORDER BY creation
             """,
             {"dn": dn, "live": ("", *B2B_LIVE)},
@@ -818,3 +894,19 @@ def before_cancel(doc, method=None):
     if paying:
         frappe.throw(f"{name} cannot be cancelled while M-Pesa payouts of it are paid or on their way: "
                      f"{', '.join(paying[:10])}. Its amended copy would show the whole amount as unpaid again.")
+
+
+def ignore_payout_links(doc) -> None:
+    """After before_cancel found no payout of the document paid or on its way, its failed payouts
+    (and drafts) do not hold the cancel: Frappe's back-link check, which runs after on_cancel,
+    would refuse it for any submitted B2B request, B2C disbursement or B2C request naming it, a
+    failed one too, and the cancel and amend is how a wrong phone, till or account is corrected.
+    HRMS's on_cancel sets the ledger DocTypes it ignores; these are added to them."""
+    current = tuple(doc.get("ignore_linked_doctypes") or ())
+    doc.ignore_linked_doctypes = current + tuple(d for d in PAYOUT_LINKS if d not in current)
+
+
+def on_cancel(doc, method=None) -> None:
+    """Employee Advance on_cancel (hooks.py doc_events, after HRMS's): ignore_payout_links. An
+    Expense Claim's runs from money_out.claim_payees.on_cancel_claim."""
+    ignore_payout_links(doc)

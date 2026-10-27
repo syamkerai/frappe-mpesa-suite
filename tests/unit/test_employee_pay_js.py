@@ -97,6 +97,13 @@ def test_a_payable_claim_offers_both_routes_and_the_headline():
     assert out["calls"][0] == ["xcall", "document_status", {"doctype": "Expense Claim", "name": "DOC-1"}]
 
 
+def test_the_headline_shows_what_the_claims_payees_hold():
+    # final review: a claim's merchants and casual payees not paid yet are not the employee's to take
+    reply = dict(STATUS, left=2000, amount=2000, in_flight=0, payees=3000)
+    out = form(mpsa={"can_prepare": True}, perms=BOTH, replies={"document_status": reply})
+    assert out["buttons"][0] == "headline (blue): M-Pesa: paid KES 0 · in flight KES 0 · left KES 2000 · for payees KES 3000"
+
+
 def test_an_advance_has_the_same_buttons():
     out = form("Employee Advance", "employee_advance.js", mpsa={"can_prepare": True}, perms=BOTH)
     assert "M-Pesa > Pay employee (phone)" in out["buttons"]
