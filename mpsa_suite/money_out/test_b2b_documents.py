@@ -120,6 +120,34 @@ def _terms() -> str:
     return TERMS
 
 
+PE_WORKFLOW = "_T M-Pesa Payment Entry Review"
+
+
+def _pe_review_workflow():
+    """An inactive Payment Entry workflow like Trident's (Draft > Pending Approval > Approved). Made once, since
+    its workflow_state column is a schema change; a test switches it on inside its own transaction."""
+    for state in ("Draft", "Pending Approval", "Approved"):
+        if not frappe.db.exists("Workflow State", state):
+            frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(ignore_permissions=True)
+    for action in ("Review", "Approve"):
+        if not frappe.db.exists("Workflow Action Master", action):
+            frappe.get_doc({"doctype": "Workflow Action Master", "workflow_action_name": action}).insert(
+                ignore_permissions=True)
+    if frappe.db.exists("Workflow", PE_WORKFLOW):
+        return
+    frappe.get_doc({
+        "doctype": "Workflow", "workflow_name": PE_WORKFLOW, "document_type": PE, "is_active": 0,
+        "workflow_state_field": "workflow_state", "send_email_alert": 0,
+        "states": [{"state": "Draft", "doc_status": "0", "allow_edit": "Accounts User"},
+                   {"state": "Pending Approval", "doc_status": "0", "allow_edit": "Accounts Manager"},
+                   {"state": "Approved", "doc_status": "1", "allow_edit": "Accounts Manager"}],
+        "transitions": [{"state": "Draft", "action": "Review", "next_state": "Pending Approval",
+                         "allowed": "Accounts User"},
+                        {"state": "Pending Approval", "action": "Approve", "next_state": "Approved",
+                         "allowed": "Accounts Manager"}],
+    }).insert(ignore_permissions=True)
+
+
 class TestB2BDocuments(IntegrationTestCase):
     @classmethod
     def setUpClass(cls):
@@ -144,6 +172,7 @@ class TestB2BDocuments(IntegrationTestCase):
         # Requests an interrupted run committed would show as earlier payouts to the test supplier
         # (it exists only for these tests).
         frappe.db.delete(B2B, {"supplier": cls.supplier})
+        _pe_review_workflow()
         frappe.db.commit()  # fixtures stay; each test rolls back to here
 
     def setUp(self):
@@ -546,7 +575,26 @@ class TestB2BDocuments(IntegrationTestCase):
             self.assertEqual(doc.custom_remark, 1)
             self.assertIn("Office rent", doc.remark)
 
+    def test_an_entry_is_posted_approved_under_a_payment_entry_workflow(self):
+        # the suite's entries are never drafts for review (2026-10-28): under a Payment Entry workflow like
+        # Trident's, the entry is submitted in its approved state, and the invoice's outstanding falls at once
+        frappe.db.set_value("Workflow", PE_WORKFLOW, "is_active", 1)
+        frappe.clear_cache(doctype=PE)
+        try:
+            self.assertEqual(frappe.get_meta(PE).get_workflow(), PE_WORKFLOW)
+            pi = self._invoice(10000)
+            req = self._request(4000, purchase_invoice=pi.name)
+            receipt = self._pay(req.name)
+            (pe,) = self._entries(receipt)
+            pe = frappe.get_doc(PE, pe.name)
+            self.assertEqual((pe.docstatus, pe.get("workflow_state")), (1, "Approved"))
+            self.assertEqual((self._state(req.name).entry_status, self._outstanding(pi.name)), ("Entry Made", 6000))
+        finally:
+            frappe.db.set_value("Workflow", PE_WORKFLOW, "is_active", 0)
+            frappe.clear_cache(doctype=PE)
+
     def test_draft_entry_keeps_the_invoice_blocked_until_submitted(self):
+        # a draft the suite made before the migrate switched every Mpesa Settings to post at once (or one staff made)
         frappe.db.set_value("Mpesa Settings", SETTINGS, "submit_b2c_accounting_entries", 0)
         try:
             self._draft_entry_keeps_the_invoice_blocked()

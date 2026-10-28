@@ -621,7 +621,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         je.append("accounts", {"account": bank.account, "credit_in_account_currency": amount, "cost_center": cost_center})
         je.flags.ignore_permissions = True
         je.insert()
-        # reviewed like the payout's own entry (B2C and B2B both follow this switch)
+        # posted like the payout's own entry: the switch is always on (migrate.post_entries_at_once)
         if cint(settings.get("submit_b2c_accounting_entries")):
             je.submit()
         return je.name

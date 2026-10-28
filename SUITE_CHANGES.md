@@ -297,6 +297,12 @@ Existing settings that do more now:
     approved with Approve.
   - The list's Actions > Submit is gone from these lists. Scripts and integrations that submitted
     payouts are refused.
+- **Entries are posted at once:** every Payment and Journal Entry the suite makes for a payout,
+  its charge or a statement transfer is submitted when it is made, and under a Payment Entry
+  workflow it lands in the workflow's approved state (Frappe sets it on submit). Nobody approves
+  M-Pesa entries: the money has left already. "Submit B2C Accounting Entries" (Mpesa Settings) and
+  "Submit Transfer and Funding Entries" (M-Pesa Suite Settings) are always on and read-only. Make
+  Entry posts too, so it is for a user who may submit the entry.
 - **Payee accounts:** a bank account is picked from the bank list; the default changes only with
   Make Default; a party with several approved accounts and no default shows red and is left out of
   payroll.
@@ -329,7 +335,8 @@ Existing settings that do more now:
    M-Pesa Payer. At least one person gets M-Pesa Manager to approve payee accounts, and that should
    not be the payer. Preparers keep Accounts User or Manager, or HR User or Manager. Give the
    people who prepare salary schedules an HR role as well as their Accounts role. Write the list
-   down.
+   down. A site still on Navari's original `frappe_mpsa_payments` (Astral) has no M-Pesa roles
+   until the suite is installed: see *Astral* below.
 3. **Claims and advances need read.** Whoever prepares payouts of claims or advances needs read
    on Expense Claim and Employee Advance. HRMS gives that read only to HR and Expense Approver
    roles (advances: Expense Approver only). Since the final pass HR User and HR Manager may
@@ -337,9 +344,12 @@ Existing settings that do more now:
    reads advances). Expense Approvers then also see supplier payouts on the payout lists, never
    salaries: decide whether that suits the site. An Accounts-only preparer still needs read on
    claims (Role Permission Manager).
-4. **Scripts and drafts.** Find the scripts, Server Scripts and integrations that submit payouts:
-   they will be refused and must use Send via M-Pesa. A B2C draft saved before the upgrade must
-   be saved once more before it is sent.
+4. **Scripts and drafts.** Find the Client Scripts, Server Scripts and integrations that submit
+   payouts (for example one that inserts and submits a B2C Payment Disbursement in one call): they
+   are refused and must use Send via M-Pesa. Also disable scheduled scripts that book Payment
+   Entries for paid payouts or change payout statuses: the suite does both, and two bookers can
+   make a second Payment Entry for one receipt. A B2C draft saved before the upgrade must be saved
+   once more before it is sent. Pause payouts for the deploy window if drafts may be in flight.
 5. **Note the site's own permission rules** (Custom DocPerm) on the M-Pesa DocTypes. A role such
    as "Super admin" that you want to keep must be added back after the reset.
 
@@ -352,19 +362,30 @@ Existing settings that do more now:
    if their roles changed.
 
 *After migrating*
-1. **M-Pesa Suite Settings > Permissions > Check Permissions**: read the differences, then **Reset**
-   the M-Pesa DocTypes it lists. Add back any site role you decided to keep. Until the reset, the
-   site's rules decide who sees the forms, but the server still refuses sends and approvals to
-   anyone without the round 4 roles.
+1. **M-Pesa Suite Settings > Permissions > Check Permissions, then Reset, before anything else**:
+   read the differences, then **Reset** the M-Pesa DocTypes it lists. While a DocType has site
+   rules, Frappe uses only those rules, so the round 4 roles (M-Pesa Payer, M-Pesa Manager, the new
+   preparers) have no rights on it until the Reset, and the server refuses the old roles: on
+   Trident and Astral nobody can send a B2C payout, and the M-Pesa Manager cannot open Mpesa
+   Settings, until then. Add back a site role only if it is still needed: one re-added with its old
+   rights can bring back rights the server then refuses, or a delete right.
 2. **Assign the roles** from step 2 if not done yet. Take the M-Pesa roles off shared or service
    logins: the Integration User needs only what
    [docs/ROLES_AND_PERMISSIONS.md](docs/ROLES_AND_PERMISSIONS.md) section 7 names.
    **Redo blocked accounts:** the migrate blocks every approved Supplier or Employee M-Pesa
-   Account that was approved by its own maker, or with the Administrator login (comment on each,
-   one alert per DocType to the Notify Role). The lists show them red. Cancel, amend and have a
-   named M-Pesa Manager approve each one before it is paid again (Trident: MSA-00002).
+   Account that was approved by its own maker, or with the Administrator login even when a named
+   user entered it (comment on each, one alert per DocType to the Notify Role: check that the
+   M-Pesa Manager receives it). The lists show them red. A blocked account is neither paid nor made
+   the default: cancel, amend and have a named M-Pesa Manager approve each one, then wait its hold
+   (Trident: MSA-00001 and MSA-00002).
 3. **Raise the Transaction Limit** on each Mpesa Settings to the real value (B2C is now capped by it
    at save and at send). Set the hold hours back to 24 if they were lowered for a test.
+3a. **Entries post at once.** The migrate switches "Submit B2C Accounting Entries" on, on every
+   Mpesa Settings, and "Submit Transfer and Funding Entries" on. Tell the accountant and the
+   Payment Entry workflow's approvers: M-Pesa entries no longer arrive as drafts for review. Drafts
+   the suite made before the upgrade stay drafts: submit or approve them. An entry that cannot be
+   submitted is not left as a draft: its payout shows why, the sweep tries again, and Make Entry
+   books it (for users who may submit Payment Entries).
 4. **Approve employees' phone accounts**: HR enters each Employee M-Pesa Account with its proof, an
    M-Pesa Manager approves it, and it is payable after the hold (24 hours by default).
 5. **Decide "Pay Employees by B2C Only to Approved Phones"**: switch it on once the employees paid
@@ -384,7 +405,12 @@ Existing settings that do more now:
 7. **Defaults**: on each supplier or employee with two or more approved accounts, press Make
    Default on one.
 8. **Claims**:
-   - set the workflow states that may be paid, if the site runs a Workflow on claims;
+   - set the workflow states that may be paid, if the site runs a Workflow on claims: list every
+     submitted state in which claims are paid today (Astral pays in "Pending Attachment" and in
+     "Submitted");
+   - review the old approved, unpaid claims and advances: after the upgrade each one shows
+     "M-Pesa: ... left" and the Pay buttons. Close, cancel or mark what was paid outside the ERP,
+     so nobody pays history;
    - decide merchant and casual payees (the switch, the Expense Claim Types, the caps);
    - tell staff to save claims they want paid by M-Pesa as not Is Paid.
 9. **Cost centers (F5)**: tell the accountant which cost center payout entries now use (the paid
@@ -393,6 +419,37 @@ Existing settings that do more now:
 10. **First payments**: small amounts, one route at a time, with the checks in
     [docs/TRIDENT_ROUND4_ROLLOUT.md](docs/TRIDENT_ROUND4_ROLLOUT.md) (generic apart from Trident's
     names).
+
+*Astral (still on Navari's `frappe_mpsa_payments`)*
+
+A read-only pre-flight of the live site (28 Oct 2026; `docs/ROUND4_PREFLIGHT_ASTRAL.md` in the
+folder above this repository) found that Astral cannot follow the Trident checklist as it is:
+1. **Three steps, not one.** Install the suite under the old name first (Stage A), give M-Pesa
+   Payer and M-Pesa Manager to named people (the roles exist only from then), rename (Stage B),
+   then deploy round 4. Deployed in one window, nobody can send between the migrate and the moment
+   the roles are given and the Reset is done: pause payouts for the window.
+2. **Astral's own Pay buttons stop.** Eight Client Scripts call three API Server Scripts
+   (`astral_b2c_quick_pay`, `astral_b2c_bulk_pay`, `astral_casual_bulk_pay`) that insert and submit
+   a B2C Payment Disbursement in one call; every payout of the last 30 days went this way. Round 4
+   refuses that submit: disable them at the deploy and show staff the suite's buttons.
+3. **Two scheduled scripts duplicate the suite:** "AIL B2C - Payment Entry Backstop" submits Payment
+   Entries for paid payouts, and "AIL B2C - Payout Watchdog" changes stuck payouts' status. Disable
+   both at the deploy. `astral_casual_cancel_failed` cancels B2C documents itself: retire it with
+   Astral's casual flow.
+4. **Two people per payout.** About 18 payouts a day, each made and sent today by the same person,
+   now need a second named M-Pesa Payer (maker-checker is on after the migrate).
+5. **B2C User stops sending at the migrate.** Astral's site rules give B2C User (10 people) the only
+   create, submit and cancel rights on the two B2C DocTypes. Reset them straight after the migrate,
+   give M-Pesa Payer to those who keep paying, and do not add B2C User back.
+6. **Claims are read through Astral's own roles** (Admin, Super Admin, the Expense Approver,
+   Expense Creator and Expense User roles, Payment User), not HRMS's: HR roles and Expense
+   Approver do not read claims there. Check the chosen preparers against that.
+7. **Workflow states:** list `Pending Attachment` and `Submitted` (step 8).
+8. **Old claims and advances:** 347 claims and 367 advances, most from before 21 Jul 2026, will show
+   the pay buttons: review them before the deploy (step 8).
+9. **Cost center:** the "AIL Mpesa Feed - PE Cost Center Autofill" Server Script fills Payment Entry
+   cost centers; the suite now sets them from the paid document. Decide whether it stays.
+10. Do not send the stale draft request B2C-26-08-000015: its disbursement is already Paid.
 
 ### Round 4 final review (42 findings, fixed in r4-final-a/b/c)
 
@@ -497,6 +554,20 @@ docs/r4_notes/VERIFY_COUNTING.md, VERIFY_READS.md, VERIFY_SENDS.md. What users n
   reason.
 - **Payment Requests:** the form shows "being booked" only for prompts the server counts as paid and
   not booked, so a reversed or C2B-booked prompt no longer hides Resend.
+
+### M-Pesa entries posted at once (2026-10-28)
+
+The suite's entries are never drafts for review. A payout's Payment Entry (B2C or B2B, claims and
+advances included), its salary or charge Journal Entry, and a statement import's transfer entry are
+submitted when they are made; under a Payment Entry workflow, Frappe puts the entry in the
+workflow's first submitted state (Approved on Trident). The two switches that used to leave them as
+drafts are read-only and always on: each settings form keeps them on, and every migrate switches
+them on (`migrate.post_entries_at_once`). Make Entry posts the entry it makes, so a user who may not
+submit it is refused instead of getting a draft. Drafts made before stay as they are: the suite
+still counts them and waits for staff to submit them. Tests:
+`tests/unit/test_r4_post_at_once.py`; on the bench, an entry made under an active Payment Entry
+workflow (Draft > Pending Approval > Approved) is submitted in Approved and the invoice's
+outstanding falls at once (`test_b2b_documents`).
 
 **Known limits** (after the final review)
 - An Integration Request's raw data of a B2C or B2B result holds the amount and receiver name

@@ -140,6 +140,7 @@ class MpesaSettings(Document):
 
     def validate(self) -> None:
         self.refresh_security_credential()
+        self.submit_b2c_accounting_entries = 1  # the suite's entries are posted at once (migrate.post_entries_at_once)
 
         if self.exchange_rates:
             for rate in self.exchange_rates:

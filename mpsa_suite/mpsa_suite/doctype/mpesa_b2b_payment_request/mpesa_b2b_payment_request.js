@@ -420,7 +420,6 @@ const mpsa_b2b = {
 					get_query: () => ({ filters: { company: f.company, is_group: 0 } }),
 				},
 				{ fieldtype: "Small Text", fieldname: "remark", label: __("Remark") },
-				{ fieldtype: "Check", fieldname: "submit", label: __("Submit the entry now"), default: 1 },
 			],
 			primary_action_label: __("Make Entry"),
 			primary_action(values) {

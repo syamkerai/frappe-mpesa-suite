@@ -33,6 +33,7 @@ WATCHED = (
 
 class MPesaSuiteSettings(Document):
     def validate(self):
+        self.submit_statement_entries = 1  # the suite's entries are posted at once (migrate.post_entries_at_once)
         if not self.get_password("callback_token", raise_exception=False):
             self.callback_token = frappe.generate_hash(length=40)
 

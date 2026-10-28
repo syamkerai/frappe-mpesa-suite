@@ -326,11 +326,12 @@
    "description": "Match incoming C2B payments to open invoices using the Reconciliation Priority table."
   },
   {
-   "default": "0",
-   "description": "Journal Entries, Payment Entries or Loan Disbursements",
+   "default": "1",
+   "description": "Always on: the M-Pesa Suite posts its own entries at once, submitted (in a Payment Entry workflow, its approved state), never as drafts for review: the money has left already. The Payment and Journal Entries of payouts and their charges.",
    "fieldname": "submit_b2c_accounting_entries",
    "fieldtype": "Check",
-   "label": "Submit B2C Accounting Entries"
+   "label": "Submit B2C Accounting Entries",
+   "read_only": 1
   },
   {
    "fieldname": "account_balance",
@@ -482,7 +483,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-23 20:00:00.000000",
+ "modified": "2026-10-28 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "Mpesa Settings",

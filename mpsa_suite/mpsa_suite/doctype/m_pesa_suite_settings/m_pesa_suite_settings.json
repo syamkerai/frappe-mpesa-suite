@@ -567,7 +567,8 @@
    "fieldtype": "Check",
    "label": "Submit Transfer and Funding Entries",
    "default": "1",
-   "description": "The Internal Transfer Payment Entries a statement import books (between two wallets, or between a wallet and a bank) are submitted and reconciled. Untick to leave them as drafts for review."
+   "description": "Always on: the M-Pesa Suite posts its own entries at once, submitted (in a Payment Entry workflow, its approved state), never as drafts for review: the money has left already. The Internal Transfer Payment Entries a statement import books (between two wallets, or between a wallet and a bank) are submitted and reconciled.",
+   "read_only": 1
   },
   {
    "fieldname": "column_break_statement_import",
@@ -697,7 +698,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-27 12:00:00.000000",
+ "modified": "2026-10-28 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

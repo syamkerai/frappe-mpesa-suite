@@ -5,6 +5,9 @@ its first live payments with it.
 - What round 4 changes: [SUITE_CHANGES.md](../SUITE_CHANGES.md), "Round 4", with its UPGRADE part.
 - Who may do what: [ROLES_AND_PERMISSIONS.md](ROLES_AND_PERMISSIONS.md).
 - What the October live test found: [../../docs/TRIDENT_LIVE_TEST_HANDOVER.md](../../docs/TRIDENT_LIVE_TEST_HANDOVER.md).
+- What a read-only pre-flight of the live site (28 Oct 2026) predicts the upgrade will change:
+  [../../docs/ROUND4_PREFLIGHT_TRIDENT.md](../../docs/ROUND4_PREFLIGHT_TRIDENT.md). Its findings are
+  folded into the steps below.
 
 Trident today:
 - Frappe 15.122, with the app still `frappe_mpsa_payments` (release C);
@@ -32,7 +35,7 @@ Fill in names before you start. One person may hold several of these jobs, but t
 | M-Pesa Manager | M-Pesa Manager (approves payee accounts, M-Pesa settings). Not the payer | |
 | Payer (one or two) | M-Pesa Payer | |
 | Preparer | Accounts Manager + HR User. Accounts Manager makes B2C and B2B drafts and schedules; HR User reads claims and sees salaries | |
-| HR | HR Manager or HR User (enters employees' M-Pesa accounts and claims) | |
+| HR | HR Manager or HR User (enters employees' M-Pesa accounts and claims). Only HR Manager makes Payroll Entries on Trident (E3) | |
 | Expense Approver | Expense Approver (approves claims and their payees) | |
 | Accountant | Accounts Manager (entries, reconciliation, the cost-center decision) | |
 | Pilot staff | two or three employees with a Safaricom line, for the test claims | |
@@ -65,8 +68,12 @@ Fill in names before you start. One person may hold several of these jobs, but t
     Claims too) from users without project rights. Give the payer, the preparer, the M-Pesa Manager
     and the Expense Approver `__All Project Access__` or the projects they handle.
   - Check: logged in as each of them, a claim with a project opens.
-- [ ] **A5. Clean up the service logins (handover F6).**
+- [ ] **A5. Clean up the service logins (handover F6), before the deploy.**
   - Who: IT.
+  - Why before: today no named person holds M-Pesa Payer or M-Pesa Manager; only two service
+    logins do. `asset-hub-reader@` holds both with System Manager, Accounts Manager and HR Manager,
+    and has an API key: the morning after it would be the one login that can send money and
+    approve payee accounts (the Administrator refusal does not cover it).
   - Do:
     - take the M-Pesa roles off `asset-hub-reader@` (it also holds System Manager and Accounts
       Manager: keep only what that connector needs);
@@ -104,7 +111,10 @@ Fill in names before you start. One person may hold several of these jobs, but t
       is expected);
     - the M-Pesa Bank Paybill list has 43 rows;
     - M-Pesa Suite Settings > Money Out shows "Payout Safety" and "Expense Claim Payees", with
-      "Administrator May Not Send Payouts or Approve Accounts" ticked.
+      "Administrator May Not Send Payouts or Approve Accounts" ticked;
+    - both supplier accounts, MSA-00001 and MSA-00002, show red "Blocked: Approve Again", each with a
+      comment, and one alert went to the Notify Role (E2);
+    - Mpesa Settings 985401 shows "Submit B2C Accounting Entries" ticked and read-only (C3).
 - [ ] **B3. Clear the cache.**
   - Who: IT.
   - Do: the site's Clear Cache on Frappe Cloud (or `bench --site <site> clear-cache`). Everyone
@@ -113,17 +123,24 @@ Fill in names before you start. One person may hold several of these jobs, but t
 
 ## C. Permissions
 
-- [ ] **C1. Check Permissions and Reset.**
+- [ ] **C1. Check Permissions and Reset, straight after B3, before any other step.**
   - Who: IT or the M-Pesa Manager.
+  - Why first: while a DocType has site rules, Frappe uses only those rules. Trident's rules on B2C
+    Payment Disbursement, B2C Disbursement Request and Mpesa Settings name no M-Pesa role, and the
+    server refuses the old ones. Until the Reset nobody can send a B2C payout, HR User and Expense
+    Approver cannot make a "Pay employee (phone)" draft, and the M-Pesa Manager cannot open Mpesa
+    Settings (so D1 waits for C1). B2B requests and Supplier M-Pesa Accounts have no site rules:
+    round 4's rights apply to them from the migrate.
   - Do:
     1. M-Pesa Suite Settings > Permissions > **Check Permissions**. It lists the M-Pesa DocTypes
        that have site rules (Payment Gateway belongs to the payments app and is left alone). "The
        site grants, beyond the suite" shows, for example, HR Manager, Accounts Manager and System
        Manager submitting B2C.
     2. Tick those DocTypes and press **Reset Selected**.
-    3. If the site wants its "Super admin" read back, add it in Role Permissions Manager.
-  - Check: each reset left a comment on M-Pesa Suite Settings, and Check Permissions shows no
-    differences (or only the Super admin rows you added back).
+    3. Super admin need not be added back: its 5 holders keep reading through System Manager or
+       Accounts Manager, and adding it back would restore its delete right on B2C requests.
+  - Check: each reset left a comment on M-Pesa Suite Settings, Check Permissions shows no
+    differences, and a payer opens a B2C disbursement.
 - [ ] **C2. Who reads claims.**
   - Who: IT.
   - Do: Trident's Expense Claim rules give HR Manager, HR User and Expense Approver; the preparer's
@@ -133,16 +150,23 @@ Fill in names before you start. One person may hold several of these jobs, but t
     give the preparer read on Employee Advance. Expense Approvers also see supplier payouts on
     both payout lists (no salaries); decide whether that is acceptable for Trident's approvers.
   - Check: the preparer sees the M-Pesa buttons on an approved, unpaid claim.
-- [ ] **C3. Decide the Payment Entry workflow.**
+- [ ] **C3. M-Pesa entries skip the Payment Entry workflow.**
   - Who: the Accountant.
-  - Do: Trident's Payment Entries go Draft > Pending Approval (Payment Creator) > Approved (Payment
-    Approver). While Mpesa Settings 985401 has "Submit B2C Accounting Entries" off (today), the
-    M-Pesa Payment Entries are made as drafts and go through that workflow.
-    - The claim or invoice shows Paid only once its entry is approved.
-    - The draft keeps the document counted, so it cannot be paid twice meanwhile.
-  - Decide: keep it off for the pilot (recommended), or switch it on after about 10 clean payouts
-    (handover section 6).
-  - Check: the decision is written down, and the Payment Approvers know M-Pesa entries will arrive.
+  - Know: Trident's Payment Entries go through Draft, Pending Approval, Not Banked and Banked (all
+    drafts) to Approved. The money of an M-Pesa payout has left already, so the suite posts every
+    entry it makes at once: the Payment Entry of a B2C or B2B payout is submitted straight into
+    **Approved** (Frappe sets the workflow's submitted state), and its charge Journal Entry is
+    submitted. "Submit B2C Accounting Entries" on Mpesa Settings is always on and read-only now; the
+    migrate switched it on. Make Entry posts the same way, so it is for someone who may submit
+    Payment Entries.
+    - A claim or invoice shows Paid as soon as its payout is booked; nobody approves M-Pesa entries.
+    - A booking that cannot be submitted (a validation of the entry) is not left as a draft: the
+      payout shows why it is not booked, is tried again every 15 minutes, and Make Entry (B2B) books
+      it.
+    - Drafts from the October test stay as they are: approve them through the workflow.
+  - Do: tell the Payment Creators and Payment Approvers that M-Pesa entries no longer arrive in
+    Pending Approval.
+  - Check: the October drafts are approved or deliberately left, and the approvers know.
 - [ ] **C4. Try the roles.**
   - Who: IT, with each person.
   - Do: nothing is sent in this step; only look at the buttons.
@@ -156,7 +180,11 @@ Fill in names before you start. One person may hold several of these jobs, but t
 
 - [ ] **D1. Transaction Limit.**
   - Who: the M-Pesa Manager.
-  - Do: Mpesa Settings 985401: raise Transaction Limit from 100 to the value finance agrees.
+  - Do: after C1 (the M-Pesa Manager cannot open Mpesa Settings before it): Mpesa Settings 985401,
+    raise Transaction Limit from 100 to the value finance agrees. First the Accountant confirms
+    whether HR-EXP-2026-00011, the one old claim that is submitted, approved, unpaid and not Is
+    Paid, is still owed (it may have been paid outside the ERP): it shows the M-Pesa pay buttons, and
+    the new limit makes it payable.
   - Check: saved. Every B2C row above it is now refused at save and at send (F7), so 100 would
     refuse almost everything.
 - [ ] **D2. Hold hours, Notify Role, Integration User.**
@@ -164,7 +192,10 @@ Fill in names before you start. One person may hold several of these jobs, but t
   - Do: on M-Pesa Suite Settings:
     - set "Hold New Supplier M-Pesa Accounts (Hours)" back to **24** (it was 0 for the test);
     - keep "Hold New Employee M-Pesa Accounts (Hours)" at 24;
-    - confirm the Notify Role reaches people who act on alerts;
+    - confirm the Notify Role reaches people who act on alerts: it is Accounts Manager, which 16
+      logins hold, `asset-hub-reader@` among them. Unless the M-Pesa Manager also holds Accounts
+      Manager, they miss the alerts (the migrate's block alert included): change the Notify Role or
+      tell them;
     - keep "Who Sends a Payout Must Not Be Who Prepared It" on;
     - keep "Allow B2B to Numbers Not Saved on a Supplier" off.
   - Check: each change left a comment on the settings and an alert to the Notify Role.
@@ -216,20 +247,21 @@ Fill in names before you start. One person may hold several of these jobs, but t
        reads the summary and confirms after 5 seconds.
   - Check: each account is Approved with its hold time, and the Employee form shows it as the
     default.
-- [ ] **E2. Supplier accounts.**
-  - Who: the Accountant; the M-Pesa Manager.
+- [ ] **E2. Supplier accounts (day 1, with E1).**
+  - Who: the M-Pesa Manager; the Accountant; a second M-Pesa Manager.
   - Do: Astral Industries Ltd has two approved accounts, MSA-00001 (Paybill 208911) and MSA-00002
-    (Till 835811).
-    1. The Accountant presses **Make Default** on MSA-00001.
-    2. Required: MSA-00002 was entered **and** approved by Administrator (handover F3), so the
-       migrate blocked it ("Blocked: Approve Again", with a comment and one alert to the Notify
-       Role). Cancel and amend it, so a named person enters it and the M-Pesa Manager approves
-       it. Any other account the migrate blocked (approved by its own maker, or with
-       Administrator) is redone the same way.
+    (Till 835811). The migrate blocked **both** ("Blocked: Approve Again"): MSA-00001 was approved
+    with the Administrator login although a named user entered it, and MSA-00002 was entered and
+    approved by Administrator (handover F3). A blocked account cannot be paid or made the default.
+    1. An M-Pesa Manager cancels both (only M-Pesa Manager may cancel these accounts now).
+    2. The Accountant amends both (they normally become MSA-00001-1 and MSA-00002-1).
+    3. An M-Pesa Manager who did not amend them approves both.
+    4. After the 24-hour hold (D2), the Accountant presses **Make Default** on the paybill account.
+    Any other account the migrate blocked is redone the same way. F2 and F3 move to the day after.
   - Check: the Supplier form shows no red "none is the default" headline, and the Supplier M-Pesa
     Account list shows no red "Blocked" indicator.
 - [ ] **E3. The test employee's salary.**
-  - Who: HR.
+  - Who: an HR Manager (Trident lets only HR Manager make Payroll Entries).
   - Do: make a one-employee Payroll Entry for the test employee (a small test salary) and submit
     its Salary Slip. Make no bank entry for this payroll.
   - Check: the slip is submitted, and the payroll has no Bank Entry.
@@ -257,20 +289,21 @@ the checks in G before the next one. Amounts KES 10 to 100.
   - Check:
     - the B2C request is Paid with a receipt, and the name check is fine on the account;
     - a Payment Entry was made to the employee on **3.1.4 Petty Cash Accruals**, referencing the
-      claim, with its project and cost center (a draft in the PE workflow, C3);
-    - once the entry is approved, the claim shows Paid and its headline "left 0".
+      claim, with its project and cost center, submitted and **Approved** (C3);
+    - the claim shows Paid and its headline "left 0".
 - [ ] **F2. A small B2B: a Purchase Invoice to a paybill (handover R2-3).**
   - Who: the preparer; a payer.
   - Do:
     1. A test Purchase Invoice of Astral Industries Ltd for KES 50.
-    2. The preparer: M-Pesa > **Pay via M-Pesa (B2B)**, to MSA-00001; save.
+    2. The preparer: M-Pesa > **Pay via M-Pesa (B2B)**, to the amended paybill account (E2), once
+       its hold has passed; save.
     3. A payer: Send via M-Pesa.
   - Check:
     - Paid, with a receipt;
     - "208911 - ..." matches the account;
     - charge 3 stated;
-    - the Payment Entry was **booked automatically** on the invoice (F1: no permission error,
-      project or not);
+    - the Payment Entry was **booked automatically** on the invoice, submitted and Approved (F1: no
+      permission error, project or not);
     - the CHG-<receipt> line and its charge Journal Entry are made, both rows on Project - TPL;
     - the invoice's outstanding fell by 50.
 - [ ] **F3. An Expense Claim paid to a till (merchant pay).**
@@ -278,8 +311,8 @@ the checks in G before the next one. Amounts KES 10 to 100.
   - Do:
     1. A pilot employee's claim of a ticked type, saved unpaid. In M-Pesa Payees, one line: Pay To
        **Till (Buy Goods)**, the merchant's name, the till number, KES 50, the expense line it pays.
-       Use a merchant till, or Astral's 835811, which is an approved supplier account and so is
-       noted and not capped.
+       Use a merchant till, or Astral's 835811 once its amended account (E2) is approved and past
+       its hold: an approved supplier account is noted and not capped.
     2. The Expense Approver approves and submits the claim.
     3. The preparer: **Pay Merchants and Payees**, which makes one draft B2B request.
     4. A payer: Send via M-Pesa.
@@ -327,14 +360,13 @@ the checks in G before the next one. Amounts KES 10 to 100.
   gap from A6. It must not grow.
 - [ ] **G3. Statement lines.** If Create Bank Transactions is on, the Bank Reconciliation Tool for
   M-Pesa 985401 shows each payout and each CHG line Reconciled once its entries are submitted.
-- [ ] **G4. Entries.** Each payout's Accounting Entry is "Entry Made" (or a draft waiting in the
-  Payment Entry workflow). The "B2B Paid, Entry Not Made" shortcut in the M-Pesa workspace is
-  empty.
+- [ ] **G4. Entries.** Each payout's Accounting Entry is "Entry Made", submitted and Approved. The
+  "B2B Paid, Entry Not Made" shortcut in the M-Pesa workspace is empty.
 - [ ] **G5. Logs.** Mpesa Match Log has no "Charge not stated" row and no unexplained "not sent by
   the ERP" row. Error Log has no M-Pesa error (ignore connector "Document Creation Error" rows,
   F10).
-- [ ] **G6. Documents.** The claims show Paid (after their entries are approved), the invoice's
-  outstanding fell, and the slip shows paid.
+- [ ] **G6. Documents.** The claims show Paid, the invoice's outstanding fell, and the slip shows
+  paid.
 - [ ] **G7. Who did what.** On every payout and approval, the preparer and the sender (or the
   enterer and the approver) are different named people, and none is Administrator.
 
@@ -342,8 +374,8 @@ the checks in G before the next one. Amounts KES 10 to 100.
 
 - [ ] **H1.** M-Pesa Manager: switch on "Pay Employees by B2C Only to Approved Phones" once the
   employees paid by B2C have approved phones (E4).
-- [ ] **H2.** Accountant and M-Pesa Manager: after about 10 clean payouts, decide "Submit B2C
-  Accounting Entries" (C3), and set "If No Integration User" to **Refuse**.
+- [ ] **H2.** M-Pesa Manager: after about 10 clean payouts, set "If No Integration User" to
+  **Refuse**.
 - [ ] **H3.** Accountant: post the balance-matching entry for the 253 if it is still open.
 - [ ] **H4.** Finance lead: train the other payers and preparers. Tell staff to save claims they
   want paid by M-Pesa as not Is Paid. They may list merchants on the claim instead of paying from

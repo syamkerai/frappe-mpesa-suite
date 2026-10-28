@@ -290,6 +290,8 @@ def test_book_automatically_books_the_invoice_as_administrator_under_the_locks(e
 
 
 def test_book_automatically_leaves_a_draft_when_entries_are_reviewed(env):
+    # the switch is always on since 2026-10-28 (migrate.post_entries_at_once); a site whose switch is still off
+    # (before its migrate) keeps the draft path
     env.frappe.db.table("Mpesa Settings")[b2b_fixture.SETTINGS]["submit_b2c_accounting_entries"] = 0
     env.request(transaction_id="R1")
     env.entries.book_automatically("MB2B-1")
@@ -498,12 +500,6 @@ def test_make_entry_needs_a_finance_role_and_erpnexts_permission(env):
     with pytest.raises(env.frappe.PermissionError):
         make(env, "Supplier Advance")
     assert env.inserted == []
-
-
-def test_make_entry_leaves_a_draft_for_a_user_who_may_not_submit(env):
-    env.request(transaction_id="R1")
-    env.denied.add(("Payment Entry", "submit"))
-    assert make(env, "Supplier Advance")["entry_status"] == "Draft Entry"
 
 
 def test_moving_a_payout_to_another_document_needs_a_manager(env):

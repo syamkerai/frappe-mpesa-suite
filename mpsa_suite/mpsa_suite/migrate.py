@@ -15,6 +15,7 @@ def after_migrate():
     ensure_roles()
     access.after_migrate()  # Role Profiles, credential-field access, site permission overrides
     ensure_suite_settings()
+    post_entries_at_once()
     ensure_lookup_indexes()
     sync_payee_accounts()
 
@@ -30,6 +31,19 @@ def after_migrate():
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
         create_claim_payee_fields()
+
+
+
+def post_entries_at_once():
+    """The suite's own Payment and Journal Entries (payouts, their charges, statement transfers) are
+    posted at once: submitted, and in a Payment Entry workflow its first submitted state (Approved),
+    which Frappe sets on submit. Never drafts left for review, since the money has left already.
+    Every migrate switches both settings on; drafts made before stay as they are, for staff."""
+    if frappe.db.has_column("Mpesa Settings", "submit_b2c_accounting_entries"):
+        frappe.db.sql("UPDATE `tabMpesa Settings` SET submit_b2c_accounting_entries = 1 "
+                      "WHERE IFNULL(submit_b2c_accounting_entries, 0) = 0")
+    if frappe.db.exists("DocType", "M-Pesa Suite Settings"):
+        frappe.db.set_single_value("M-Pesa Suite Settings", "submit_statement_entries", 1)
 
 
 def create_claim_payee_fields():

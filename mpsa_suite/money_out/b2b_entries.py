@@ -743,16 +743,20 @@ def build_journal_entry(doc, account: str, cost_center, remark: str):
 # ---------------------------------------------------------------- Make Entry and Check Entry Again
 @frappe.whitelist(methods=["POST"])
 def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=None, account=None,
-               cost_center=None, submit=1, remark=None, salary_slip=None, expense_claim=None, employee_advance=None):
+               cost_center=None, remark=None, salary_slip=None, expense_claim=None, employee_advance=None):
     """Make the entry of a Paid request now: against an invoice or order, as a supplier advance,
     as a Journal Entry, or (a payment to an employee) as the salary entry of a Salary Slip or the
     Payment Entry of an Expense Claim or Employee Advance. Runs with the user's own ERPNext
-    permissions."""
+    permissions. The entry is posted at once, submitted (in a Payment Entry workflow, its approved
+    state), as the suite's automatic entries are: so only for a user who may submit it."""
     require(FINANCE_ROLES)
     if kind not in KINDS:
         frappe.throw(f"Entry Type must be one of: {', '.join(KINDS)}")
     entry_doctype = JE if kind in ("Journal Entry", SALARY) else PE
     frappe.has_permission(entry_doctype, "create", throw=True)
+    if not frappe.has_permission(entry_doctype, "submit"):
+        frappe.throw(f"Make Entry posts the {entry_doctype} at once (submitted, not a draft for review): it is "
+                     f"made by someone who may submit {entry_doctype}s.", frappe.PermissionError)
     request = frappe.get_doc(B2B, name)
     request.check_permission("read")
     employee = _employee(request)
@@ -827,8 +831,7 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
         else:
             _move_request(doc, dt, dn, supplier)  # checked before the entry is made
         entry.insert()
-        if cint(submit) and frappe.has_permission(entry_doctype, "submit"):
-            entry.submit()
+        entry.submit()
         refresh_entry(doc, receipt_entries(receipt), feed=False, log=not problem)
         if problem:
             _not_taken(doc, problem)  # the document took only part of it: the rest is an advance
