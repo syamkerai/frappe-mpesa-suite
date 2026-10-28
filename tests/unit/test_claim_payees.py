@@ -44,7 +44,7 @@ LINE_COLUMNS = ("name", "idx", "parent", "parenttype", "parentfield", "payee_typ
                 "expense_detail", "expense_type", "bank_paybill", "shortcode", "account_number", "phone", "amount",
                 "destination_key", "status", "payout_doctype", "payout_name", "receipt", "paid_on", "sent_on",
                 "error_message", "receiver_name", "name_matches", "name_note", "supplier_account", "name_verdict",
-                "sent_by", "staff_check", "staff_note")
+                "sent_by", "staff_check", "staff_note", "staff_involved")
 EXTRA_COLUMNS = {
     B2B: ("claim_payee", "expense_claim", "receiver_public_name", "error_message", "result_desc"),
     ROW: ("claim_payee", "creation"),
@@ -95,7 +95,7 @@ def env(monkeypatch):
         env.meta_fields["Employee"] = {"cell_number", "bank_ac_no"}
         env.drafts, env.problem, env.left = [], None, 1_000_000
         ed = importlib.import_module("mpsa_suite.money_out.employee_documents")
-        monkeypatch.setattr(ed, "payable_problem", lambda doc, skip_gap=False: env.problem, raising=False)
+        monkeypatch.setattr(ed, "payable_problem", lambda doc, skip_gap=False, **kw: env.problem, raising=False)
         env.left_asked = []
 
         def left_to_pay(dt, dn, exclude_payees=()):

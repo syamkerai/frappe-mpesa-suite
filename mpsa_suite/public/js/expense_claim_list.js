@@ -13,14 +13,24 @@
 	if (!all[key]) all[key] = {}; // only when no list script made them
 	const settings = all[key];
 	settings.add_fields = [...new Set([...(settings.add_fields || []), "total_amount_reimbursed", "grand_total"])];
-	const hrms_indicator = settings.get_indicator;
-	settings.get_indicator = function (doc) {
+	// Frappe's frappe.get_indicator answers from the DocType's own states (HRMS 15 lists "Unpaid") before
+	// it asks listview_settings.get_indicator, so the suite's answer goes first, for this DocType only
+	frappe.provide("mpsa_suite_indicators");
+	mpsa_suite_indicators[key] = (doc) => {
 		const reimbursed = flt(doc.total_amount_reimbursed);
 		if (doc.docstatus === 1 && doc.status === "Unpaid" && reimbursed > 0 && reimbursed < flt(doc.grand_total)) {
 			return [__("Partly Paid"), "orange", "status,=,Unpaid"];
 		}
-		return hrms_indicator ? hrms_indicator.apply(this, arguments) : undefined;
+		return null;
 	};
+	if (!(frappe.get_indicator && frappe.get_indicator.mpsa_suite)) {
+		const frappe_indicator = frappe.get_indicator;
+		frappe.get_indicator = function (doc, doctype) {
+			const own = mpsa_suite_indicators[doctype || (doc && doc.doctype)];
+			return (own && own(doc)) || frappe_indicator.apply(this, arguments);
+		};
+		frappe.get_indicator.mpsa_suite = true;
+	}
 	const hrms_onload = settings.onload;
 	settings.onload = function (listview) {
 		if (hrms_onload) hrms_onload.apply(this, arguments);

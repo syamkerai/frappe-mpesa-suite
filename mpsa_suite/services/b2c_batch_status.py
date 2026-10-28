@@ -32,14 +32,20 @@ def batch_status(statuses) -> str:
 def sync_status(name: str) -> str | None:
     """A submitted disbursement's status brought up to its rows' (batch_status), written only when it
     changed. The disbursement is locked first, so two payouts' results recorded at once leave the
-    status of the later one's rows. None for a draft or a cancelled disbursement."""
+    status of the later one's rows. Written as the form's Update Status writes it (db_set with a
+    before-image, review R10): on_change runs (Value Change notifications, webhooks), a Version is
+    saved, modified moves and open forms reload. None for a draft or a cancelled disbursement."""
     current = frappe.db.get_value(DOCTYPE, name, ["docstatus", "status"], as_dict=True, for_update=True)
     if not current or cint(current.docstatus) != 1:
         return None
     status = batch_status(frappe.get_all(ROW, filters={"parent": name, "parenttype": DOCTYPE,
                                                        "parentfield": "references"}, pluck="payment_status"))
     if status != current.status:
-        frappe.db.set_value(DOCTYPE, name, "status", status, update_modified=False)
+        doc = frappe.get_doc(DOCTYPE, name)  # a plain read: no lock on the rows the payout jobs write
+        # db_set reloads the document for update unless it has a before-image
+        doc._doc_before_save = frappe.get_doc(doc.as_dict())
+        doc.db_set("status", status, notify=True)
+        doc.save_version()
     return status
 
 

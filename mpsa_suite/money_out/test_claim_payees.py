@@ -721,3 +721,101 @@ class TestClaimPayees(IntegrationTestCase):
         t.renders(REQ, request, phone_receipt, "M-Pesa Receipt", "Prepared By")
         entry = frappe.db.get_value(PE, {"reference_no": phone_receipt, "docstatus": 1}, "name")
         t.renders(PE, entry, f"{phone_receipt} Confirmed.")
+
+    # ------------------------------------------------------------ review of 4b2f196
+    def test_a_sends_gap_check_waiting_on_another_booking_of_the_claim_is_not_refused(self):
+        """Review R5: a send of a claim's payout waits on the claim's lock while another payout of the claim is
+        booked. Once it holds the lock, its gap check must read the stored total and the entries as they are
+        now: a committed total against entries summed in the send's older snapshot refused it ("an M-Pesa
+        Manager repairs it") with nothing to repair. Two connections, each its own committed transaction."""
+        import threading
+        import time
+
+        from hrms.hr.doctype.expense_claim import expense_claim as hrms_claim
+
+        from mpsa_suite.services import b2c_response_service
+
+        claim = self._claim([
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Gap Achieng", "phone": "0711000931", "amount": 2000},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Gap Barasa", "phone": "0711000932", "amount": 7000},
+        ])
+        made = self._pay(claim.name)
+        requests = self._send_b2c(made["b2c"], {"254711000931": ("Paid", "254711000931 - _T GAP ACHIENG"),
+                                                "254711000932": ("Paid", "254711000932 - _T GAP BARASA")},
+                                  record=False)
+        self.addCleanup(self._delete_committed, [claim.name, made["b2c"], *requests])
+        self._no_commit.stop()
+        frappe.db.commit()
+        site, sites_path, errors, inside, seen = (frappe.local.site, frappe.local.sites_path, [], threading.Event(),
+                                                  {})
+        original = hrms_claim.update_reimbursed_amount
+
+        def slow(doc):
+            original(doc)
+            if threading.current_thread().name == "booking":
+                inside.set()
+                time.sleep(2)  # the booking keeps its transaction (and the claim's lock) meanwhile
+
+        def in_own_transaction(name, work):
+            def run():
+                try:
+                    frappe.init(site=site, sites_path=sites_path)
+                    frappe.connect()
+                    work()
+                    frappe.db.commit()
+                except Exception:
+                    errors.append(frappe.get_traceback())
+                finally:
+                    frappe.destroy()
+
+            return threading.Thread(target=run, name=name)
+
+        def book():
+            b2c_response_service.update_b2c_reference_status(requests[1], enqueue_next=True)
+
+        def send_check():
+            frappe.db.get_value(CLAIM, claim.name, "name")  # the send has read already: its snapshot is fixed
+            with owed.doc_lock(CLAIM, claim.name, timeout=60):  # as B2B's submit, waiting for the booking
+                values = employee_documents.read_document(CLAIM, claim.name, for_update=True)
+                seen["mixed"] = employee_documents.reimbursed_problem(CLAIM, values)  # how 4b2f196 read it
+                seen["now"] = employee_documents.payable_problem(values, CLAIM, for_update=True)
+                seen["total"] = flt(values.total_amount_reimbursed)
+
+        with patch("frappe.enqueue"), patch("mpsa_suite.money_out.statement.after_payout"):
+            b2c_response_service.update_b2c_reference_status(requests[0], enqueue_next=True)  # booked, committed
+            frappe.db.commit()
+            with patch.object(hrms_claim, "update_reimbursed_amount", slow):
+                booking = in_own_transaction("booking", book)
+                booking.start()
+                self.assertTrue(inside.wait(120), errors)
+                sender = in_own_transaction("send", send_check)
+                sender.start()  # reads while the booking is not committed, then waits for the claim's lock
+                booking.join(180)
+                sender.join(180)
+        self._no_commit.start()
+        self.assertEqual(errors, [])
+        self.assertEqual(seen["total"], 9000)
+        self.assertIn("Total Amount Reimbursed shows KES 9,000", seen["mixed"] or "")  # R5 reproduced
+        self.assertIsNone(seen["now"])  # the send goes ahead: there is no gap
+
+    def test_send_payment_proof_on_a_batch_of_two_claimants_proves_one_row_to_its_own_claimant(self):
+        """Review R1/R2: a batch paying several parties is never proved whole to all of them."""
+        one = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Proof One", "phone": "0711000941",
+                            "amount": 1000}])
+        two = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Proof Two", "phone": "0711000942",
+                            "amount": 700}], employee=self.colleague)
+        with _as(PREPARER):
+            made = claim_payees.pay_claims([one.name, two.name], SETTINGS)
+        self._send_b2c(made["b2c"], {"254711000941": ("Paid", "254711000941 - _T PROOF ONE"),
+                                     "254711000942": ("Paid", "254711000942 - _T PROOF TWO")})
+        frappe.db.set_value("Employee", self.colleague, "personal_email", "_t_colleague@example.com")
+        from mpsa_suite.money_out import payment_print
+
+        choose = payment_print.proof_recipients(DISB, made["b2c"])
+        self.assertEqual(len(choose["rows"]), 2)
+        row = frappe.db.get_value(ROW, {"parent": made["b2c"], "partyb": "254711000942"},
+                                  ["name", "b2c_disbursement_request"], as_dict=True)
+        proof = payment_print.proof_recipients(DISB, made["b2c"], row=row.name)
+        self.assertEqual((proof["doctype"], proof["name"], proof["recipients"]),
+                         (REQ, row.b2c_disbursement_request, ["_t_colleague@example.com"]))
+        t.renders(REQ, row.b2c_disbursement_request, "_T PROOF TWO")  # that payout's own proof

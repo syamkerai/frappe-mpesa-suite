@@ -176,7 +176,7 @@ def _currency(values) -> str:
             or "KES")
 
 
-def payable_problems(dt: str, values) -> list:
+def payable_problems(dt: str, values, for_update: bool = False) -> list:
     """Why the claim or advance may not be paid by M-Pesa now, as plain messages."""
     if dt not in DOCTYPES:
         return [f"{dt} is not an Expense Claim or Employee Advance."]
@@ -210,7 +210,7 @@ def payable_problems(dt: str, values) -> list:
     account_currency = frappe.db.get_value("Account", account, "account_currency") if account else None
     if account_currency and account_currency != "KES":
         problems.append(f"{account} is in {account_currency}. M-Pesa pays KES only.")
-    gap = reimbursed_problem(dt, values)
+    gap = reimbursed_problem(dt, values, for_update)
     if gap:
         problems.append(gap)
     if cint(values.docstatus) == 1 and outstanding(dt, values) <= owed.MIN:
@@ -218,17 +218,18 @@ def payable_problems(dt: str, values) -> list:
     return problems
 
 
-def reimbursed_problem(dt: str, values) -> str | None:
+def reimbursed_problem(dt: str, values, for_update: bool = False) -> str | None:
     """A submitted claim whose Total Amount Reimbursed disagrees with the entries booked against it
     (claim_payees.reimbursed_gap): what it still owes is read from that total, so nothing more is
     prepared or sent for it, to the claimant or a payee, until it is set right (check_paid_total, or
-    an M-Pesa Manager's Repair Reimbursed Total)."""
+    an M-Pesa Manager's Repair Reimbursed Total). ``for_update``: a send or submit under the claim's
+    lock, both sides read as they are now (claim_payees.reimbursed_gap)."""
     if dt != EXPENSE_CLAIM or not values or cint(values.get("docstatus")) != 1:
         return None
     from .claim_payees import reimbursed_gap
 
     try:
-        gap = reimbursed_gap(values)
+        gap = reimbursed_gap(values, for_update=for_update)
     except ImportError:
         return None  # no HRMS: no Expense Claim to pay
     if not gap:
@@ -294,15 +295,16 @@ def check_paid_total(doctype: str, name: str) -> None:
                                    "against it: two payments were booked at the same moment.")
 
 
-def payable_problem(doc, doctype: str | None = None, skip_gap: bool = False) -> str | None:
+def payable_problem(doc, doctype: str | None = None, skip_gap: bool = False, for_update: bool = False) -> str | None:
     """Why a submitted Expense Claim or Employee Advance may not be paid now, or None. ``doc``: the
     document, or what read_document read of it. ``skip_gap``: not the reimbursed total's gap
-    (reimbursed_problem), for a form that says it in words of its own."""
+    (reimbursed_problem), for a form that says it in words of its own. ``for_update``: a send or
+    submit under the document's lock (the reimbursed total read as it is now)."""
     values = _values(doc, doctype)
     dt = doctype or (values or {}).get("doctype") or _doctype_of(doc)
-    problems = payable_problems(dt, values)
+    problems = payable_problems(dt, values, for_update)
     if skip_gap and problems:
-        gap = reimbursed_problem(dt, values)
+        gap = reimbursed_problem(dt, values, for_update)
         problems = [p for p in problems if p != gap]
     return problems[0] if problems else None
 

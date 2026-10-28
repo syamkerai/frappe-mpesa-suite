@@ -67,6 +67,13 @@ def masked(number) -> str:
     return f"****{number[-4:]}" if len(number) > 6 else number
 
 
+def masked_account(number) -> str:
+    """A paybill's or bank's account number as ****6789 (one that looks like a phone too: it is an
+    account here); a short one (six characters or fewer) as it is."""
+    number = cstr(number).strip()
+    return f"****{number[-4:]}" if len(number) > 6 else number
+
+
 def sms(receipt, amount, name, number, when, sent: bool) -> str:
     """The payout as M-Pesa's confirmation SMS reads: "UJSSN5D5CE Confirmed. KES 50.00 paid to
     ASTRAL INDUSTRIES LTD HQ on 28/10/26 at 1:57 PM." (B2C: "sent to")."""
@@ -212,7 +219,7 @@ def _b2b_row(r) -> frappe._dict:
     number, name = split_receiver(r.receiver_public_name)
     to = cstr(r.receiver_shortcode).strip()
     if cstr(r.account_reference).strip():
-        to += f" acc {masked(r.account_reference)}"
+        to += f" acc {masked_account(r.account_reference)}"
     return frappe._dict(
         via="M-Pesa B2B", payout=r.name, receipt=cstr(r.transaction_id).strip(), amount=flt(r.amount, 2),
         status=r.status or "Not Initiated", when=r.trans_completed_time or r.creation, name=name or to,
@@ -230,18 +237,27 @@ def _b2c_row(r) -> frappe._dict:
 
 
 def _entries(doctype: str, name: str) -> list:
-    """Submitted Payment Entries allocated to the document, with what each allocated to it."""
-    refs = frappe.get_all("Payment Entry Reference", filters={"reference_doctype": doctype, "reference_name": name,
-                                                              "parenttype": PE, "docstatus": 1},
-                          fields=["parent", "allocated_amount"])
+    """Submitted Payment Entries allocated to the document, with what each allocated to it. An
+    order's advance that Get Advances moved onto an invoice keeps the order as its advance voucher
+    (as owed.allocated_on reads it): still the order's payment."""
+    filters = {"parenttype": PE, "docstatus": 1}
+    refs = frappe.get_all("Payment Entry Reference", filters={**filters, "reference_doctype": doctype,
+                                                              "reference_name": name},
+                          fields=["name", "parent", "allocated_amount"])
+    if doctype == "Purchase Order" and frappe.db.has_column("Payment Entry Reference", "advance_voucher_no"):
+        moved = frappe.get_all("Payment Entry Reference", filters={**filters, "advance_voucher_type": doctype,
+                                                                   "advance_voucher_no": name},
+                               fields=["name", "parent", "allocated_amount"])
+        refs = list({r.name: r for r in [*refs, *moved]}.values())
     allocated = {}
     for r in refs:
         allocated[r.parent] = flt(allocated.get(r.parent, 0) + flt(r.allocated_amount), 2)
     if not allocated:
         return []
     entries = frappe.get_all(PE, filters={"name": ["in", list(allocated)]},
-                             fields=["name", "mode_of_payment", "reference_no", "reference_date", "posting_date",
-                                     "party_name", "creation"], order_by="posting_date asc, creation asc")
+                             fields=["name", "payment_type", "mode_of_payment", "reference_no", "reference_date",
+                                     "posting_date", "party_name", "creation"],
+                             order_by="posting_date asc, creation asc")
     for e in entries:
         e.allocated = allocated[e.name]
     return entries
@@ -274,16 +290,18 @@ def _ledger_outstanding(doctype: str, name: str) -> float | None:
     return None if value is None else flt(value, 2)
 
 
-def _allocated(doctype: str, name: str) -> float:
-    """What submitted Payment Entries and Journal Entries allocated to the document."""
-    pe = frappe.db.sql(
-        """SELECT COALESCE(SUM(allocated_amount), 0) FROM `tabPayment Entry Reference`
-        WHERE reference_doctype = %s AND reference_name = %s AND docstatus = 1""", (doctype, name))[0][0]
+def _allocated(doctype: str, name: str) -> tuple:
+    """(paid, returned) by submitted entries: Payment Entries that pay it (an order's moved advance
+    too) and Journal Entry debits; returned: Payment Entries that receive and Journal Entry credits
+    (HRMS's Return of an advance), counted apart as HRMS does, never netted."""
+    entries = _entries(doctype, name)
+    paid = sum(e.allocated for e in entries if e.get("payment_type") != "Receive")
+    returned = sum(e.allocated for e in entries if e.get("payment_type") == "Receive")
     je = frappe.db.sql(
-        """SELECT COALESCE(SUM(debit_in_account_currency - credit_in_account_currency), 0)
+        """SELECT COALESCE(SUM(debit_in_account_currency), 0), COALESCE(SUM(credit_in_account_currency), 0)
         FROM `tabJournal Entry Account` WHERE reference_type = %s AND reference_name = %s AND docstatus = 1""",
-        (doctype, name))[0][0]
-    return flt(flt(pe) + flt(je), 2)
+        (doctype, name))[0]
+    return flt(paid + flt(je[0]), 2), flt(returned + flt(je[1]), 2)
 
 
 def document_total(doctype: str, doc) -> float:
@@ -299,7 +317,8 @@ def document_total(doctype: str, doc) -> float:
 def paid_and_left(doctype: str, doc, rows=()) -> tuple:
     """(total, paid, left) of the document from the entries booked, not a stored total: a claim by
     HRMS's own count of its entries, an invoice by the Payment Ledger, an order or advance by what
-    entries allocated to it, a salary slip by its Paid M-Pesa payouts."""
+    entries paid to it (returns apart), a salary slip as the suite reads it
+    (b2c_payment_disbursement.salary_slip_paid: its Paid payouts and the payroll's bank entry)."""
     total = document_total(doctype, doc)
     if doctype == "Purchase Invoice":
         left = _ledger_outstanding(doctype, doc.name)
@@ -311,9 +330,11 @@ def paid_and_left(doctype: str, doc, rows=()) -> tuple:
 
         paid = flt(get_total_reimbursed_amount(doc), 2)
     elif doctype == SLIP:
-        paid = flt(sum(flt(r.amount) for r in rows if r.status == "Paid"), 2)
+        from ..mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement import salary_slip_paid
+
+        paid = flt(salary_slip_paid(doc.name, doc.get("employee"), doc.get("payroll_entry")), 2)
     else:
-        paid = _allocated(doctype, doc.name)
+        paid = _allocated(doctype, doc.name)[0]
     return total, paid, max(0.0, flt(total - paid, 2))
 
 
@@ -322,6 +343,15 @@ def _party(doctype: str, doc) -> tuple:
     if doctype in ("Purchase Invoice", "Purchase Order"):
         return "Supplier", doc.get("supplier_name") or doc.get("supplier"), doc.get("supplier")
     return "Employee", doc.get("employee_name") or doc.get("employee"), doc.get("employee")
+
+
+def _line_to(line, claim_payees) -> str:
+    """Where a payee line pays, masked: a phone as the send summary shows it, a paybill's or bank's
+    account number as ****6789."""
+    if line.payee_type == claim_payees.PHONE:
+        return claim_payees.describe(line, masked=True)
+    code, account = cstr(line.shortcode).strip(), cstr(line.account_number).strip()
+    return f"{code} / {masked_account(account)}" if account and line.payee_type != claim_payees.TILL else code
 
 
 def _claim_payees(claim: str) -> list:
@@ -334,7 +364,7 @@ def _claim_payees(claim: str) -> list:
     out = []
     for line in claim_payees.read_lines(claim):
         out.append(frappe._dict(
-            idx=line.idx, name=line.payee_name, type=line.payee_type, to=claim_payees.describe(line, masked=True),
+            idx=line.idx, name=line.payee_name, type=line.payee_type, to=_line_to(line, claim_payees),
             amount=flt(line.amount, 2), status=line.status or "Draft", receipt=line.receipt,
             paid_to=claim_payees.masked_name(line.receiver_name) if line.receiver_name else "",
             verdict=line.get("name_verdict") or "", staff=line.get("staff_check") or ""))
@@ -358,6 +388,8 @@ def mpsa_payment_advice(doc) -> frappe._dict:
     out = frappe._dict(title=TITLE[doctype], doctype=doctype, name=doc.name, party_label=label, party=party,
                        party_id=party_id, total=total, paid=paid, left=left, rows=rows, hidden=hidden,
                        currency=doc.get("currency") or "KES", payees=[], claimant_share=None, **_common(doc))
+    if doctype == ADVANCE:
+        out.returned = _allocated(doctype, doc.name)[1]
     if doctype == CLAIM:
         out.payees = _claim_payees(doc.name)
         payee_total = sum(p.amount for p in out.payees if p.status != "Cancelled")
@@ -410,14 +442,16 @@ def mpsa_payout_proof(doc) -> frappe._dict:
             b.update(amount=None, charge=None, sms="")
     return frappe._dict(title=TITLE[doctype], doctype=doctype, name=doc.name, blocks=blocks,
                         prepared_by=_who(prepared), sent_by=_who(sent),
-                        total=flt(sum(flt(b.amount) for b in blocks if not b.hidden), 2), **_common(doc))
+                        # what left the shortcode: Paid payouts only (a failed or unsent row moved no money)
+                        total=flt(sum(flt(b.amount) for b in blocks if not b.hidden and b.status == "Paid"), 2),
+                        **_common(doc))
 
 
 def _b2b_block(r) -> frappe._dict:
     number, name = split_receiver(r.get("receiver_public_name"))
     to = cstr(r.get("receiver_shortcode")).strip()
     if cstr(r.get("account_reference")).strip():
-        to += f" acc {masked(r.account_reference)}"
+        to += f" acc {masked_account(r.account_reference)}"
     receipt = cstr(r.get("transaction_id")).strip()
     charge, how = _charge(B2B, r)
     field = next((f for f in PAID_BY_B2B if cstr(r.get(f)).strip()), None)
@@ -479,30 +513,69 @@ def _entry_blocks(doc) -> list:
 
 # ---------------------------------------------------------------- Send Payment Proof
 @frappe.whitelist()
-def proof_recipients(doctype: str, name: str) -> dict:
-    """Send Payment Proof on a paid payout: the email addresses of who it concerns (the supplier, the
-    employee or claimant) and the print format to attach, for Frappe's email composer. Nothing is
-    sent: the user reviews the email and presses Send. For who can read the payout."""
+def proof_recipients(doctype: str, name: str, row: str | None = None) -> dict:
+    """Send Payment Proof on a paid payout: what Frappe's email composer is filled with, for ONE
+    party only. Nothing is sent: the user reviews the email and presses Send.
+
+    - A payout of one party (a B2B request, a B2C payout, a Payment Entry, a B2C batch whose rows
+      all pay one party): its own proof, to that party's email.
+    - A B2C batch of several parties: never the batch's proof, which lists every party's payout.
+      ``{"rows": [...]}``, its paid rows to choose from; called again with ``row``, that row's
+      payout (its B2C Disbursement Request) and that payout's proof, to that row's party only.
+    - Never a salary payout: the employee's Salary Slip is its record, and a proof would put net
+      pay into an email.
+    For who may read the payout and send email on what is attached (Frappe's email right)."""
     if doctype not in PAYOUTS:
         frappe.throw(f"{doctype} has no M-Pesa proof of payment.")
     frappe.has_permission(doctype, "read", doc=name, throw=True)
     doc = frappe.get_doc(doctype, name)
-    parties = []
+    if is_salary_payout(doctype, doc):
+        frappe.throw("A salary payout gets no payment proof by email: the employee's Salary Slip is its record.")
+    target = doc
+    if doctype == B2C:
+        rows = doc.get("references") or []
+        if len({_row_party(doc, r) for r in rows}) > 1:
+            paid = [r for r in rows if r.get("payment_status") == "Paid"
+                    and cstr(r.get("b2c_disbursement_request")).strip()]
+            if not row:
+                return {"rows": [{"row": r.name, "label": f"#{r.idx} {r.get('party') or ''} {masked(r.get('partyb'))} "
+                                                         f"KES {flt(r.get('allocated_amount')):,.2f}"} for r in paid]}
+            chosen = next((r for r in paid if r.name == row), None)
+            if not chosen:
+                frappe.throw(f"Row {row} of {name} is no paid payout of it.")
+            frappe.has_permission(B2C_REQUEST, "read", doc=chosen.b2c_disbursement_request, throw=True)
+            target = frappe.get_doc(B2C_REQUEST, chosen.b2c_disbursement_request)
+    frappe.has_permission(target.doctype, "email", doc=target.name, throw=True)
+    email = _email_of(*_party_of(target))
+    return {"doctype": target.doctype, "name": target.name, "recipients": [email] if email else [],
+            "print_format": PRINT_FORMAT[target.doctype], "subject": f"Proof of payment: {target.doctype} {target.name}"}
+
+
+def is_salary_payout(doctype: str, doc) -> bool:
+    """A payout of a salary: a B2B request for a Salary Slip, a B2C payout or batch row paying one, or
+    a Payment Entry allocated to one."""
     if doctype == B2B:
-        parties = [("Supplier", doc.get("supplier")), ("Employee", doc.get("employee"))]
-    elif doctype == B2C_REQUEST:
-        parties = [(doc.get("party_type"), doc.get("party"))]
-    elif doctype == B2C:
-        parties = [(r.get("party_type") or doc.get("party_type"), r.get("party")) for r in doc.get("references") or []]
-    else:
-        parties = [(doc.get("party_type"), doc.get("party"))]
-    emails = []
-    for party_type, party in parties:
-        email = _email_of(party_type, party)
-        if email and email not in emails:
-            emails.append(email)
-    return {"recipients": emails, "print_format": PRINT_FORMAT[doctype],
-            "subject": f"Proof of payment: {doctype} {name}"}
+        return bool(cstr(doc.get("salary_slip")).strip())
+    if doctype == B2C_REQUEST:
+        return doc.get("reference_doctype") == SLIP
+    if doctype == B2C:
+        return doc.get("transaction_to_pay_against") == SLIP or any(
+            r.get("reference_doctype") == SLIP for r in doc.get("references") or [])
+    return any(r.get("reference_doctype") == SLIP for r in doc.get("references") or [])
+
+
+def _row_party(doc, row) -> tuple:
+    return (row.get("party_type") or doc.get("party_type"), row.get("party"))
+
+
+def _party_of(doc) -> tuple:
+    """The one party a payout concerns: (party type, party)."""
+    if doc.doctype == B2B:
+        return ("Supplier", doc.supplier) if cstr(doc.get("supplier")).strip() else ("Employee", doc.get("employee"))
+    if doc.doctype == B2C:
+        rows = doc.get("references") or []
+        return _row_party(doc, rows[0]) if rows else (None, None)
+    return doc.get("party_type"), doc.get("party")
 
 
 def _email_of(party_type, party) -> str | None:

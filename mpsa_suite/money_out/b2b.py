@@ -481,7 +481,7 @@ def _check_employee_document(doc, dt: str, dn: str, for_update: bool = False) ->
                                            exclude_line=doc.get("schedule_line") or None,
                                            exclude_payees=[payee] if payee else (), for_update=for_update)
     values = employee_documents.read_document(dt, dn, for_update=for_update)
-    problem = employee_documents.payable_problem(values, dt)
+    problem = employee_documents.payable_problem(values, dt, for_update=for_update)
     if problem:
         frappe.throw(problem)
     if values.employee != doc.employee:

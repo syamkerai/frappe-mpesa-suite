@@ -24,6 +24,7 @@
 		{% else %}
 		<div class="row"><span>{{ _("Total") }}</span><span>{{ kes(p.total) }}</span></div>
 		<div class="row"><span>{{ _("Paid") }}</span><span>{{ kes(p.paid) }}</span></div>
+		{% if p.returned %}<div class="row"><span>{{ _("Returned") }}</span><span>{{ kes(p.returned) }}</span></div>{% endif %}
 		<div class="amount"><span class="label">{{ _("Balance Due") if p.left > 0.005 else _("Fully Paid") }}</span>
 			<b>{{ kes(p.left) }}</b></div>
 		{% endif %}

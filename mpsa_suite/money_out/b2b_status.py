@@ -190,7 +190,8 @@ def still_asking(name: str) -> bool:
 
 def unsettled_due(limit: int = 20) -> list:
     """Sent requests whose Result never came (Initiated, Unknown), due a status query now: old
-    enough in that state (UNSETTLED_AFTER_MINUTES), sent less than UNSETTLED_FOR_DAYS ago, with an
+    enough in that state (UNSETTLED_AFTER_MINUTES), sent less than UNSETTLED_FOR_DAYS ago (by its
+    send_started_on: a request is drafted days before it may be sent), with an
     OriginatorConversationID to ask by, and not asked in the last UNSETTLED_EVERY_MINUTES."""
     now, names = now_datetime(), []
     for status, minutes in UNSETTLED_AFTER_MINUTES.items():
@@ -199,7 +200,7 @@ def unsettled_due(limit: int = 20) -> list:
             filters={"docstatus": 1, "status": status, "result_code": ["is", "not set"],
                      "mpesa_settings": ["is", "set"], "originator_conversation_id": ["is", "set"],
                      "modified": ["<", add_to_date(now, minutes=-minutes)],
-                     "creation": [">=", add_to_date(now, days=-UNSETTLED_FOR_DAYS)]},
+                     "send_started_on": [">=", add_to_date(now, days=-UNSETTLED_FOR_DAYS)]},
             pluck="name",
             order_by="modified asc",
             limit=limit,

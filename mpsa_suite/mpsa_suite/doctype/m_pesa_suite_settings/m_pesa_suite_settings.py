@@ -50,6 +50,16 @@ class MPesaSuiteSettings(Document):
 
     def on_update(self):
         self.alert_safety_changes()
+        self.refresh_boot_flags()
+
+    def refresh_boot_flags(self):
+        """The desk's maker_checker flag (boot.py) says who sends what is prepared: its cached boot
+        is dropped for every user when the switch changes, so the next page load reads it again."""
+        before = self.get_doc_before_save()
+        if before and cint(before.get("schedule_maker_checker")) != cint(self.get("schedule_maker_checker")):
+            from ....compat import get_cache
+
+            get_cache().delete_value("bootinfo")
 
     def alert_safety_changes(self):
         """A comment on the settings and an alert to the Notify Role for each WATCHED change: the

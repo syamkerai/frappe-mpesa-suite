@@ -105,9 +105,13 @@ def test_who_sends_the_employees_payout_follows_maker_checker(maker_checker, tex
 
 
 LIST = """
+// Frappe's own get_indicator answers from the DocType's states first (HRMS 15 lists "Unpaid"), before
+// listview_settings.get_indicator is asked: stood in for here
+frappe.get_indicator = (doc, doctype) => (doc.status ? [doc.status, "yellow", "status,=," + doc.status] : null);
 load(%s);
-const s = frappe.listview_settings[%s];
-return { fields: s.add_fields, shown: %s.map((doc) => (s.get_indicator(doc) || [null])[0]) };
+load(%s);  // loaded again (another list): the suite's answer is set once
+return { fields: frappe.listview_settings[%s].add_fields,
+         shown: %s.map((doc) => frappe.get_indicator(doc, %s)[0]) };
 """
 
 
@@ -116,14 +120,16 @@ return { fields: s.add_fields, shown: %s.map((doc) => (s.get_indicator(doc) || [
      [{"docstatus": 1, "status": "Unpaid", "total_amount_reimbursed": 20, "grand_total": 90},
       {"docstatus": 1, "status": "Unpaid", "total_amount_reimbursed": 0, "grand_total": 90},
       {"docstatus": 1, "status": "Paid", "total_amount_reimbursed": 90, "grand_total": 90}],
-     ["Partly Paid", None, None]),
+     ["Partly Paid", "Unpaid", "Paid"]),
     ("employee_advance_list.js", "Employee Advance",
      [{"docstatus": 1, "status": "Unpaid", "paid_amount": 3000, "advance_amount": 8000},
       {"docstatus": 1, "status": "Partially Paid", "paid_amount": 3000, "advance_amount": 8000}],  # HRMS 16's own
-     ["Partly Paid", None]),
+     ["Partly Paid", "Partially Paid"]),
 ])
 def test_a_document_paid_in_part_shows_partly_paid_on_the_list(tmp_path, script, doctype, docs, shown):
-    out = run_desk(tmp_path, [], LIST % (json.dumps(str(JS / script)), json.dumps(doctype), json.dumps(docs)))
+    """Review R9: through frappe.get_indicator itself, which answers from the DocType's states first."""
+    path = json.dumps(str(JS / script))
+    out = run_desk(tmp_path, [], LIST % (path, path, json.dumps(doctype), json.dumps(docs), json.dumps(doctype)))
     assert out["shown"] == shown
     assert set(out["fields"]) >= ({"total_amount_reimbursed", "grand_total"} if doctype == "Expense Claim"
                                   else {"paid_amount", "advance_amount"})
@@ -131,36 +137,83 @@ def test_a_document_paid_in_part_shows_partly_paid_on_the_list(tmp_path, script,
 
 PROOF = """
 load(%s);
+frappe.model.can_email = (doctype, frm) => !(frm.doc.no_email);
+frappe.model.with_doctype = (dt, cb) => cb();
+frappe.model.with_doc = (dt, name) => Promise.resolve({ doctype: dt, name });
 frappe.views = { CommunicationComposer: class { constructor(o) {
-    calls.push(["composer", o.recipients, o.subject, o.attach_document_print]);
+    calls.push(["composer", o.doc.doctype, o.doc.name, o.recipients, o.subject, o.attach_document_print]);
     this.dialog = { fields_dict: { select_print_format: {} }, set_value: (f, v) => calls.push(["set", f, v]) }; } } };
 const out = {};
-for (const [doctype, status, docstatus] of %s) {
-    const frm = mk_frm(doctype, { docstatus, status });
+for (const [doctype, doc] of %s) {
+    const frm = mk_frm(doctype, doc);
     handlers[doctype].refresh(frm);
-    out[`${doctype} ${status} ${docstatus}`] = frm.buttons;
-    if (frm.actions["Send Payment Proof"]) { frm.actions["Send Payment Proof"](); await tick(); await tick(); }
+    out[`${doctype} ${doc.status} ${doc.docstatus}${doc.no_email ? " no email" : ""}${doc.salary_slip || doc.transaction_to_pay_against ? " salary" : ""}`] = frm.buttons;
+    if (frm.actions["Send Payment Proof"]) {
+        frm.actions["Send Payment Proof"](); await tick(); await tick();
+        if (last_prompt) { last_prompt.cb({ row: last_prompt.fields[0].options[0].value }); last_prompt = null; await tick(); await tick(); }
+    }
 }
 load(%s);  // a second payout form loading the script sets no second handler
-const again = mk_frm("B2C Payment Disbursement", { docstatus: 1, status: "Paid" });
-handlers["B2C Payment Disbursement"].refresh(again);
+const again = mk_frm("Mpesa B2B Payment Request", { docstatus: 1, status: "Paid" });
+handlers["Mpesa B2B Payment Request"].refresh(again);
 out.again = again.buttons;
 out.calls = calls.filter((c) => c[0] !== "xcall" || c[1].endsWith("proof_recipients"));
 return out;
 """
 
 
-def test_send_payment_proof_opens_the_email_composer_on_a_paid_payout_only(tmp_path):
+def test_send_payment_proof_goes_to_one_party_only(tmp_path):
+    """Review R1, R2, R12: a paid payout's proof to its one party; a batch of several parties picks one row and
+    sends that row's payout only; never a salary payout; only for who may send email on it."""
     script = str(JS / "payment_proof.js")
-    cases = [["Mpesa B2B Payment Request", "Paid", 1], ["Mpesa B2B Payment Request", "Initiated", 1],
-             ["B2C Payment Disbursement", "Partially Paid", 1], ["B2C Disbursement Request", "Paid", 0]]
-    reply = {"mpsa_suite.money_out.payment_print.proof_recipients": {
-        "recipients": ["pay@acme.example.com"], "subject": "Proof of payment: X", "print_format": "M-Pesa 80mm X"}}
-    out = run_desk(tmp_path, [], PROOF % (json.dumps(script), json.dumps(cases), json.dumps(script)), replies=reply)
+    cases = [["Mpesa B2B Payment Request", {"docstatus": 1, "status": "Paid"}],
+             ["Mpesa B2B Payment Request", {"docstatus": 1, "status": "Initiated"}],
+             ["Mpesa B2B Payment Request", {"docstatus": 1, "status": "Paid", "no_email": 1}],
+             ["Mpesa B2B Payment Request", {"docstatus": 1, "status": "Paid", "salary_slip": "SAL-1"}],
+             ["B2C Payment Disbursement", {"docstatus": 1, "status": "Paid", "transaction_to_pay_against": "Salary Slip"}],
+             ["B2C Disbursement Request", {"docstatus": 0, "status": "Paid"}]]
+    one = {"doctype": "Mpesa B2B Payment Request", "name": "DOC-1", "recipients": ["pay@acme.example.com"],
+           "subject": "Proof of payment: X", "print_format": "M-Pesa 80mm X"}
+    out = run_desk(tmp_path, [], PROOF % (json.dumps(script), json.dumps(cases), json.dumps(script)),
+                   replies={"mpsa_suite.money_out.payment_print.proof_recipients": one})
     assert out["Mpesa B2B Payment Request Paid 1"] == ["Send Payment Proof"]
-    assert out["Mpesa B2B Payment Request Initiated 1"] == []
-    assert out["B2C Payment Disbursement Partially Paid 1"] == ["Send Payment Proof"]
-    assert out["B2C Disbursement Request Paid 0"] == []  # a draft
+    for key in ("Mpesa B2B Payment Request Initiated 1", "Mpesa B2B Payment Request Paid 1 no email",
+                "Mpesa B2B Payment Request Paid 1 salary", "B2C Payment Disbursement Paid 1 salary",
+                "B2C Disbursement Request Paid 0"):
+        assert out[key] == [], key
     assert out["again"] == ["Send Payment Proof"]
-    assert ["composer", "pay@acme.example.com", "Proof of payment: X", True] in out["calls"]
+    assert ["composer", "Mpesa B2B Payment Request", "DOC-1", "pay@acme.example.com", "Proof of payment: X",
+            True] in out["calls"]
     assert ["set", "select_print_format", "M-Pesa 80mm X"] in out["calls"]
+
+
+BATCH = """
+load(%s);
+frappe.model.can_email = () => true;
+frappe.model.with_doctype = (dt, cb) => cb();
+frappe.model.with_doc = (dt, name) => Promise.resolve({ doctype: dt, name });
+frappe.views = { CommunicationComposer: class { constructor(o) {
+    calls.push(["composer", o.doc.doctype, o.doc.name, o.recipients]);
+    this.dialog = { fields_dict: {}, set_value: () => {} }; } } };
+let answer = 0;
+frappe.xcall = (method, args) => { calls.push(["xcall", method.split(".").pop(), args]);
+    return Promise.resolve(answer++ ? %s : %s); };
+const frm = mk_frm("B2C Payment Disbursement", { docstatus: 1, status: "Paid" });
+handlers["B2C Payment Disbursement"].refresh(frm);
+frm.actions["Send Payment Proof"](); await tick(); await tick();
+const options = last_prompt.fields[0].options;
+last_prompt.cb({ row: "D-1-R2" }); await tick(); await tick();
+return { options, calls };
+"""
+
+
+def test_a_batch_of_several_parties_proves_one_chosen_rows_payout_to_its_party(tmp_path):
+    rows = {"rows": [{"row": "D-1-R1", "label": "#1 EMP-1 2547****0331 KES 1,500.00"},
+                     {"row": "D-1-R2", "label": "#2 EMP-2 2547****0332 KES 900.00"}]}
+    row = {"doctype": "B2C Disbursement Request", "name": "REQ-2", "recipients": ["two@example.com"],
+           "subject": "Proof of payment: B2C Disbursement Request REQ-2", "print_format": "M-Pesa 80mm X"}
+    out = run_desk(tmp_path, [], BATCH % (json.dumps(str(JS / "payment_proof.js")), json.dumps(row), json.dumps(rows)))
+    assert [o["value"] for o in out["options"]] == ["D-1-R1", "D-1-R2"]
+    assert ["xcall", "proof_recipients", {"doctype": "B2C Payment Disbursement", "name": "DOC-1", "row": "D-1-R2"}] in \
+        out["calls"]
+    assert ["composer", "B2C Disbursement Request", "REQ-2", "two@example.com"] in out["calls"]  # that party alone

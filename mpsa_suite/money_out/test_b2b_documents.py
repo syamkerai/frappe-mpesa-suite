@@ -451,6 +451,8 @@ class TestB2BDocuments(IntegrationTestCase):
         pi.insert()
         pi.submit()
         self.assertEqual(self._outstanding(pi.name), 6000)
+        # review R6: the order's advance, moved onto the invoice, is still the order's payment
+        t.renders(PO, po.name, receipt, "4,000.00", "6,000.00")
         self.assertEqual(b2b_entries.refresh_entry_now(req.name)["entry_status"], "Entry Made")
         result = owed.left_to_pay(PI, pi.name)
         self.assertEqual((result.left, result.parts), (6000, []))  # the advance is on the invoice now

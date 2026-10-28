@@ -332,8 +332,29 @@ def test_a_batch_status_is_written_under_its_lock_and_only_when_it_changed(env):
                                      "payment_status": "Paid"},
                           "D-1-R2": {"name": "D-1-R2", "parent": "D-1", "parenttype": B2C, "parentfield": "references",
                                      "payment_status": "Initiated"}})
+    written = []
+
+    class Batch(fake_frappe.FakeDoc):
+        def as_dict(self):
+            return dict(self._row, doctype=self.doctype)
+
+        def db_set(self, field, value=None, notify=False, **kw):
+            written.append(("db_set", field, value, notify, self.get("_doc_before_save") is not None))
+            super().db_set(field, value)
+
+        def save_version(self):
+            written.append(("version",))
+
+    real_get_doc = env.frappe.get_doc
+    env.frappe.get_doc = lambda doctype, name=None, **kw: (
+        real_get_doc(doctype, name, **kw) if isinstance(doctype, dict) else Batch(env.frappe, doctype, db.table(doctype)[name]))
     assert batch.sync_status("D-1") == "Partially Paid" and db.table(B2C)["D-1"]["status"] == "Partially Paid"
     assert ("row", B2C, "D-1", True) in env.log
+    # R10: as Update Status writes it: on_change and notify (db_set with a before-image), and a Version
+    assert written == [("db_set", "status", "Partially Paid", True, True), ("version",)]
+    written.clear()
+    assert batch.sync_status("D-1") == "Partially Paid" and written == []  # unchanged: nothing written
+    env.frappe.get_doc = real_get_doc
     db.table(B2C)["D-2"] = {"name": "D-2", "docstatus": 0, "status": None}
     assert batch.sync_status("D-2") is None  # a draft keeps its status
     batch.sync_status_later("D-1")
@@ -364,9 +385,109 @@ def test_a_b2b_request_whose_result_never_came_is_asked_about(env, monkeypatch):
     monkeypatch.setattr(status, "start_query", lambda name: asked.append(name) or "Q-1")
     old = datetime.datetime(2026, 10, 18, 9, 0)  # sent three hours before the fake's now
     env.frappe.db.table(B2B).update({
+        # R8: drafted long before, sent three hours ago: asked about by when it was sent
         "MB2B-1": {"name": "MB2B-1", "docstatus": 1, "status": "Initiated", "result_code": None,
-                   "mpesa_settings": "S", "originator_conversation_id": "OC-1", "modified": old, "creation": old},
+                   "mpesa_settings": "S", "originator_conversation_id": "OC-1", "modified": old,
+                   "creation": datetime.datetime(2026, 9, 1), "send_started_on": old},
         "MB2B-2": {"name": "MB2B-2", "docstatus": 1, "status": "Paid", "result_code": "0", "mpesa_settings": "S",
-                   "originator_conversation_id": "OC-2", "modified": old, "creation": old}})
+                   "originator_conversation_id": "OC-2", "modified": old, "creation": old, "send_started_on": old}})
+    filters = []
+    real_get_all = env.frappe.get_all
+    env.frappe.get_all = lambda doctype, *a, **kw: filters.append(kw.get("filters")) or real_get_all(doctype, *a, **kw)
     status.sweep()
     assert asked == ["MB2B-1"]
+    assert all("creation" not in f and "send_started_on" in f for f in filters if f and f.get("status") in (
+        "Initiated", "Unknown"))
+    env.frappe.get_all = real_get_all
+
+
+# ---------------------------------------------------------------- review of 4b2f196: R3, R4, R5, R7, R15
+def test_clear_staff_flag_refuses_a_destination_that_is_not_blocked(staff):
+    """R3: clearing a never-flagged line would switch its destination's staff check off for good."""
+    line = payee(shortcode="835877")
+    claim(staff, [line])
+    staff.frappe.session.user, staff.frappe.user_roles = "manager@example.com", {"M-Pesa Manager"}
+    with raises(staff, "is not blocked as a staff or self payment: there is no flag to clear"):
+        staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "checked")
+    assert not stored(staff).get("staff_check") and not staff.cp.cleared_destination("TILL:835877")
+
+
+def test_the_staff_member_whose_name_was_paid_may_not_clear_the_flag(staff):
+    """R4: the matched employee's login is kept on the line and may not clear it."""
+    staff.meta_fields["Employee"] = {"cell_number", "bank_ac_no", "user_id"}
+    staff.frappe.db.table("Employee")["EMP-2"]["user_id"] = "manager@example.com"  # John Kamau is an M-Pesa Manager
+    row = paid_till(staff, "835811 - JOHN KAMAU STORES")
+    assert row["staff_check"] == "Blocked" and "manager@example.com" in row["staff_involved"]
+    alert = next(a for a in staff.staff_alerts if "Staff or self payment" in a[1])
+    assert "manager@example.com" in alert[2]["exclude"]  # not told about a flag raised against his own name
+    staff.frappe.session.user, staff.frappe.user_roles = "manager@example.com", {"M-Pesa Manager"}
+    with pytest.raises(staff.frappe.PermissionError, match="The flag is about you"):
+        staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "checked")
+
+
+def test_a_refused_sender_is_kept_on_the_flag_and_may_not_clear_it(staff):
+    """R4: the send that was refused rolls back its record of the sender; the flag job keeps it."""
+    request(staff, payee("LN-0", shortcode="835811"), name="MB2B-0", docstatus=1, status="Paid",
+            receiver_public_name="835811 - PETER PAYER")  # the payer's own till, paid before
+    line = payee(shortcode="835811")
+    claim(staff, [line])
+    staff.frappe.session.user = PAYER
+    with raises(staff, "the name of its sender"):
+        staff.cp.check_b2b(b2b_doc(staff, line, docstatus=1))
+    (method, kw), = [e for e in staff.frappe.enqueued if e[0].endswith("claim_payees.flag_staff")]
+    staff.cp.flag_staff(kw["claim"], kw["line"], kw["note"], kw["exclude"])
+    assert PAYER in stored(staff)["staff_involved"] and not stored(staff).get("sent_by")
+    staff.frappe.user_roles = {"M-Pesa Manager", "M-Pesa Payer"}
+    with pytest.raises(staff.frappe.PermissionError, match="The flag is about you"):
+        staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "my own till")
+
+
+def test_the_gap_guard_reads_both_sides_as_they_are_now_under_the_lock(env, monkeypatch, hrms_modules):
+    """R5: under the claim's lock the stored total and the entries are both read with locking reads;
+    a snapshot sum against a committed total refused sends while another payout of the claim was booked."""
+    for doctype, column in (("Payment Entry Reference", "docstatus"), ("Journal Entry Account", "docstatus")):
+        monkeypatch.setitem(b2b_fixture.COLUMNS, doctype, tuple(dict.fromkeys(b2b_fixture.COLUMNS[doctype] + (column,))))
+    claim(env, [], total_amount_reimbursed=90)
+    env.frappe.db.table("Payment Entry Reference").update({
+        "PER-1": {"name": "PER-1", "parent": "PE-1", "reference_name": "HR-EXP-1", "allocated_amount": 70,
+                  "docstatus": 1},
+        "PER-2": {"name": "PER-2", "parent": "PE-2", "reference_name": "HR-EXP-1", "allocated_amount": 20,
+                  "docstatus": 1}})  # committed while the send waited for the claim's lock
+    hrms_stub(env, booked=70)  # HRMS's plain sums still see the send's older snapshot
+    doc = fake_frappe._dict(name="HR-EXP-1", total_amount_reimbursed=90, is_paid=0, grand_total=100)
+    assert env.cp.reimbursed_gap(doc) == (90, 70)  # the mixed reading that refused the send
+    env.log.clear()
+    assert env.cp.reimbursed_gap(doc, for_update=True) is None
+    assert any(e[0] == "sql" and e[2] for e in env.log)  # locking reads
+    env.frappe.db.table(CLAIM)["HR-EXP-1"]["total_amount_reimbursed"] = 70  # a real gap still shows
+    assert env.cp.reimbursed_gap(doc, for_update=True) == (70, 90)
+
+
+def test_repair_takes_the_claims_lock_first(env, hrms_modules):
+    """R7: as the bookings do (owed.booking_lock), so the entries are counted once the lock is held."""
+    claim(env, [], total_amount_reimbursed=401)
+    hrms_stub(env, booked=501)
+    env.frappe.user_roles = {"M-Pesa Manager"}
+    env.frappe.db.transaction_writes = 0
+    env.log.clear()
+    assert env.cp.repair_reimbursed("HR-EXP-1")["repaired"]
+    assert env.log.index(("commit",)) < env.log.index(("lock", "b2c-pay:Expense Claim:HR-EXP-1"))
+
+
+def test_switching_maker_checker_drops_every_users_cached_boot(env, monkeypatch):
+    """R15: the desk's maker_checker flag is read again on the next page load."""
+    settings_module = importlib.import_module(
+        "mpsa_suite.mpsa_suite.doctype.m_pesa_suite_settings.m_pesa_suite_settings")
+    compat = importlib.import_module("mpsa_suite.compat")
+    dropped = []
+    monkeypatch.setattr(compat, "get_cache", lambda: types.SimpleNamespace(delete_value=dropped.append))
+    before = fake_frappe._dict(schedule_maker_checker=1)
+
+    def saved(value):
+        return types.SimpleNamespace(get=lambda f: {"schedule_maker_checker": value}.get(f),
+                                     get_doc_before_save=lambda: before)
+
+    settings_module.MPesaSuiteSettings.refresh_boot_flags(saved(1))
+    assert dropped == []
+    settings_module.MPesaSuiteSettings.refresh_boot_flags(saved(0))
+    assert dropped == ["bootinfo"]

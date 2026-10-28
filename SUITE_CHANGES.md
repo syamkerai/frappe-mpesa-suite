@@ -141,11 +141,57 @@ formats; then clear the cache (new desk scripts).
   thermal printers, 9 to 14 px, with the Letter Head image if one is set. It keeps nothing
   Astral-specific (no hard-coded shortcode, no custom fields).
 - **Send Payment Proof** on a Paid (or Partially Paid) payout opens Frappe's email composer,
-  addressed to the party (the supplier's email, or the employee's preferred, company or personal
-  email) with the 80 mm proof selected. The user presses Send; nothing is sent automatically.
+  addressed to its one party (the supplier's email, or the employee's preferred, company or
+  personal email) with the 80 mm proof selected. The user presses Send; nothing is sent
+  automatically. A batch paying several parties is never proved whole: the user picks one paid row,
+  and that row's payout (its B2C Disbursement Request) is proved to that party alone. Salary
+  payouts get no emailed proof. The button shows only to who may send email on the payout.
+
+**Review fixes (after 4b2f196)**
+
+An independent review of 4b2f196 confirmed 15 findings (R1 and R2 are one defect). All are fixed;
+none was disputed.
+- **R1/R2 (high): Send Payment Proof on a multi-party batch** addressed every party and attached the
+  whole batch, so every employee of a payroll batch got colleagues' net pay and emails.
+  - `proof_recipients` now returns one party only.
+  - For a batch of several parties it returns the paid rows to choose from, then that row's own
+    payout and proof, to that party only.
+  - Salary payouts are refused.
+  - Frappe's email right is checked on what is attached.
+- **R3: Clear Staff Flag accepted a line never flagged**, which switched the destination's staff
+  check off for good. It now refuses unless a line of that destination is Blocked.
+- **R4: who may not clear a flag.** The flag now keeps who it is about on the line
+  (`staff_involved`): the claimant, the preparer, the sender (the refused sender too, whose own record
+  was rolled back with the send) and the staff member whose name M-Pesa paid (an employee's User
+  ID). None of them may clear it, and the matched staff member is left out of the alert.
+- **R5: the gap guard at a send mixed reads.** It compared a locking read of Total Amount Reimbursed
+  with HRMS's snapshot sums, and so refused a B2B submit while another payout of the claim was being
+  booked. Under the claim's lock it now reads both sides with locking reads
+  (`reimbursed_gap(for_update=True)`, `booked_now`). This is used by the B2B submit and send and by
+  the claim payee send. A bench test with two connections shows the old reading refused and the new
+  one passes.
+- **R6:** the Purchase Order advice now counts an advance that Get Advances moved onto the invoice
+  (kept as the order's advance voucher, as `owed.allocated_on` reads it).
+- **R7:** Repair Reimbursed Total takes the claim's lock first (`owed.booking_lock`).
+- **R8:** B2B requests whose Result never came are queried by when they were sent
+  (`send_started_on`), not by when the draft was made.
+- **R9:** "Partly Paid" now hooks `frappe.get_indicator` for these two DocTypes. HRMS 15's own
+  "Unpaid" state used to answer first, so the old override never ran.
+- **R10:** a batch's status is written with `db_set`, as Update Status writes it: on_change runs
+  (notifications, webhooks), a Version is saved, modified moves and open forms reload.
+- **R11:** the proof's total counts Paid payouts only, under the label "Total Paid".
+- **R12:** see R1/R2 (email right).
+- **R13:** paybill and bank account numbers are masked on the claim advice (****6789), also when they
+  look like a phone number.
+- **R14:**
+  - An advance's paid amount no longer nets off HRMS's Return; returns are shown on their own line.
+  - A salary slip's paid amount is the suite's own reading (`salary_slip_paid`, which counts the
+    payroll's bank entry).
+- **R15:** switching maker-checker drops every user's cached boot, so the flag is read again on the
+  next page load.
 
 **Tests**
-- Unit: 2925 pass (`python -m pytest tests/unit -q`), 76 more than 2849. New: `test_r41_claims.py`,
+- Unit: 2937 pass (`python -m pytest tests/unit -q`), 88 more than 2849. New: `test_r41_claims.py`,
   `test_r41_employee_docs.py`, `test_r41_print.py`, `test_r41_js.py`; updated where behaviour changed
   on purpose (bank verdict, boot flags, the patch count).
 - Bench: four new tests in `money_out/test_claim_payees.py`. One books two payouts of one claim in
@@ -157,10 +203,20 @@ formats; then clear the cache (new desk scripts).
   throwaway v16 bench has no built desk assets for Frappe's print page): claim and
   payouts in `test_claim_payees`, invoice, order, B2B and Payment Entry in `test_b2b_documents`,
   advance in `test_employee_documents`, salary slip in `test_salary_slip_payouts`.
+- Review fixes, two more bench tests:
+  - R5: a send's gap check waits on another booking of the same claim, in two connections. The
+    4b2f196 reading refuses ("Total Amount Reimbursed shows KES 9,000 ... 2,000"); the fixed one
+    passes.
+  - R1/R2: a batch of two claimants is proved one row to its own claimant.
+  - R6: the order advice is checked again once its advance has moved onto the invoice.
 - Bench, full `run-tests --app mpsa_suite` on fresh v15 and v16 sites (ERPNext, payments, HRMS),
-  2026-10-28, on the tree of this commit: **515 tests on each version, all pass, none skipped**
-  (510 at 9a9c8ae plus 5 new). The race test was not run against the code before the fix; it is
-  built so that the second booking starts while the first is held open, as on Trident.
+  2026-10-28:
+  - at 4b2f196: 515 tests on each version, all pass, none skipped;
+  - on the tree of the review fixes: **517 tests on each version, all pass, none skipped** (510 at
+    9a9c8ae plus 7 new).
+
+  The first race test was not run against the code before the fix; it is built so that the second
+  booking starts while the first is held open, as on Trident.
 
 **Deferred**
 - A claim's casual payee paid by B2C to a supplier's approved phone records the account but does not

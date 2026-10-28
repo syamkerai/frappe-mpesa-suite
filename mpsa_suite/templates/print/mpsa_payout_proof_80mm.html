@@ -33,7 +33,7 @@
 		</div>
 		{% endfor %}
 		{% if p.blocks | length > 1 %}
-		<div class="balance"><span>{{ _("Total") }}</span><span>KES {{ "{:,.2f}".format(p.total) }}</span></div>
+		<div class="balance"><span>{{ _("Total Paid") }}</span><span>KES {{ "{:,.2f}".format(p.total) }}</span></div>
 		{% endif %}
 		<div class="row" style="margin-top:2mm"><span>{{ _("Prepared By") }}</span><span>{{ p.prepared_by or "-" }}</span></div>
 		<div class="row"><span>{{ _("Sent By") }}</span><span>{{ p.sent_by or "-" }}</span></div>

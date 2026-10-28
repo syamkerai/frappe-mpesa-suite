@@ -441,6 +441,10 @@ def test_the_send_checks_the_claim_again_under_its_lock(env):
     doc = request(env, employee="EMP-1", employee_mpesa_account="MEA-1", receiver_shortcode="247247",
                   account_reference="0123456789", docstatus=1)
     claim(env, total_amount_reimbursed=5000, status="Paid")  # paid by bank meanwhile
+    # the bank's Payment Entry behind that total (round 4.1: a total with no entry behind it is a gap)
+    env.frappe.db.table(b2b_fixture.PER)["PER-BANK"] = {"name": "PER-BANK", "parent": "PE-BANK", "docstatus": 1,
+                                                        "reference_doctype": EC, "reference_name": "HR-EXP-1",
+                                                        "allocated_amount": 5000}
     with pytest.raises(env.frappe.ValidationError, match="HR-EXP-1 has nothing left to pay"):
         env.b2b.check_ready_to_send(doc)
     assert env.b2b.lock_document("MB2B-NONE") == (None, None)

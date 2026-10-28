@@ -96,7 +96,7 @@ RANK = {PAID: 4, IN_FLIGHT: 3, QUEUED: 2, FAILED: 1}
 # Written by the server from the line's payouts; a save after submit keeps what the database holds
 RESULT_FIELDS = ("status", "payout_doctype", "payout_name", "receipt", "paid_on", "sent_on", "error_message",
                  "receiver_name", "name_matches", "name_note", "supplier_account", "name_verdict", "sent_by",
-                 "staff_check", "staff_note")
+                 "staff_check", "staff_note", "staff_involved")
 # The name check's verdict (name_verdict): a bank account is never verified, M-Pesa shows the bank's name
 MATCHES, NO_MATCH, NOT_VERIFIED = "Matches", "Does Not Match", "Not Verified"
 VERDICT = {True: MATCHES, False: NO_MATCH, None: NOT_VERIFIED}
@@ -834,7 +834,7 @@ def sync_lines(claim: str, lines=None, for_update: bool = False) -> list:
             best = deciding_payout(mine)
             staff = _staff_paid(claim, row, best, cache)
             if staff:
-                changed.update(staff_check=BLOCKED, staff_note=staff.note)
+                changed.update(staff_check=BLOCKED, staff_note=staff.note, staff_involved=staff.involved)
         if changed:
             frappe.db.set_value(LINE, row.name, changed, update_modified=False)
             row.update(changed)
@@ -976,29 +976,40 @@ def _name_alarm(claim: str, line) -> None:
 
 # ---------------------------------------------------------------- staff or self payments (round 4.1)
 def staff_people(claimant, users=(), employees: bool = True) -> list:
-    """Who a claim payee must never be, as [(who, name)]: the claimant, ``users`` ([(role, user)]:
-    the payout's preparer and sender) and, while M-Pesa Suite Settings says so (``employees``), every
-    Employee. An employee is named by ID only for the M-Pesa Managers' alert."""
+    """Who a claim payee must never be, as [(who, name, user)]: the claimant, ``users`` ([(role,
+    user)]: the payout's preparer and sender) and, while M-Pesa Suite Settings says so
+    (``employees``), every Employee; ``user`` is the person's login (an employee's User ID), who may
+    not clear a flag raised under their name. An employee is named by ID only for the M-Pesa
+    Managers' alert."""
+    user_field = frappe.get_meta("Employee").has_field("user_id")
     people = []
     if claimant:
-        people.append(("the claimant", frappe.db.get_value("Employee", claimant, "employee_name")))
+        values = frappe.db.get_value("Employee", claimant, ["employee_name", "user_id"] if user_field
+                                     else ["employee_name"], as_dict=True) or {}
+        people.append(("the claimant", values.get("employee_name"), values.get("user_id")))
     for role, user in users:
         if user and user not in ("Administrator", "Guest"):
-            people.append((f"{role} ({user})", frappe.db.get_value("User", user, "full_name")))
+            people.append((f"{role} ({user})", frappe.db.get_value("User", user, "full_name"), user))
     if employees:
-        people += [(f"an employee ({e.name})", e.employee_name)
-                   for e in frappe.get_all("Employee", fields=["name", "employee_name"], order_by="name")]
-    return [(who, cstr(name).strip()) for who, name in people if cstr(name).strip()]
+        fields = ["name", "employee_name"] + (["user_id"] if user_field else [])
+        people += [(f"an employee ({e.name})", e.employee_name, e.get("user_id"))
+                   for e in frappe.get_all("Employee", fields=fields, order_by="name")]
+    return [(who, cstr(name).strip(), user or None) for who, name, user in people if cstr(name).strip()]
 
 
 def staff_match(received, people) -> tuple | None:
-    """(who, name) of the first of ``people`` M-Pesa's name is (two words at least on both sides:
-    one first name alone matches no one), or None."""
+    """(who, name, user) of the first of ``people`` M-Pesa's name is (two words at least on both
+    sides: one first name alone matches no one), or None."""
     received = _without_number(received)
-    for who, name in people:
+    for who, name, *user in people:
         if pa.names_match(name, received, min_words=2):
-            return who, name
+            return who, name, (user[0] if user else None)
     return None
+
+
+def involved_users(*users) -> str:
+    """Who a staff flag is about (staff_involved): the logins that may never clear it."""
+    return ", ".join(sorted({cstr(u).strip() for u in users if cstr(u).strip()}))
 
 
 def staff_note(who: str, received) -> str:
@@ -1043,8 +1054,9 @@ def _staff_paid(claim: str, line, payout, cache: dict):
     found = staff_match(line.get("receiver_name"), people)
     if not found:
         return None
-    return frappe._dict(note=staff_note(found[0], line.get("receiver_name")), who=found[0],
-                        exclude=sorted({u for u in (maker, sender, cache["claimant_user"]) if u}))
+    exclude = sorted({u for u in (maker, sender, cache["claimant_user"], found[2]) if u})
+    return frappe._dict(note=staff_note(found[0], line.get("receiver_name")), who=found[0], exclude=exclude,
+                        involved=involved_users(*exclude))
 
 
 def _staff_alarm(claim: str, line, exclude=(), rolled_back: bool = False) -> None:
@@ -1089,8 +1101,9 @@ def names_paid_before(line, limit: int = 20) -> list:
 
 
 def staff_paid_before(line, claimant, users=(), employees: bool = True):
-    """At the send: (who, received) when a name M-Pesa paid this line's number under before is staff
-    (staff_match), unless an M-Pesa Manager cleared the destination; else None."""
+    """At the send: (who, received, user) when a name M-Pesa paid this line's number under before is
+    staff (staff_match; ``user``: that person's login), unless an M-Pesa Manager cleared the
+    destination; else None."""
     names = names_paid_before(line)
     if not names or cleared_destination(line.get("destination_key")):
         return None
@@ -1098,21 +1111,24 @@ def staff_paid_before(line, claimant, users=(), employees: bool = True):
     for received in names:
         found = staff_match(received, people)
         if found:
-            return found[0], received
+            return found[0], received, found[2]
     return None
 
 
 def flag_staff(claim: str, line: str, note: str, exclude=()) -> None:
     """A job queued at a send refused as a staff or self payment (the refusal rolls the send's
     transaction back): the line is flagged (staff_check Blocked, unless its destination was cleared
-    meanwhile) and the M-Pesa Managers but ``exclude`` are alerted."""
+    meanwhile), who it is about is kept (staff_involved: ``exclude``, the refused sender among them,
+    since the send's own record of its sender was rolled back) and the M-Pesa Managers but them
+    are alerted."""
     with owed.doc_lock(CLAIM, claim, timeout=owed.BOOKING_WAIT):
         row = frappe.db.get_value(LINE, line, list(LINE_FIELDS), as_dict=True)
         if (not row or row.parent != claim or row.get("staff_check") in (BLOCKED, CLEARED)
                 or cleared_destination(row.destination_key)):
             return
-        frappe.db.set_value(LINE, line, {"staff_check": BLOCKED, "staff_note": note}, update_modified=False)
-        row.update(staff_check=BLOCKED, staff_note=note)
+        values = {"staff_check": BLOCKED, "staff_note": note, "staff_involved": involved_users(*exclude)}
+        frappe.db.set_value(LINE, line, values, update_modified=False)
+        row.update(values)
         _staff_alarm(claim, row, exclude)
 
 
@@ -1121,8 +1137,10 @@ def clear_staff_flag(claim: str, line: str, reason: str | None = None) -> dict:
     """Clear Staff Flag: a named M-Pesa Manager (ADMIN_ROLES) who can read the claim and checked that
     a payee line's destination is not a staff member's clears it for claim payees: every line of
     that destination flagged Blocked, and ``line``, become Cleared, with who cleared it and why; the
-    names M-Pesa paid it under before no longer refuse its send. Not the claimant of such a line, nor
-    who prepared or sent a payout of one. A Comment on each claim records it."""
+    names M-Pesa paid it under before no longer refuse its send. Only a destination that is blocked
+    (a line of it Blocked); never by who a flag is about: the claimant, who prepared or sent (or
+    tried to send) a payout of such a line, or the staff member whose name M-Pesa paid
+    (staff_involved). A Comment on each claim records it."""
     require_named_user()
     require(ADMIN_ROLES)
     doc = frappe.get_doc(CLAIM, claim)
@@ -1138,15 +1156,20 @@ def clear_staff_flag(claim: str, line: str, reason: str | None = None) -> dict:
         flagged = frappe.get_all(LINE, filters={"parenttype": CLAIM, "destination_key": row.destination_key,
                                                "staff_check": BLOCKED},
                                  fields=["name", "parent", "idx", "sent_by", "payout_doctype", "payout_name",
-                                         "staff_note"])
+                                         "staff_note", "staff_involved"])
+        if not flagged:
+            # nothing to clear: clearing a destination never flagged would switch its staff check off for good
+            frappe.throw(f"Payee row #{row.idx} of {claim} ({describe(row, masked=True)}) is not blocked as a staff or "
+                         "self payment: there is no flag to clear.")
         involved = set()
         for f in [*flagged, row]:
             involved |= {cstr(f.get("sent_by")).strip(), _claimant_user(f.parent) or ""}
+            involved |= {u.strip() for u in cstr(f.get("staff_involved")).split(",")}
             if f.get("payout_doctype") and f.get("payout_name"):
                 involved.add(cstr(frappe.db.get_value(f.payout_doctype, f.payout_name, "owner")))
-        if user in involved:
-            frappe.throw("You are the claimant, or prepared or sent a payment to this destination: another M-Pesa "
-                         "Manager clears it.", frappe.PermissionError)
+        if user in involved - {""}:
+            frappe.throw("The flag is about you (the claimant, who prepared or sent a payment to this destination, or "
+                         "whose name M-Pesa paid): another M-Pesa Manager clears it.", frappe.PermissionError)
         cleared = f"Cleared by {user} on {now_datetime():%Y-%m-%d %H:%M}: {reason}"
         for f in {f.name: f for f in [*flagged, row]}.values():
             note = " ".join(n for n in (cstr(f.get("staff_note")).strip(), cleared) if n)
@@ -1186,12 +1209,12 @@ def _line(name: str):
     return row
 
 
-def payable_problem(doc) -> str | None:
+def payable_problem(doc, for_update: bool = False) -> str | None:
     """Why the claim may not be paid now (money_out.employee_documents: submitted, approved, in a
     payable workflow state, something owed)."""
     from .employee_documents import payable_problem as problem
 
-    return problem(doc)
+    return problem(doc, for_update=for_update) if for_update else problem(doc)
 
 
 def _memo(owner, key: str, make):
@@ -1458,7 +1481,7 @@ def _check_sending(claim: str, line, amount: float, payout: tuple, company, batc
     if not s.allow:
         frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")
     doc = frappe.get_doc(CLAIM, claim)
-    problem = payable_problem(doc)
+    problem = payable_problem(doc, for_update=True)  # under the claim's lock: its reimbursed total as it is now
     if problem:
         frappe.throw(problem)
     found = _memo(owner, "mpsa_employee_destinations", employee_destinations)
@@ -1468,10 +1491,10 @@ def _check_sending(claim: str, line, amount: float, payout: tuple, company, batc
     sender = frappe.session.user
     staff = staff_paid_before(line, doc.employee, (("its preparer", maker), ("its sender", sender)), s.employee_names)
     if staff:
-        note = staff_note(*staff)
-        try:  # the line is flagged by a job queued now: this refusal rolls the send back
+        note = staff_note(staff[0], staff[1])
+        try:  # the line is flagged by a job queued now: this refusal rolls the send back, its sender with it
             frappe.enqueue(f"{__name__}.flag_staff", queue="short", timeout=300, claim=claim, line=line.name, note=note,
-                           exclude=sorted({u for u in (maker, sender, _claimant_user(claim)) if u}))
+                           exclude=sorted({u for u in (maker, sender, _claimant_user(claim), staff[2]) if u}))
         except Exception:
             frappe.log_error(title="M-Pesa claim payee staff flag not queued",
                              message=f"{claim}\n{frappe.get_traceback()}")
@@ -1851,26 +1874,52 @@ def suggestions(lines, after: int) -> list:
 
 
 # ---------------------------------------------------------------- the reimbursed total
-def reimbursed_gap(doc) -> tuple | None:
+def reimbursed_gap(doc, for_update: bool = False) -> tuple | None:
     """(stored, booked) when HRMS's Total Amount Reimbursed disagrees with the Payment and Journal
     Entries booked against the claim (HRMS's own count), else None. Two payouts booked at the same
-    moment can leave it short."""
+    moment can leave it short.
+
+    ``for_update`` (a send or submit under the claim's lock): both sides are read as they are now,
+    with locking reads, never a committed total against entries summed in an older snapshot, which
+    would refuse a send while another payout of the claim was booked (review R5)."""
+    if for_update:
+        stored = frappe.db.get_value(CLAIM, doc.name, ["total_amount_reimbursed", "is_paid", "grand_total"],
+                                     as_dict=True, for_update=True) or frappe._dict()
+        booked = flt(stored.grand_total, 2) if cint(stored.is_paid) else booked_now(doc.name)
+        stored = flt(stored.total_amount_reimbursed, 2)
+        return (stored, booked) if abs(stored - booked) > 0.005 else None
     from hrms.hr.doctype.expense_claim.expense_claim import get_total_reimbursed_amount
 
     stored, booked = flt(doc.get("total_amount_reimbursed"), 2), flt(get_total_reimbursed_amount(doc), 2)
     return (stored, booked) if abs(stored - booked) > 0.005 else None
 
 
+def booked_now(claim: str) -> float:
+    """HRMS's count of what was reimbursed on the claim (get_total_reimbursed_amount: submitted
+    Journal Entry rows and Payment Entry references naming it), with locking reads: what is
+    committed now, not the transaction's snapshot."""
+    locking = _locking(True)
+    je = frappe.db.sql(
+        f"""SELECT COALESCE(SUM(debit_in_account_currency - credit_in_account_currency), 0)
+        FROM `tabJournal Entry Account` WHERE reference_name = %s AND docstatus = 1 {locking}""", (claim,))
+    pe = frappe.db.sql(
+        f"""SELECT COALESCE(SUM(allocated_amount), 0) FROM `tabPayment Entry Reference`
+        WHERE reference_name = %s AND docstatus = 1 {locking}""", (claim,))
+    return flt(flt(je[0][0] if je else 0) + flt(pe[0][0] if pe else 0), 2)
+
+
 @frappe.whitelist(methods=["POST"])
 def repair_reimbursed(claim: str) -> dict:
     """Repair reimbursed total: HRMS's own update_reimbursed_amount sets Total Amount Reimbursed
     (and the claim's status) from the entries booked against the claim. For ADMIN_ROLES who can
-    read the claim; under the claim's lock, so no payout is booked meanwhile."""
+    read the claim; under the claim's lock taken first (owed.booking_lock), so no payout is booked
+    meanwhile and the entries are counted as committed once it is held, never from an older snapshot
+    (review R7)."""
     require(ADMIN_ROLES)
     frappe.get_doc(CLAIM, claim).check_permission("read")
     from hrms.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
 
-    with owed.doc_lock(CLAIM, claim):
+    with owed.booking_lock(CLAIM, claim):
         doc = frappe.get_doc(CLAIM, claim, for_update=True)  # as it is now, under the lock
         if cint(doc.docstatus) != 1:
             frappe.throw(f"{claim} is not submitted.")
