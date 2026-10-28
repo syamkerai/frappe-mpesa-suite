@@ -273,7 +273,9 @@ const mpsa_b2b = {
 			doc.entry_status === "Needs Checking" ? "red" : "orange"
 		);
 		if (!frappe.user.has_role(MPSA_FINANCE_ROLES)) return;
-		if (!doc.payment_entry && !doc.journal_entry) {
+		// Make Entry posts the entry at once (submitted): offered to who may submit a Payment or Journal Entry
+		const can_post = ["Payment Entry", "Journal Entry"].some((dt) => frappe.model.can_submit(dt));
+		if (!doc.payment_entry && !doc.journal_entry && can_post) {
 			frm.add_custom_button(__("Make Entry"), () => mpsa_b2b.make_entry(frm), __("Accounting"));
 		}
 		frm.add_custom_button(
@@ -284,6 +286,11 @@ const mpsa_b2b = {
 					.then(() => frm.reload_doc()),
 			__("Accounting")
 		);
+	},
+
+	// The entry a kind makes, which the user must be allowed to submit (the server refuses otherwise)
+	can_post(kind) {
+		return frappe.model.can_submit(["Journal Entry", "Salary Slip"].includes(kind) ? "Journal Entry" : "Payment Entry");
 	},
 
 	async make_entry(frm) {
@@ -302,12 +309,14 @@ const mpsa_b2b = {
 		const hrms = frappe.boot && frappe.boot.versions && frappe.boot.versions.hrms;
 		// a payment to an employee is booked on its Salary Slip, Expense Claim or Employee Advance
 		// (a Payment Entry HRMS counts), else as a Journal Entry
-		const kinds = f.employee
-			? hrms
-				? ["Salary Slip", "Expense Claim", "Employee Advance", "Journal Entry"]
-				: ["Journal Entry"]
-			: ["Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry"];
-		const kind = f.employee
+		const kinds = (
+			f.employee
+				? hrms
+					? ["Salary Slip", "Expense Claim", "Employee Advance", "Journal Entry"]
+					: ["Journal Entry"]
+				: ["Purchase Invoice", "Purchase Order", "Supplier Advance", "Journal Entry"]
+		).filter((k) => mpsa_b2b.can_post(k));
+		const named = f.employee
 			? f.salary_slip
 				? "Salary Slip"
 				: f.expense_claim
@@ -322,6 +331,7 @@ const mpsa_b2b = {
 			: f.supplier
 			? "Supplier Advance"
 			: "Journal Entry";
+		const kind = kinds.includes(named) ? named : kinds[0];
 		const supplier_filter = () => (d.get_value("supplier") ? { supplier: d.get_value("supplier") } : {});
 		const d = new frappe.ui.Dialog({
 			title: __("Make Entry"),
@@ -418,6 +428,14 @@ const mpsa_b2b = {
 					default: f.cost_center,
 					depends_on: "eval:doc.kind=='Journal Entry'",
 					get_query: () => ({ filters: { company: f.company, is_group: 0 } }),
+				},
+				{
+					fieldtype: "Date",
+					fieldname: "posting_date",
+					label: __("Posting Date"),
+					description: __(
+						"Empty: the day M-Pesa paid it. A later day when that one is in a closed Accounting Period or on or before Accounts Frozen Till; the entry's remark keeps the day it was paid."
+					),
 				},
 				{ fieldtype: "Small Text", fieldname: "remark", label: __("Remark") },
 			],

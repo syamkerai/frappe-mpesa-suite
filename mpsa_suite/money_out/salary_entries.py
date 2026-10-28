@@ -25,6 +25,7 @@ the B2C booking by its receipt and tag (b2c_postprocess_service.booked_docstatus
 import frappe
 from frappe.utils import cint, cstr, flt
 
+from ..accounting import posting
 from . import owed
 
 JE = "Journal Entry"
@@ -159,9 +160,7 @@ def for_b2c(disbursement, ref, submit: bool = False) -> str:
                         bank_account, text, paid_before(slip, exclude_b2c=request), "b2c_payment_disbursement",
                         disbursement.name, settings=p.get("mpesa_settings"))
     je.flags.ignore_permissions = True
-    je.insert(ignore_permissions=True)
-    if submit:
-        je.submit()
+    posting.insert_entry(je, submit, ignore_permissions=True)
     if problem:
         frappe.log_error(title="M-Pesa salary may be paid twice", message=f"{request}: {problem}",
                          reference_doctype=statement.B2C, reference_name=request)

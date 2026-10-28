@@ -589,9 +589,47 @@ class TestB2BDocuments(IntegrationTestCase):
             pe = frappe.get_doc(PE, pe.name)
             self.assertEqual((pe.docstatus, pe.get("workflow_state")), (1, "Approved"))
             self.assertEqual((self._state(req.name).entry_status, self._outstanding(pi.name)), ("Entry Made", 6000))
+            # inserted submitted in one save (accounting.posting): the Draft state never ran, so its approvers
+            # got no Workflow Action that would stay Open on a submitted entry
+            self.assertEqual(frappe.get_all("Workflow Action", filters={
+                "reference_doctype": PE, "reference_name": pe.name, "status": "Open"}), [])
         finally:
             frappe.db.set_value("Workflow", PE_WORKFLOW, "is_active", 0)
             frappe.clear_cache(doctype=PE)
+
+    def _closed_period(self, day) -> None:
+        """An Accounting Period of the test company closed on ``day`` (ERPNext closes every voucher type it
+        lists, Payment and Journal Entries among them, on insert; an end date after today is refused)."""
+        return frappe.get_doc({"doctype": "Accounting Period", "period_name": f"_T B2B Closed {self.tag}",
+                               "company": t.COMPANY, "start_date": add_days(day, -1), "end_date": day}).insert()
+
+    def test_a_payout_paid_in_a_closed_period_is_booked_by_make_entry_on_a_later_posting_date(self):
+        # ERPNext refuses an entry dated in a closed Accounting Period (also to Administrator, whom the booking
+        # runs as): the note says to use Make Entry's Posting Date; the entry posted later says both days
+        today = getdate(nowdate())
+        self._closed_period(today)
+        req = self._request(4000, supplier=self.supplier)
+        receipt = self._pay(req.name)
+        self.assertEqual((self._entries(receipt), self._journals(receipt)), ([], []))
+        state = self._state(req.name)
+        self.assertEqual(state.entry_status, "Entry Not Made")
+        self.assertIn(b2b_entries.CLOSED_PERIOD, state.entry_note)
+        self.assertEqual(self._line(receipt).withdrawal, 4000)  # its statement line is made all the same
+        # the charge's Journal Entry, dated the same day, waits without undoing the payout's line
+        self.assertEqual(self._journals(f"CHG-{receipt}"), [])
+        self.assertTrue(frappe.db.exists("Mpesa Match Log", {"reference_name": req.name, "result": "Error"}))
+
+        self.assertRaisesRegex(frappe.ValidationError, "closed Accounting Period", b2b_entries.make_entry, req.name,
+                               "Supplier Advance")
+        self.assertRaisesRegex(frappe.ValidationError, "or a later day", b2b_entries.make_entry, req.name,
+                               "Supplier Advance", posting_date=add_days(today, -1))
+        later = add_days(today, 1)
+        answer = b2b_entries.make_entry(req.name, "Supplier Advance", posting_date=later)
+        pe = frappe.get_doc(PE, answer["name"])
+        self.assertEqual((pe.docstatus, getdate(pe.posting_date), getdate(pe.reference_date), pe.reference_no),
+                         (1, getdate(later), today, receipt))
+        self.assertIn(f"Paid on {today}, posted on {getdate(later)}.", pe.remarks)
+        self.assertEqual(self._state(req.name).entry_status, "Entry Made")
 
     def test_draft_entry_keeps_the_invoice_blocked_until_submitted(self):
         # a draft the suite made before the migrate switched every Mpesa Settings to post at once (or one staff made)

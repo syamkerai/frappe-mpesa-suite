@@ -43,7 +43,7 @@ def post_entries_at_once():
         frappe.db.sql("UPDATE `tabMpesa Settings` SET submit_b2c_accounting_entries = 1 "
                       "WHERE IFNULL(submit_b2c_accounting_entries, 0) = 0")
     if frappe.db.exists("DocType", "M-Pesa Suite Settings"):
-        frappe.db.set_single_value("M-Pesa Suite Settings", "submit_statement_entries", 1)
+        frappe.db.set_single_value("M-Pesa Suite Settings", "submit_statement_entries", 1, update_modified=False)
 
 
 def create_claim_payee_fields():

@@ -25,8 +25,9 @@ import datetime
 import json
 
 import frappe
-from frappe.utils import add_days, cint, cstr, flt, get_datetime, getdate, nowdate
+from frappe.utils import add_days, cstr, flt, get_datetime, getdate, nowdate
 
+from ..accounting import posting
 from ..money_in.bank_transaction import create_statement_line, find_existing
 from ..money_in.common import (
     REGISTER,
@@ -476,20 +477,19 @@ def feed(doctype: str, name: str) -> str | None:
         elif charge is None:
             charge_line = find_existing(bank_account, key, withdrawal=True)  # one Astral's feed made
         if charge_line:
-            _link(p, "charge_bank_transaction", charge_line)
             booked = flt(frappe.db.get_value(BT, charge_line, "withdrawal"))
             if charge and abs(booked - flt(charge)) > 0.005:
                 # a line made earlier (from the balances, or by Astral's feed) says otherwise: the
                 # line, its entry and the charge on the payout stay as they are for staff to correct
+                _link(p, "charge_bank_transaction", charge_line)
                 log_match(
                     "Ambiguous", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
                     receipt=p.receipt, amount=flt(charge),
                     details=f"Charge line {charge_line} says {booked}, but the charge on {p.receipt} is {flt(charge)}. "
                     "Nothing was changed: correct the charge line and its Journal Entry by hand.",
                 )
-            else:
-                _link(p, "mpesa_charge", charge or booked)
-                charge_entry(p, bank_account, charge_line, charge)
+            elif not booked_charge(p, bank_account, charge_line, charge, booked):
+                charge_line = None  # waits, unlinked: the sweep tries its entry again
 
     if reconciling():
         gl = frappe.db.get_value("Bank Account", bank_account, "account")
@@ -549,6 +549,39 @@ def _link(p, field: str, value) -> None:
     if field in p and p.get(field) != value:
         frappe.db.set_value(p.doctype, p.name, field, value, update_modified=False)
         p[field] = value
+
+
+def booked_charge(p, bank_account: str, line: str, charge: float | None, booked: float) -> bool:
+    """The charge line's links on the payout and its entry, under a savepoint of their own: an
+    entry ERPNext refuses (a closed period, a frozen date, a missing account setting) rolls back
+    only them, never the payout's own line and links, and is recorded once. The charge line stays
+    made but unlinked, so the sweep (sweep_missing) tries its entry again until it is booked.
+    False when the entry failed."""
+    linked = {field: p.get(field) for field in ("charge_bank_transaction", "mpesa_charge") if field in p}
+    frappe.db.savepoint("mpesa_payout_charge")
+    try:
+        _link(p, "charge_bank_transaction", line)
+        _link(p, "mpesa_charge", charge or booked)
+        charge_entry(p, bank_account, line, charge)
+        return True
+    except Exception as e:
+        frappe.db.rollback(save_point="mpesa_payout_charge")
+        p.update(linked)  # as the rollback left them
+        # a charge on a closed or frozen day waits for staff: its Journal Entry made by hand carries
+        # CHG-<receipt> as Reference Number (Cheque No), which charge_entry finds and uses
+        why = (
+            f"its day is in a closed Accounting Period or on or before Accounts Frozen Till: make its Journal "
+            f"Entry by hand in an open period with Reference Number {CHARGE_PREFIX}{p.receipt}, which the suite uses"
+            if posting.period_closed(e)
+            else "it is tried again every 5 minutes"
+        )
+        log_match(
+            "Error", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+            receipt=p.receipt, amount=flt(charge or booked),
+            details=f"The Journal Entry for charge line {line} could not be booked: {cstr(e)[:300]}. The payout's "
+            f"own line is kept and the charge waits: {why}.",
+        )
+        return False
 
 
 def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str | None:
@@ -620,10 +653,8 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         )
         je.append("accounts", {"account": bank.account, "credit_in_account_currency": amount, "cost_center": cost_center})
         je.flags.ignore_permissions = True
-        je.insert()
         # posted like the payout's own entry: the switch is always on (migrate.post_entries_at_once)
-        if cint(settings.get("submit_b2c_accounting_entries")):
-            je.submit()
+        posting.insert_entry(je, settings.get("submit_b2c_accounting_entries"))
         return je.name
 
 

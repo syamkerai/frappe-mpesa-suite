@@ -410,7 +410,8 @@ def test_make_entry_against_an_invoice_allocates_what_is_left(env):
     assert result == {"doctype": "Payment Entry", "name": "ACC-PAY-0001", "docstatus": 1,
                       "entry_status": "Needs Checking"}  # 3,000 allocated, 1,000 left unallocated
     assert [r["allocated_amount"] for r in env.frappe.db.table("Payment Entry Reference").values()] == [3000]
-    assert env.inserted == [("Payment Entry", "accounts@example.com", False)]  # the user's own permissions
+    # the user's own permissions (None: Frappe's insert keeps them, accounting.posting)
+    assert env.inserted == [("Payment Entry", "accounts@example.com", None)]
     assert row(env)["purchase_invoice"] == "PINV-1" and env.fed == ["MB2B-1"]
     note = ("PINV-1 could take only KES 3,000 of this payment, so KES 1,000 is an unallocated supplier advance. "
             "Check that the supplier was not paid twice.")

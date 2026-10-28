@@ -302,7 +302,12 @@ Existing settings that do more now:
   workflow it lands in the workflow's approved state (Frappe sets it on submit). Nobody approves
   M-Pesa entries: the money has left already. "Submit B2C Accounting Entries" (Mpesa Settings) and
   "Submit Transfer and Funding Entries" (M-Pesa Suite Settings) are always on and read-only. Make
-  Entry posts too, so it is for a user who may submit the entry.
+  Entry posts too, so it is for a user who may submit the entry (the button is hidden from others).
+  Each entry is inserted already submitted, in one save, so the workflow's Draft state never runs:
+  no Workflow Action is left Open for its approvers and no Draft email goes out. A payout paid on a
+  day in a closed Accounting Period or on or before Accounts Frozen Till cannot be booked on that
+  day: Make Entry takes a later Posting Date (B2B), and a B2C payout's alert says to make its entry
+  by hand with the receipt, which the suite counts.
 - **Payee accounts:** a bank account is picked from the bank list; the default changes only with
   Make Default; a party with several approved accounts and no default shows red and is left out of
   payroll.
@@ -385,7 +390,21 @@ Existing settings that do more now:
    Payment Entry workflow's approvers: M-Pesa entries no longer arrive as drafts for review. Drafts
    the suite made before the upgrade stay drafts: submit or approve them. An entry that cannot be
    submitted is not left as a draft: its payout shows why, the sweep tries again, and Make Entry
-   books it (for users who may submit Payment Entries).
+   books it (for users who may submit Payment Entries; others do not see the button). The Notify
+   Role (M-Pesa Suite Settings) is alerted once per payout and reason, B2C payouts too.
+   A payout paid on a day that is in a closed Accounting Period, or on or before Accounts Frozen
+   Till (which binds Administrator, whom the automatic booking runs as), cannot be booked on that
+   day:
+   - B2B: its note says so; press Make Entry and give a Posting Date in an open period. The entry
+     keeps the payout's day as its Reference Date, and its remark says "Paid on X, posted on Y."
+   - B2C (no Make Entry): the payout's accounting error and alert say so; make its entry by hand,
+     dated in an open period, with the M-Pesa receipt as Reference No: a Payment Entry allocated to
+     the payout's document, or for a salary a Journal Entry with the receipt as Reference Number and
+     the employee as party on the payroll payable row. The suite counts it as the payout's entry and
+     marks the payout booked on its next pass.
+   - The charge's Journal Entry waits too (the payout's own statement line is kept; a Mpesa Match
+     Log says why): make it by hand with Reference Number CHG-<receipt>, dated in an open period,
+     and the suite uses it; or reopen the period and the sweep books it.
 4. **Approve employees' phone accounts**: HR enters each Employee M-Pesa Account with its proof, an
    M-Pesa Manager approves it, and it is payable after the hold (24 hours by default).
 5. **Decide "Pay Employees by B2C Only to Approved Phones"**: switch it on once the employees paid
@@ -563,11 +582,43 @@ submitted when they are made; under a Payment Entry workflow, Frappe puts the en
 workflow's first submitted state (Approved on Trident). The two switches that used to leave them as
 drafts are read-only and always on: each settings form keeps them on, and every migrate switches
 them on (`migrate.post_entries_at_once`). Make Entry posts the entry it makes, so a user who may not
-submit it is refused instead of getting a draft. Drafts made before stay as they are: the suite
-still counts them and waits for staff to submit them. Tests:
-`tests/unit/test_r4_post_at_once.py`; on the bench, an entry made under an active Payment Entry
-workflow (Draft > Pending Approval > Approved) is submitted in Approved and the invoice's
-outstanding falls at once (`test_b2b_documents`).
+submit it is refused instead of getting a draft, and the form hides the button from them. Drafts
+made before stay as they are: the suite still counts them and waits for staff to submit them.
+
+After the review of 437c33e:
+- **One save, submitted.** Every entry the suite posts goes through `accounting.posting.insert_entry`:
+  the draft's save methods run on it first (before_validate, validate, before_save, so ERPNext's
+  draft-only steps still run: a Payment Entry's advance account when the company books advances
+  separately, a Journal Entry's against accounts), then it is inserted with docstatus 1, which
+  Frappe runs as a submit and saves straight in the workflow's approved state. An insert then a
+  submit ran the workflow's Draft state on the insert: an Open Workflow Action for the Draft
+  state's approvers that the submit never completed, and the Draft state's email. The sites: the
+  B2B booking and Make Entry, the B2C payouts' Payment Entries (`api.payment_entry`) and salary
+  Journal Entries (`accounting.journal_service`, `money_out.salary_entries`), the charge Journal
+  Entries (`money_out.statement`), the statement import's transfers (`wallet.statement_import`)
+  and the money-in Payment Entries of paid STK prompts (`utils.utils`; a draft Payment Entry a
+  prompt paid is submitted in one save too). A switch still read off (before the migrate) inserts
+  a draft as before.
+- **A closed or frozen day.** A payout paid on a day in a closed Accounting Period, or on or
+  before Accounts Frozen Till (`posting.period_closed`), cannot be booked on that day, not even by
+  Administrator. Make Entry takes an optional Posting Date (the payout's day or later; the entry's
+  remark says both days). The B2B booking's note and alert say to use it; a B2C payout's
+  accounting error and alert say to make its entry by hand with the receipt as Reference No, dated
+  in an open period, which `booked_docstatus` counts (a Payment Entry allocated to the document, or
+  a salary Journal Entry naming the employee).
+- **A charge entry that fails waits on its own.** The charge Journal Entry and the charge line's
+  links are made under a savepoint of their own: when ERPNext refuses the entry, the payout's own
+  statement line and links stay, one Mpesa Match Log says why (once), and the sweep books the
+  charge once it can, instead of rolling the payout's line back and logging an Error every 5
+  minutes.
+- **B2C booking failures are alerted** to the Notify Role once per payout and reason, as B2B's are.
+- The migrate's switch of "Submit Transfer and Funding Entries" leaves the settings' modified as it
+  was.
+
+Tests: `tests/unit/test_r4_post_at_once.py`; on the bench, an entry made under an active Payment
+Entry workflow (Draft > Pending Approval > Approved) is submitted in Approved with no Open Workflow
+Action and the invoice's outstanding falls at once, and a payout paid in a closed Accounting Period
+is booked by Make Entry on a later Posting Date while its charge waits (`test_b2b_documents`).
 
 **Known limits** (after the final review)
 - An Integration Request's raw data of a B2C or B2B result holds the amount and receiver name

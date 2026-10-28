@@ -351,7 +351,12 @@ def journal(frappe):
         def append(self, table, row):
             self.setdefault(table, []).append(row)
 
+        def run_method(self, method, *args, **kwargs):
+            made.append((method, None))  # the draft's save (accounting.posting)
+
         def insert(self, ignore_permissions=False):
+            if self.get("docstatus") == 1:  # inserted submitted, in one save: Frappe runs a submit
+                return self.submit()
             made.append(("insert", dict(self)))
 
         def submit(self):
@@ -380,7 +385,8 @@ def journal(frappe):
 def test_salary_bank_entry_carries_the_receipt_and_can_be_submitted(journal):
     journal.mod.create_journal_entry(journal.disbursement, journal.ref(reference_no=" SKT1AAAAAA "), submit=True)
 
-    assert [step for step, _ in journal.made] == ["insert", "submit"]
+    # posted at once: the draft's save methods, then one insert that is a submit (accounting.posting)
+    assert [step for step, _ in journal.made] == ["before_validate", "validate", "before_save", "submit"]
     entry = journal.made[-1][1]
     assert (entry["voucher_type"], entry["cheque_no"], entry["cheque_date"]) == (
         "Bank Entry", "SKT1AAAAAA", datetime.date(2026, 10, 20)

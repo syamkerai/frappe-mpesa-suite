@@ -1,6 +1,8 @@
 import frappe
 from frappe.utils import getdate, nowdate
 
+from mpsa_suite.accounting.posting import insert_entry
+
 
 def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
     """
@@ -68,9 +70,7 @@ def create_journal_entry(b2c_disbursement, b2c_disbursement_ref, submit=False):
             },
         )
 
-        je.insert(ignore_permissions=True)
-        if submit:
-            je.submit()
+        insert_entry(je, submit, ignore_permissions=True)  # submitted in one save (posting)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Journal Service Error")
         raise  # the caller rolls back and the B2C accounting sweep retries

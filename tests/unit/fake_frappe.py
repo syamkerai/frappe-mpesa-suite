@@ -155,6 +155,9 @@ class FakeDoc:
     def get_doc_before_save(self):
         return None  # as Frappe gives for a document not yet saved
 
+    def run_method(self, method, *args, **kwargs):
+        self._frappe.methods_run.append((self.doctype, method))  # the controller's method and the hooks
+
     def insert(self, ignore_permissions=False):
         if not self._row.get("name"):
             self._row["name"] = f"{self.doctype[:4].upper()}-{next(self._frappe._seq)}"
@@ -174,6 +177,7 @@ def build():
     frappe._seq = itertools.count(1)
     frappe.db = FakeDB(frappe)
     frappe.comments, frappe.errors, frappe.enqueued, frappe.request_logs = [], [], [], []
+    frappe.methods_run = []
     frappe.session = _dict(user="payer@example.com")
     frappe.user_roles = {"M-Pesa Payer"}
     frappe.local = types.SimpleNamespace(request=None, form_dict=_dict(), session=frappe.session)

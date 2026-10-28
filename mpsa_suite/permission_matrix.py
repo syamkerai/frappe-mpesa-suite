@@ -281,7 +281,7 @@ ENDPOINTS = {
     _D + "mpesa_settings.mpesa_settings.trigger_transaction_status": ("FINANCE_ROLES", ("direct", "roles:FINANCE_ROLES")),
     _D + "mpesa_settings.mpesa_settings.MpesaSettings.get_account_balance_info": ("FINANCE_ROLES", ("roles:FINANCE_ROLES",)),
     _D + "mpesa_statement_import.mpesa_statement_import.MpesaStatementImport.import_statement": ("Write the import", ("perm",)),
-    "mpsa_suite.money_out.b2b_entries.make_entry": ("FINANCE_ROLES + create PE/JE + read request", ("roles:FINANCE_ROLES", "perm")),
+    "mpsa_suite.money_out.b2b_entries.make_entry": ("FINANCE_ROLES + create and submit PE/JE (posted at once) + read request", ("roles:FINANCE_ROLES", "perm")),
     "mpsa_suite.money_out.b2b_entries.refresh_entry_now": ("FINANCE_ROLES + read request", ("roles:FINANCE_ROLES", "perm")),
     "mpsa_suite.money_out.b2b_entries.entry_facts": ("FINANCE_ROLES + read request", ("roles:FINANCE_ROLES", "perm")),
     "mpsa_suite.money_out.b2b.amount_left": ("Read the invoice / order", ("perm",)),
