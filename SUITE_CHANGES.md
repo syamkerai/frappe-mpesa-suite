@@ -593,8 +593,8 @@ outstanding falls at once (`test_b2b_documents`).
   - Payment Entry's STK button is not hidden from non-collectors (the server checks Payment Entry
     submit).
 
-Tests: 2807 unit tests pass at bf64a9d4 (`python -m pytest tests/unit -q`). Bench, full `run-tests
---app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 508 tests at bf64a9d4,
+Tests: 2811 unit tests pass at 437c33e (`python -m pytest tests/unit -q`). Bench, full `run-tests
+--app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 509 tests at 437c33e,
 all pass on both versions, the verification tests included. `test_claim_payees` (merchant and
 casual payees) first ran on a real site in this round: its setUpClass had failed at every earlier head.
 
