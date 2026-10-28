@@ -601,8 +601,12 @@ class TestB2BDocuments(IntegrationTestCase):
     def _closed_period(self, start, end):
         """An Accounting Period of the test company closed from ``start`` to ``end`` (ERPNext closes every voucher
         type it lists, Payment and Journal Entries among them, on insert; an end date after today is refused)."""
+        # the closed DocTypes listed: ERPNext's own bootstrap of them reads attributes off plain dicts
+        # (AccountingPeriod.bootstrap_doctypes_for_closing, v15 and v16)
         return frappe.get_doc({"doctype": "Accounting Period", "period_name": f"_T B2B Closed {self.tag}",
-                               "company": t.COMPANY, "start_date": start, "end_date": end}).insert()
+                               "company": t.COMPANY, "start_date": start, "end_date": end,
+                               "closed_documents": [{"document_type": PE, "closed": 1},
+                                                    {"document_type": JE, "closed": 1}]}).insert()
 
     def _fiscal_year_for(self, day) -> None:
         """testing._fiscal_year makes only this year's: on 1 or 2 January the days before are last year's."""

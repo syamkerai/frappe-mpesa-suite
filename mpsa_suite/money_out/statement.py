@@ -245,19 +245,34 @@ def charge_for(p) -> float | None:
         if cstr(p.debit_party_charges).strip():
             return parse_charges(p.debit_party_charges)  # Safaricom states it (a stated 0 stays 0)
         return unstated_b2b_charge(p)
-    bands = charge_bands()
-    tariff = band_charge(bands, p.amount) if bands else None
-    seen = balance_charge(p)
-    if tariff is not None and seen is not None and abs(seen - tariff) > 0.005:
+    tariff, seen = _b2c_charges(p)
+    if _disagree(tariff, seen):
         log_match(
             "Ambiguous", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
             receipt=p.receipt, amount=p.amount,
             details=f"B2C Charge Bands give {tariff} for {flt(p.amount)}, but the M-Pesa balance fell by "
-            f"{flt(p.amount) + seen} ({seen} more than the payout). No charge was booked: book it by hand and, "
+            f"{flt(p.amount) + seen} ({seen} more than the payout). No charge was booked: book its Journal Entry "
+            f"by hand with Reference Number {CHARGE_PREFIX}{p.receipt} (the suite uses it, never a second) and, "
             "if Safaricom changed its tariff, update B2C Charge Bands on M-Pesa Suite Settings.",
         )
         return None
     return tariff if tariff is not None else seen
+
+
+def _b2c_charges(p) -> tuple:
+    """A B2C payout's charge by the B2C Charge Bands and by the wallet balances (None when unknown)."""
+    bands = charge_bands()
+    return (band_charge(bands, p.amount) if bands else None), balance_charge(p)
+
+
+def _disagree(tariff, seen) -> bool:
+    return tariff is not None and seen is not None and abs(seen - tariff) > 0.005
+
+
+def charge_disputed(p) -> bool:
+    """Whether the bands and the balances disagree on the payout's charge: charge_for logs it for
+    staff to book by hand, so nothing books that charge on its own."""
+    return p.doctype == B2C and _disagree(*_b2c_charges(p))
 
 
 def balance_charge(p) -> float | None:
@@ -476,9 +491,11 @@ def feed(doctype: str, name: str) -> str | None:
             )
         elif charge is None:
             charge_line = find_existing(bank_account, key, withdrawal=True)  # one Astral's feed made
-            if charge_line and not p.get("charge_bank_transaction") and flt(p.get("mpesa_charge")):
+            if (charge_line and not p.get("charge_bank_transaction") and flt(p.get("mpesa_charge"))
+                    and not charge_disputed(p)):
                 # the suite's own line, whose entry was refused: the charge it confirmed when it made
-                # the line (kept by booked_charge), which the balances may no longer show
+                # the line (kept by booked_charge), which the balances may no longer show; never one the
+                # bands and the balances now disagree on (left for staff, who book it by hand)
                 charge = flt(p.mpesa_charge)
         if charge_line:
             booked = flt(frappe.db.get_value(BT, charge_line, "withdrawal"))
@@ -620,7 +637,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         amount = flt(row.withdrawal)
         if abs(amount - flt(charge)) > 0.005:
             log_match(
-                "Ambiguous", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+                "Ambiguous", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
                 receipt=p.receipt, amount=amount,
                 details=f"Charge line {line} was made before the suite and says {amount}; this payout's charge "
                 f"is {flt(charge)}. No entry was booked: correct the line and book its charge.",
@@ -635,7 +652,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         ) or frappe._dict()
         if not settings.get("charges_account"):
             log_match(
-                "Error", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+                "Error", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
                 receipt=p.receipt, amount=amount,
                 details=f"No M-Pesa Charges Account on Mpesa Settings {p.mpesa_settings} (Accounting Mapping): "
                 f"charge line {line} waits for its entry.",
@@ -644,7 +661,7 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         bank = frappe.db.get_value("Bank Account", bank_account, ["account", "company"], as_dict=True)
         if frappe.db.get_value("Account", settings.charges_account, "company") != bank.company:
             log_match(
-                "Error", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+                "Error", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
                 receipt=p.receipt, amount=amount,
                 details=f"M-Pesa Charges Account {settings.charges_account} is not in {bank.company}, the company "
                 f"of {bank_account}.",

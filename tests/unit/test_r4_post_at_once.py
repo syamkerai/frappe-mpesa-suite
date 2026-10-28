@@ -506,6 +506,35 @@ def test_a_retry_the_balances_no_longer_confirm_books_the_charge_the_line_was_ma
     assert (payout["charge_bank_transaction"], payout["mpesa_charge"]) == ("BT-CHG-UJ2NI8UJ2A", 11)
 
 
+def test_a_retry_never_books_a_charge_the_bands_and_balances_now_disagree_on(statement_env, monkeypatch):  # noqa: F811
+    # the line was made for the tariff (11) and its entry refused; on the retry the balances show 13: charge_for
+    # logs it for staff to book by hand, so the stored 11 is not booked behind that log
+    env = statement_env
+    _savepoints(env, monkeypatch)
+    env.settings.b2c_charge_bands = "20000 = 11"  # 11 on the 5,300 payout
+    seen = iter([None, 13.0, 13.0])
+    monkeypatch.setattr(env.statement, "balance_charge", lambda p: next(seen, 13.0))
+    lines = env.frappe.db.table("Bank Transaction")
+    monkeypatch.setattr(env.statement, "find_existing",
+                        lambda ba, key, withdrawal=None: f"BT-{key}" if f"BT-{key}" in lines else None)
+    statement_b2c(env)
+
+    def refused(p, bank_account, line, charge):
+        raise env.frappe.ValidationError("No cost center")
+
+    monkeypatch.setattr(env.statement, "charge_entry", refused)
+    env.statement.after_payout(STATEMENT_B2C, "B2C-1")
+    payout = env.frappe.db.table(STATEMENT_B2C)["B2C-1"]
+    assert (payout["charge_bank_transaction"], payout["mpesa_charge"]) == (None, 11)
+    entries = []
+    monkeypatch.setattr(env.statement, "charge_entry",
+                        lambda p, ba, line, charge: entries.append((line, charge)) or "JE-1")
+    env.statement.after_payout(STATEMENT_B2C, "B2C-1")
+    assert entries == [("BT-CHG-UJ2NI8UJ2A", None)]  # never the stored 11: charge_entry books nothing for None
+    disputed = [kw for a, kw in env.calls.logs if kw.get("details", "").startswith("B2C Charge Bands give 11")]
+    assert disputed and "Reference Number CHG-UJ2NI8UJ2A" in disputed[0]["details"]
+
+
 def test_a_charge_line_the_suite_cannot_book_leaves_a_match_log(statement_env, monkeypatch):  # noqa: F811
     # charge_entry itself: a line found for a charge the suite cannot confirm, with no entry, is never linked quietly
     env = statement_env
