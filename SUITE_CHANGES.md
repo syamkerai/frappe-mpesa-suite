@@ -650,8 +650,8 @@ is booked by Make Entry on a later Posting Date while its charge waits (`test_b2
   - Payment Entry's STK button is not hidden from non-collectors (the server checks Payment Entry
     submit).
 
-Tests: 2811 unit tests pass at 437c33e (`python -m pytest tests/unit -q`). Bench, full `run-tests
---app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 509 tests at 437c33e,
+Tests: 2849 unit tests pass at 9a9c8ae (`python -m pytest tests/unit -q`). Bench, full `run-tests
+--app mpsa_suite` on fresh v15 and v16 sites with ERPNext, payments and HRMS: 510 tests at 9a9c8ae,
 all pass on both versions, the verification tests included. `test_claim_payees` (merchant and
 casual payees) first ran on a real site in this round: its setUpClass had failed at every earlier head.
 
