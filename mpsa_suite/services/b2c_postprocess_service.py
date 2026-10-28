@@ -145,17 +145,18 @@ def _record_booking_error(b2c_request: str | None, traceback: str, hint: str | N
 
 def closed_period_hint(ref, receipt: str) -> str:
     """What staff do with a payout whose entry ERPNext refuses for its date (a closed Accounting
-    Period, or on or before Accounts Frozen Till, which binds Administrator too): its entry made
-    by hand in an open period, carrying the receipt, which booked_docstatus counts as this
-    payout's (a Payment Entry allocated to the document, or a salary's Journal Entry naming the
-    employee) and entry_carrying_receipt keeps from being booked twice."""
+    Period, books closed by a Period Closing Voucher, or on or before Accounts Frozen Till, the
+    last two binding Administrator too): its entry made by hand in an open period, carrying the
+    receipt, which booked_docstatus counts as this payout's (a Payment Entry allocated to the
+    document, or a salary's Journal Entry naming the employee) and entry_carrying_receipt keeps
+    from being booked twice."""
     if ref.reference_doctype == "Salary Slip":
         how = (f"a Journal Entry with Reference Number {receipt} and {ref.party} as party on the payroll "
                "payable row")
     else:
         how = f"a Payment Entry with Reference No {receipt}, allocated to {ref.reference_doctype} {ref.reference_name}"
-    return (f"Its date is in a closed Accounting Period or on or before Accounts Frozen Till: make {how}, dated in "
-            "an open period; the suite counts it as this payout's entry.")
+    return (f"Its date is in a closed Accounting Period, in books closed by a Period Closing Voucher or on or before "
+            f"Accounts Frozen Till: make {how}, dated in an open period; the suite counts it as this payout's entry.")
 
 
 # Older paid payouts are left to staff (the Error Log and accounting_error say why).

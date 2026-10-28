@@ -305,9 +305,9 @@ Existing settings that do more now:
   Entry posts too, so it is for a user who may submit the entry (the button is hidden from others).
   Each entry is inserted already submitted, in one save, so the workflow's Draft state never runs:
   no Workflow Action is left Open for its approvers and no Draft email goes out. A payout paid on a
-  day in a closed Accounting Period or on or before Accounts Frozen Till cannot be booked on that
-  day: Make Entry takes a later Posting Date (B2B), and a B2C payout's alert says to make its entry
-  by hand with the receipt, which the suite counts.
+  day in a closed Accounting Period, in books closed by a Period Closing Voucher, or on or before
+  Accounts Frozen Till cannot be booked on that day: Make Entry takes a later Posting Date (B2B),
+  and a B2C payout's alert says to make its entry by hand with the receipt, which the suite counts.
 - **Payee accounts:** a bank account is picked from the bank list; the default changes only with
   Make Default; a party with several approved accounts and no default shows red and is left out of
   payroll.
@@ -596,21 +596,27 @@ After the review of 437c33e:
   B2B booking and Make Entry, the B2C payouts' Payment Entries (`api.payment_entry`) and salary
   Journal Entries (`accounting.journal_service`, `money_out.salary_entries`), the charge Journal
   Entries (`money_out.statement`), the statement import's transfers (`wallet.statement_import`)
-  and the money-in Payment Entries of paid STK prompts (`utils.utils`; a draft Payment Entry a
-  prompt paid is submitted in one save too). A switch still read off (before the migrate) inserts
+  and the money-in Payment Entries of paid STK prompts (`utils.utils`; a Payment Request's entry is
+  built with ERPNext's `create_payment_entry(submit=False)`, whose own default inserts then submits;
+  a draft Payment Entry a prompt paid is submitted in one save too). A unit check keeps suite code
+  from calling ERPNext helpers that insert then submit an entry. A switch still read off (before the migrate) inserts
   a draft as before.
-- **A closed or frozen day.** A payout paid on a day in a closed Accounting Period, or on or
-  before Accounts Frozen Till (`posting.period_closed`), cannot be booked on that day, not even by
-  Administrator. Make Entry takes an optional Posting Date (the payout's day or later; the entry's
+- **A closed or frozen day.** A payout paid on a day in a closed Accounting Period, in books closed
+  by a Period Closing Voucher (ERPNext's "Books have been closed till the period ending on ..."), or
+  on or before Accounts Frozen Till (`posting.period_closed`), cannot be booked on that day, not
+  even by Administrator. Make Entry takes an optional Posting Date (the payout's day or later; the entry's
   remark says both days). The B2B booking's note and alert say to use it; a B2C payout's
   accounting error and alert say to make its entry by hand with the receipt as Reference No, dated
   in an open period, which `booked_docstatus` counts (a Payment Entry allocated to the document, or
   a salary Journal Entry naming the employee).
 - **A charge entry that fails waits on its own.** The charge Journal Entry and the charge line's
   links are made under a savepoint of their own: when ERPNext refuses the entry, the payout's own
-  statement line and links stay, one Mpesa Match Log says why (once), and the sweep books the
-  charge once it can, instead of rolling the payout's line back and logging an Error every 5
-  minutes.
+  statement line and links stay, and so does the confirmed charge (M-Pesa Charge, kept outside the
+  savepoint, so a retry the balances can no longer confirm books the charge the line was made for).
+  One Mpesa Match Log per reason says why (the sweep's retries refresh it; a later, different
+  reason gets its own row), and the sweep books the charge once it can, instead of rolling the
+  payout's line back and logging an Error every 5 minutes. A charge line the suite cannot confirm
+  and that has no Journal Entry is logged (Ambiguous) instead of being linked quietly.
 - **B2C booking failures are alerted** to the Notify Role once per payout and reason, as B2B's are.
 - The migrate's switch of "Submit Transfer and Funding Entries" leaves the settings' modified as it
   was.

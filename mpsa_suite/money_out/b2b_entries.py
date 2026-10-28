@@ -50,8 +50,8 @@ money = owed.money
 # Ends every note about money the request's document could not take.
 PAID_TWICE = "Check that the supplier was not paid twice."
 # A booking ERPNext refused for its date (posting.period_closed): the retries keep that date.
-CLOSED_PERIOD = ("The day it was paid is in a closed Accounting Period or on or before Accounts Frozen Till: press "
-                 "Make Entry and give it a Posting Date in an open period.")
+CLOSED_PERIOD = ("The day it was paid is in a closed Accounting Period, in books closed by a Period Closing Voucher "
+                 "or on or before Accounts Frozen Till: press Make Entry and give it a Posting Date in an open period.")
 
 
 # ---------------------------------------------------------------- reading
@@ -759,7 +759,8 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
     state), as the suite's automatic entries are: so only for a user who may submit it.
 
     ``posting_date``: a later day to post it on than the day M-Pesa paid it, which is in a closed
-    Accounting Period or on or before Accounts Frozen Till; the entry's remark says both days."""
+    Accounting Period, in books closed by a Period Closing Voucher or on or before Accounts Frozen
+    Till; the entry's remark says both days."""
     require(FINANCE_ROLES)
     if kind not in KINDS:
         frappe.throw(f"Entry Type must be one of: {', '.join(KINDS)}")

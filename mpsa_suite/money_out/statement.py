@@ -476,6 +476,10 @@ def feed(doctype: str, name: str) -> str | None:
             )
         elif charge is None:
             charge_line = find_existing(bank_account, key, withdrawal=True)  # one Astral's feed made
+            if charge_line and not p.get("charge_bank_transaction") and flt(p.get("mpesa_charge")):
+                # the suite's own line, whose entry was refused: the charge it confirmed when it made
+                # the line (kept by booked_charge), which the balances may no longer show
+                charge = flt(p.mpesa_charge)
         if charge_line:
             booked = flt(frappe.db.get_value(BT, charge_line, "withdrawal"))
             if charge and abs(booked - flt(charge)) > 0.005:
@@ -554,9 +558,13 @@ def _link(p, field: str, value) -> None:
 def booked_charge(p, bank_account: str, line: str, charge: float | None, booked: float) -> bool:
     """The charge line's links on the payout and its entry, under a savepoint of their own: an
     entry ERPNext refuses (a closed period, a frozen date, a missing account setting) rolls back
-    only them, never the payout's own line and links, and is recorded once. The charge line stays
-    made but unlinked, so the sweep (sweep_missing) tries its entry again until it is booked.
-    False when the entry failed."""
+    only them, never the payout's own line and links, and is recorded (one Match Log per reason).
+    The charge line stays made but unlinked, so the sweep (sweep_missing) tries its entry again
+    until it is booked. A confirmed ``charge`` is kept on the payout (mpesa_charge) outside the
+    savepoint: a retry the balances can no longer confirm books that charge (feed). False when
+    the entry failed."""
+    if charge:
+        _link(p, "mpesa_charge", charge)
     linked = {field: p.get(field) for field in ("charge_bank_transaction", "mpesa_charge") if field in p}
     frappe.db.savepoint("mpesa_payout_charge")
     try:
@@ -570,13 +578,15 @@ def booked_charge(p, bank_account: str, line: str, charge: float | None, booked:
         # a charge on a closed or frozen day waits for staff: its Journal Entry made by hand carries
         # CHG-<receipt> as Reference Number (Cheque No), which charge_entry finds and uses
         why = (
-            f"its day is in a closed Accounting Period or on or before Accounts Frozen Till: make its Journal "
-            f"Entry by hand in an open period with Reference Number {CHARGE_PREFIX}{p.receipt}, which the suite uses"
+            f"its day is in a closed Accounting Period, in books closed by a Period Closing Voucher or on or "
+            f"before Accounts Frozen Till: make its Journal Entry by hand in an open period with Reference Number "
+            f"{CHARGE_PREFIX}{p.receipt}, which the suite uses"
             if posting.period_closed(e)
             else "it is tried again every 5 minutes"
         )
+        # one row per reason: the sweep's retries refresh it, a later, different refusal gets its own
         log_match(
-            "Error", "Payout Charge", once=True, reference_doctype=p.doctype, reference_name=p.name,
+            "Error", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
             receipt=p.receipt, amount=flt(charge or booked),
             details=f"The Journal Entry for charge line {line} could not be booked: {cstr(e)[:300]}. The payout's "
             f"own line is kept and the charge waits: {why}.",
@@ -598,7 +608,14 @@ def charge_entry(p, bank_account: str, line: str, charge: float | None) -> str |
         if existing:
             return existing
         if charge is None:
-            return None  # a line Astral's feed made for a charge the suite cannot confirm
+            # a line Astral's feed made for a charge the suite cannot confirm: staff book it
+            log_match(
+                "Ambiguous", "Payout Charge", on_change=True, reference_doctype=p.doctype, reference_name=p.name,
+                receipt=p.receipt, amount=flt(frappe.db.get_value(BT, line, "withdrawal")),
+                details=f"Charge line {line} has no Journal Entry and the suite cannot confirm the charge on "
+                f"{p.receipt}: check the line and book its Journal Entry by hand with Reference Number {key}.",
+            )
+            return None
         row = frappe.db.get_value(BT, line, ["withdrawal", "date", "docstatus"], as_dict=True)
         amount = flt(row.withdrawal)
         if abs(amount - flt(charge)) > 0.005:

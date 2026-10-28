@@ -497,7 +497,9 @@ def handle_successful_transaction(request_doc, settings):
                 if books_paid:
                     _book_payment_request_payment(request_doc, payment_request)
                 else:
-                    payment_request.create_payment_entry()
+                    # ERPNext's create_payment_entry() inserts, then submits (a workflow's Draft state):
+                    # built as a draft, posted in one save (accounting.posting) as its insert and submit did
+                    insert_entry(payment_request.create_payment_entry(submit=False), ignore_permissions=True)
             except Exception:
                 log_and_throw_error("Payment Entry Creation Error", request_doc.name)
 

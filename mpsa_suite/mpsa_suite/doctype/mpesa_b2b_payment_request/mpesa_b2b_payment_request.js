@@ -434,7 +434,7 @@ const mpsa_b2b = {
 					fieldname: "posting_date",
 					label: __("Posting Date"),
 					description: __(
-						"Empty: the day M-Pesa paid it. A later day when that one is in a closed Accounting Period or on or before Accounts Frozen Till; the entry's remark keeps the day it was paid."
+						"Empty: the day M-Pesa paid it. A later day when that one is in a closed Accounting Period, in books closed by a Period Closing Voucher or on or before Accounts Frozen Till; the entry's remark keeps the day it was paid."
 					),
 				},
 				{ fieldtype: "Small Text", fieldname: "remark", label: __("Remark") },

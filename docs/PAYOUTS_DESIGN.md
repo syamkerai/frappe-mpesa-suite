@@ -379,7 +379,7 @@ When supplier_mpesa_account is empty, throw "Pick the supplier's approved M-Pesa
     - require(FINANCE_ROLES) plus frappe.has_permission on Payment Entry or Journal Entry "create", with throw;
     - and "submit" (2026-10-28): the entry is posted at once (accounting.posting.insert_entry: inserted submitted in one save; in a Payment Entry workflow, its approved state), so a user who may not submit it is refused, never left a draft. The form hides Make Entry from them (frappe.model.can_submit) and offers only the kinds whose entry they may submit;
     - ADMIN_ROLES for a cancelled request.
-  - posting_date (optional): the day the entry is posted: the payout's own completion date or a later one (refused before it). For a payout whose day is in a closed Accounting Period or on or before Accounts Frozen Till, which ERPNext refuses also to Administrator. The Reference / Cheque Date stays the completion date; the entry's remark (PE remarks, JE user_remark and v16 remark) ends "Paid on <day>, posted on <day>.".
+  - posting_date (optional): the day the entry is posted: the payout's own completion date or a later one (refused before it). For a payout whose day is in a closed Accounting Period, in books closed by a Period Closing Voucher, or on or before Accounts Frozen Till, which ERPNext refuses also to Administrator. The Reference / Cheque Date stays the completion date; the entry's remark (PE remarks, JE user_remark and v16 remark) ends "Paid on <day>, posted on <day>.".
   - Locks in R4 order. The request must be Paid with a receipt.
   - If an entry already carries the receipt: "Receipt X is already on <entry> (<where>): open it, or press Check Entry Again."
   - Kinds:

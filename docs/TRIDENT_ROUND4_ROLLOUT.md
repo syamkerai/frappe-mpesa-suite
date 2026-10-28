@@ -165,8 +165,9 @@ Fill in names before you start. One person may hold several of these jobs, but t
     - A booking that cannot be submitted (a validation of the entry) is not left as a draft: the
       payout shows why it is not booked, is tried again every 15 minutes, and Make Entry (B2B) books
       it. The Notify Role is alerted once per payout and reason (B2C payouts too).
-    - A payout paid on a day in a closed Accounting Period, or on or before Accounts Frozen Till
-      (which binds Administrator too), cannot be booked on that day. B2B: press Make Entry and give
+    - A payout paid on a day in a closed Accounting Period, in books closed by a Period Closing
+      Voucher, or on or before Accounts Frozen Till (the last two bind Administrator too), cannot be
+      booked on that day. B2B: press Make Entry and give
       a Posting Date in an open period; the entry's remark says "Paid on X, posted on Y." B2C: the
       alert says to make the entry by hand, dated in an open period, with the M-Pesa receipt as
       Reference No (a Payment Entry allocated to the claim or invoice; a salary's Journal Entry with

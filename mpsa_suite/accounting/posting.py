@@ -38,11 +38,23 @@ def insert_entry(entry, submit=True, ignore_permissions=None):
     return entry
 
 
+# ERPNext's refusals of a day, as plain ValidationErrors (translated): Accounts Frozen Till
+# (general_ledger.check_freezing_date) and books closed by a Period Closing Voucher
+# (general_ledger.validate_against_pcv, its message with a closing "." on v15, without on v16).
+CLOSED_MESSAGES = (
+    "You are not authorized to add or update entries before {0}",
+    "Books have been closed till the period ending on {0}.",
+    "Books have been closed till the period ending on {0}",
+)
+
+
 def period_closed(exc) -> bool:
     """True when ERPNext refused an entry for its date: a closed Accounting Period
     (accounting_period.validate_accounting_period_on_doc_save, general_ledger
-    validate_accounting_period) or Accounts Frozen Till (general_ledger.check_freezing_date,
-    which binds Administrator too, whom the automatic bookings run as)."""
+    validate_accounting_period), books closed by a Period Closing Voucher
+    (general_ledger.validate_against_pcv) or Accounts Frozen Till (general_ledger
+    check_freezing_date). The last two bind every user, Administrator too, whom the automatic
+    bookings run as."""
     try:
         from erpnext.accounts.doctype.accounting_period.accounting_period import (
             ClosedAccountingPeriod,
@@ -51,5 +63,9 @@ def period_closed(exc) -> bool:
         return False
     if isinstance(exc, ClosedAccountingPeriod):
         return True
-    frozen = frappe._("You are not authorized to add or update entries before {0}").split("{0}")[0]
-    return isinstance(exc, frappe.ValidationError) and cstr(exc).strip().startswith(frozen)
+    if not isinstance(exc, frappe.ValidationError):
+        return False
+    text = cstr(exc).strip()
+    # a translation that starts with the date has no text before it to tell it by
+    prefixes = {frappe._(message).split("{0}")[0].strip() for message in CLOSED_MESSAGES}
+    return any(prefix and text.startswith(prefix) for prefix in prefixes)
