@@ -20,7 +20,23 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> bo
     Returns True once the payout is booked. A failure is rolled back to a savepoint and
     recorded on the B2C request (``accounting_error``); ``retry_unbooked_payouts`` tries
     again, so a paid payout cannot silently stay out of the books.
+
+    The document the row pays is locked first (owed.booking_lock): its other payouts' rows are
+    booked by jobs of their own, and the total paid that ERPNext or HRMS writes back on it
+    (an Expense Claim's Total Amount Reimbursed) counts each of them only when read after it.
     """
+    from mpsa_suite.money_out import owed
+
+    document = frappe.db.get_value(
+        "B2C Payment Disbursement Reference", reference_name, ["reference_doctype", "reference_name"]
+    )
+    if document and all(document):
+        with owed.booking_lock(*document):  # held until the caller commits
+            return _handle(disbursement_name, reference_name)
+    return _handle(disbursement_name, reference_name)
+
+
+def _handle(disbursement_name: str, reference_name: str) -> bool:
     # Lock the row so a re-sent Result callback cannot book the same payout twice.
     frappe.db.get_value(
         "B2C Payment Disbursement Reference", reference_name, "name", for_update=True

@@ -16,6 +16,7 @@ from mpsa_suite import boot
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in.testing import allow_test_users
 from mpsa_suite.money_out import maker_checker
+from mpsa_suite.money_out.schedule import maker_checker_on
 from mpsa_suite.permissions import require_named_user
 
 SUITE = "M-Pesa Suite Settings"
@@ -116,7 +117,9 @@ class TestR4Foundation(IntegrationTestCase):
             with self.as_user(user):
                 bootinfo = frappe._dict()
                 boot.boot_session(bootinfo)
-                self.assertEqual(bootinfo.mpsa, dict(dict.fromkeys(boot.FLAGS, False), **flags), user)
+                # maker_checker is M-Pesa Suite Settings' switch (R4.1), the same for every user
+                self.assertEqual(bootinfo.mpsa, dict(dict.fromkeys(boot.FLAGS, False), **flags,
+                                                     maker_checker=maker_checker_on()), user)
 
     def test_administrator_gets_no_pay_or_approve_flag(self):
         self.assertIn("mpsa_suite.boot.boot_session", frappe.get_hooks("boot_session"))

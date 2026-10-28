@@ -336,6 +336,8 @@ class TestEmployeeDocuments(IntegrationTestCase):
         entry = self._entry_on(EA, advance)
         self.assertEqual((entry.party, entry.paid_to), (self.bank_employee, self.advances))
         self.assertEqual(frappe.db.get_value(EA, advance, ["paid_amount", "status"]), (8000, "Paid"))
+        receipt = frappe.db.get_value(B2B, out["name"], "transaction_id")
+        t.renders(EA, advance, receipt, "8,000.00", "Fully Paid")  # R4.1: the advance's payment advice
 
     def test_a_request_with_no_document_is_still_for_a_manager(self):
         with _as(ACCOUNTS):

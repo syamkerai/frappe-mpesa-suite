@@ -27,6 +27,7 @@ WATCHED = (
     "allow_claim_payees",
     "claim_payee_max_amount",
     "claim_payee_daily_cap",
+    "claim_payee_employee_names",  # payees M-Pesa paid under an employee's name blocked (R4.1)
     "claim_payable_workflow_states",  # the payable gate of claims and advances (blank = any approved one)
 )
 

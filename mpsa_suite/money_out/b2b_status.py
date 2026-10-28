@@ -40,6 +40,11 @@ UNSETTLED = ("Initiated", "Unknown")
 MAX_QUERIES = 3
 QUERY_GAP_MINUTES = 10
 ASK_WITHIN_HOURS = 48
+# A request whose Result never came (round 4.1, as B2C's check_unsettled_payouts): asked about once
+# it is this many minutes old in its state, again every UNSETTLED_EVERY_MINUTES, for UNSETTLED_FOR_DAYS.
+UNSETTLED_AFTER_MINUTES = {"Unknown": 5, "Initiated": 60}
+UNSETTLED_EVERY_MINUTES = 60
+UNSETTLED_FOR_DAYS = 7
 LABELS = {
     "receiver_public_name": "Receiver",
     "debit_party_charges": "Charges",
@@ -183,11 +188,40 @@ def still_asking(name: str) -> bool:
     }))
 
 
+def unsettled_due(limit: int = 20) -> list:
+    """Sent requests whose Result never came (Initiated, Unknown), due a status query now: old
+    enough in that state (UNSETTLED_AFTER_MINUTES), sent less than UNSETTLED_FOR_DAYS ago, with an
+    OriginatorConversationID to ask by, and not asked in the last UNSETTLED_EVERY_MINUTES."""
+    now, names = now_datetime(), []
+    for status, minutes in UNSETTLED_AFTER_MINUTES.items():
+        names += frappe.get_all(
+            B2B_DOCTYPE,
+            filters={"docstatus": 1, "status": status, "result_code": ["is", "not set"],
+                     "mpesa_settings": ["is", "set"], "originator_conversation_id": ["is", "set"],
+                     "modified": ["<", add_to_date(now, minutes=-minutes)],
+                     "creation": [">=", add_to_date(now, days=-UNSETTLED_FOR_DAYS)]},
+            pluck="name",
+            order_by="modified asc",
+            limit=limit,
+        )
+    recent = add_to_date(now, minutes=-UNSETTLED_EVERY_MINUTES)
+    return [n for n in names if not frappe.db.exists(QUERY_DOCTYPE, {"b2b_request": n, "creation": [">", recent]})][
+        :limit]
+
+
 def sweep(limit: int = 20) -> None:
     """Every five minutes: ask again about Paid requests whose receiver, charge or time is still
-    missing (at most ``limit`` queries per run)."""
+    missing, and about sent requests whose Result never came (unsettled_due: the answer settles
+    them as their Result would, so none stays Initiated); at most ``limit`` queries of each per run."""
     if not migrated():
         return  # not migrated yet
+    for name in unsettled_due(limit):
+        try:
+            start_query(name)
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(title=f"M-Pesa B2B status query failed for {name}"[:140], message=frappe.get_traceback())
     names = frappe.get_all(
         B2B_DOCTYPE,
         # paid in the window, whenever it was drafted (a Paid Result always leaves a completed time)

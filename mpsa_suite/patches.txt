@@ -14,3 +14,4 @@ mpsa_suite.mpsa_suite.patches.mpesa_settings_api_switches
 mpsa_suite.mpsa_suite.patches.drop_text_search_index_setters
 mpsa_suite.mpsa_suite.patches.relink_b2c_reference_rows
 mpsa_suite.mpsa_suite.patches.payout_lines_from_upgrade_date
+mpsa_suite.mpsa_suite.patches.claim_payee_name_verdict

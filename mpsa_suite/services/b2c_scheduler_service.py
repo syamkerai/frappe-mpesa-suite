@@ -1,26 +1,49 @@
 import frappe
 
 
+# Batches (and their rows) looked at again this long after they were made
+STATUS_SYNC_FOR_DAYS = 30
+
+
 def update_b2c_disbursement_statuses():
-    """
-    Scheduler job to retry outstanding disbursements (retry_count ≤ 3)
-    """
-    disbs = frappe.get_all(
-        "B2C Payment Disbursement",
-        filters={
-            "docstatus": 1,
-            "retry_count": ["<=", 3],
-            "status": ["not in", ["Paid", "Not Initiated"]],
-        },
-        fields=["name"],
+    """Every 15 minutes, for batches of the last STATUS_SYNC_FOR_DAYS: a row whose payout (B2C
+    Disbursement Request) finished but was never told (its job lost) takes the payout's result,
+    and every batch not Paid gets its status from its rows (b2c_batch_status.sync_status:
+    Partially Paid once a row is paid). Each result already does both; this is the safety net, so
+    no batch stays Initiated after its payouts finished. Written only when something changed."""
+    from frappe.utils import add_days, nowdate
+
+    from mpsa_suite.utils.doctype_names import B2C_REQUEST_DOCTYPE
+
+    from .b2c_batch_status import sync_status
+    from .b2c_response_service import update_b2c_reference_status
+
+    since = add_days(nowdate(), -STATUS_SYNC_FOR_DAYS)
+    stale = frappe.db.sql(
+        f"""SELECT req.name, req.status FROM `tabB2C Payment Disbursement Reference` ref
+        JOIN `tab{B2C_REQUEST_DOCTYPE}` req ON req.name = ref.b2c_disbursement_request
+        WHERE req.docstatus = 1 AND req.status IN ('Paid', 'Failed') AND req.creation >= %s
+          AND COALESCE(ref.payment_status, '') != req.status
+        ORDER BY req.creation LIMIT 100""",
+        (since,),
+        as_dict=True,
     )
-    for d in disbs:
+    for row in stale:
         try:
-            doc = frappe.get_doc("B2C Payment Disbursement", d.name)
-            result = doc.update_disbursement_status()
-            frappe.log(f"[B2C Retry] {d.name}: {result}")
+            update_b2c_reference_status(row.name, enqueue_next=row.status == "Paid")  # booking is idempotent
+            frappe.db.commit()
         except Exception:
-            frappe.log_error(frappe.get_traceback(), f"[B2C Retry Error] {d.name}")
+            frappe.db.rollback()
+            frappe.log_error(frappe.get_traceback(), f"[B2C row result] {row.name}"[:140])
+    for name in frappe.get_all("B2C Payment Disbursement",
+                               filters={"docstatus": 1, "status": ["!=", "Paid"], "creation": [">=", since]},
+                               pluck="name", order_by="creation asc"):
+        try:
+            sync_status(name)
+            frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(frappe.get_traceback(), f"[B2C batch status] {name}"[:140])
 
 
 # A payout whose send timed out, or whose Result never came, gets a Transaction Status

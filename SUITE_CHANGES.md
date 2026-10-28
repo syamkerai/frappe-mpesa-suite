@@ -7,6 +7,171 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## Round 4.1: fixes from Trident's live test (2026-10-28, branch r4-1-fixes)
+
+Round 4 went live on Trident Plumbers on 2026-10-28: nine payouts, clean books, and the defects below.
+Generic and settings-driven like the rest: Trident first, Astral on the same code. **`bench migrate`
+is needed**: new fields on M-Pesa Claim Payee and M-Pesa Suite Settings, one patch and nine print
+formats; then clear the cache (new desk scripts).
+
+**1. A claim's reimbursed total is never short again (money)**
+- Live: HR-EXP-2026-00712 showed Total Amount Reimbursed 70 instead of 90. Two B2C rows of one
+  batch were booked 2 s apart, each in its own job. HRMS sums the claim's entries with a plain read,
+  and that read used a snapshot taken before the lock, so it missed the other booking. It was
+  repaired by hand.
+- Every booking now takes the lock of the document it pays (Expense Claim, Employee Advance,
+  invoice, order or slip) as the first statement of its transaction. That covers the B2C payout
+  job, the B2B Result job, Make Entry, Check Entry Again and the 15-minute entry sweep, whose
+  savepoint now comes after the lock. What was read to find the document is committed away first,
+  and only when nothing is written and no lock is held (`owed.booking_lock`, `owed.fresh_snapshot`).
+  A booking waits up to 60 s for the lock, then the sweep retries it.
+- After every submitted or cancelled Payment Entry or Journal Entry that pays a claim or advance, a
+  job runs once the entry is committed (`employee_documents.check_paid_total`). It takes the lock
+  first and recounts the total from the entries:
+  - a claim's Total Amount Reimbursed, with HRMS's own `update_reimbursed_amount`;
+  - an advance's Paid Amount, with HRMS's own `set_total_advance_paid`.
+  When the total changes, a Comment on the document says so.
+- Safety net: while a claim's total disagrees with its entries, nothing more is prepared or sent for
+  it, to the claimant or a payee. `payable_problems` says why, so every pay path refuses.
+- The claim form shows the gap to preparers and payers as well ("ask an M-Pesa Manager to repair
+  it") and hides Pay Merchants and Payees. Managers keep the Repair Reimbursed Total button.
+
+**2. Staff are never paid as claim payees (controls)**
+- Live, three payouts to staff got through:
+  - the payer's own phone (the payer has no Employee record);
+  - the claimant's second SIM;
+  - the claimant's own bank account through KCB 522522 (HR-EXP-2026-00713; the Employee had no
+    Bank A/C No).
+- New staff destinations, refused on save, in a pasted list and at the send:
+  - the Mobile No and Phone of every enabled System User, Employee or not; the session user's
+    own number reads "your own phone";
+  - an employee's ERPNext Bank Accounts (bank account number and IBAN).
+- The name M-Pesa paid is checked against staff names: the claimant's, the payout's preparer's,
+  its sender's (new `sent_by` on the line) and, while the new setting "Block Payees M-Pesa Paid
+  Under an Employee's Name" is on (default on), every Employee's. Both names need at least two
+  words.
+  - After a payout: a match flags the line as a staff or self payment (`staff_check` Blocked,
+    `staff_note`). A Comment on the claim, an Error Log and an alert go to the M-Pesa Managers,
+    except whoever prepared or sent it and the claimant.
+  - At the send: a name M-Pesa paid that number under before refuses the send. This covers other
+    claim lines, B2C payouts to the phone, and B2B payouts to the till, or the paybill and
+    account. The send is rolled back, so a job queued at once flags the line and alerts.
+  - Bank accounts are left out (M-Pesa shows the bank's name).
+- A blocked destination is refused for every claim payee until an M-Pesa Manager clears it with
+  **Clear Staff Flag** on the claim (`claim_payees.clear_staff_flag`). The manager must be named
+  and may not be the claimant or anyone who prepared or sent a payout to it; the reason is recorded
+  on the lines and claims. A cleared destination is not flagged again.
+- A bank-account line is "Not Verified" by name, never a match (new `name_verdict`: Matches, Does
+  Not Match, Not Verified). M-Pesa names the bank, never who holds the account. A wrong bank still
+  raises the alarm. The patch `claim_payee_name_verdict` gives lines paid earlier their verdict:
+  bank lines that read as a match, like HR-EXP-2026-00713's, become Not Verified.
+- The claim form shows a mismatch in red and a name not verified in orange.
+
+**3. Texts that said maker-checker when it was off**
+- New boot flag `maker_checker`. The pay dialogs and the "prepared" comment say "an M-Pesa Payer
+  who did not prepare it sends it" only while maker-checker is on, otherwise "an M-Pesa Payer
+  sends it". This covers Pay employee, Pay by M-Pesa, Pay Merchants and Payees and Pay Casual
+  Payees.
+- Pay employee (phone) no longer refuses while the claim's own payee batch is a draft. Its unpaid
+  payee lines are already held back from the employee's share (`draft_b2c(..., payees=False)`).
+
+**4. Visibility and privacy**
+- The reimbursed-gap warning is shown to preparers and payers (item 1).
+- Phones are masked (2547****0111, as the send summary shows them) in name-mismatch notes, comments,
+  alerts and Error Logs, in the staff-flag messages, in settle comments and in send refusals.
+
+**5. Small fixes**
+- The migrate's alert about blocked payee accounts was never delivered (no Notification Log after
+  the 12:42 migrate). It is now made in the migrate itself (`party_accounts.alert(now=True)`).
+- A claim line paid to a supplier's approved account (MSA-00002-1) left the request's Supplier
+  M-Pesa Account empty and the account's Last Paid On / Last Receiver Name unset. Once paid, the
+  request names the account and the account records who M-Pesa paid; a mismatch blocks it, as
+  for a supplier's own payout. A draft copy of such a request is cleared, not refused.
+- `docs/TRIDENT_ROUND4_ROLLOUT.md` C3: each auto-booked Payment Entry keeps one Open "Cancel"
+  Workflow Action in the Approved state, as hand-approved ones do. That is expected.
+
+**6. Statuses: nothing stays Initiated, and part-paid shows**
+- A B2C Payment Disbursement's status was set only by the 15-minute job, which gave up after four
+  runs (`retry_count <= 3`). A batch whose last payouts finished later stayed Initiated.
+  - Each payout's result now queues `b2c_batch_status.sync_status` after its commit. It locks the
+    batch and sets its status from the rows.
+  - The 15-minute job looks at every batch of the last 30 days that is not Paid, with no cap.
+  - It also gives a row its request's result when the row was never told.
+  - A batch is Partially Paid once a row is paid. One with failed rows and the rest still on their
+    way stays Initiated (it read Partially Paid before, though nothing was paid).
+- A B2B request whose Result never came was only checked by hand. The 5-minute sweep now asks
+  Safaricom's Transaction Status about it, and the answer settles it as the Result would have:
+  - Unknown after 5 minutes, Initiated after an hour;
+  - once an hour, for 7 days.
+- HRMS 15 has no Partially Paid for claims and advances. Their lists now show **Partly Paid** for a
+  document HRMS shows Unpaid that was paid in part. HRMS 16 says Partially Paid itself.
+
+**7. 80 mm thermal prints of what M-Pesa paid (asked during this round)**
+- Nine standard Print Formats in module Mpsa Suite, "M-Pesa 80mm <DocType>". They work with
+  Frappe's own Print, PDF (80 mm wide, no margins) and Email (attach the print). None is made the
+  default print format: sites keep their own.
+  - A **payment advice** for Purchase Invoice, Purchase Order, Expense Claim, Employee Advance and
+    Salary Slip:
+    - the party, total, paid and balance due;
+    - every payment made against the document: M-Pesa B2B and B2C payouts (failed ones too) with
+      the name and number M-Pesa paid, the receipt and the status, plus other Payment Entries;
+    - for a claim, its merchant and casual payee lines (status, receipt, the name M-Pesa paid and
+      the name verdict) and the claimant's own share.
+  - A **proof of payment** for an Mpesa B2B Payment Request, a B2C Payment Disbursement (a block per
+    row), a B2C Disbursement Request and a Payment Entry. Each payout reads like M-Pesa's
+    confirmation SMS ("UJSSN5D5CE Confirmed. KES 50.00 paid to ... on 28/10/26 at 1:57 PM"). It also
+    shows:
+    - the shortcode it left from (Mpesa Settings);
+    - the charge (the booked charge entry, else Safaricom's stated charge, else the B2C Charge Bands
+      estimate, marked "est.");
+    - the document it paid;
+    - who prepared it and who sent it.
+- All data comes from `money_out.payment_print`, registered as Jinja methods in `hooks.py`. The
+  templates (`templates/print/mpsa_*_80mm.html`) read nothing themselves.
+  - The reader's read permission is checked first.
+  - A salary's amounts are hidden from whoever may not see salaries.
+  - Phones are masked (2547****0111), and long account numbers too (****6789).
+  - The name M-Pesa paid is split on its first " - " only.
+  - A Payment Entry carrying a payout's receipt is printed once, as that payout.
+  - Paid and balance come from the entries booked, not from a stored total: HRMS's count for a
+    claim, the Payment Ledger for an invoice, allocations for an order or advance, Paid payouts
+    for a slip.
+- The look follows Astral's own Expense Claim 80 mm format (black title bar, boxed party, tables,
+  amount box, balance due, status badge, signatures, print time). It is black and white only for
+  thermal printers, 9 to 14 px, with the Letter Head image if one is set. It keeps nothing
+  Astral-specific (no hard-coded shortcode, no custom fields).
+- **Send Payment Proof** on a Paid (or Partially Paid) payout opens Frappe's email composer,
+  addressed to the party (the supplier's email, or the employee's preferred, company or personal
+  email) with the 80 mm proof selected. The user presses Send; nothing is sent automatically.
+
+**Tests**
+- Unit: 2925 pass (`python -m pytest tests/unit -q`), 76 more than 2849. New: `test_r41_claims.py`,
+  `test_r41_employee_docs.py`, `test_r41_print.py`, `test_r41_js.py`; updated where behaviour changed
+  on purpose (bank verdict, boot flags, the patch count).
+- Bench: four new tests in `money_out/test_claim_payees.py`. One books two payouts of one claim in
+  two connections, each its own committed transaction, the first held open while the second starts:
+  Total Amount Reimbursed is 9000, not 7000. The others cover the gap's refusal and its repair job,
+  a staff till flagged, blocked and cleared, and a batch's Partially Paid. Every 80 mm format is
+  rendered for a paid document or payout through the print preview's own renderer
+  (`testing.renders`, `printview.get_html_and_style`; `frappe.get_print` also passed on v15, while the
+  throwaway v16 bench has no built desk assets for Frappe's print page): claim and
+  payouts in `test_claim_payees`, invoice, order, B2B and Payment Entry in `test_b2b_documents`,
+  advance in `test_employee_documents`, salary slip in `test_salary_slip_payouts`.
+- Bench, full `run-tests --app mpsa_suite` on fresh v15 and v16 sites (ERPNext, payments, HRMS),
+  2026-10-28, on the tree of this commit: **515 tests on each version, all pass, none skipped**
+  (510 at 9a9c8ae plus 5 new). The race test was not run against the code before the fix; it is
+  built so that the second booking starts while the first is held open, as on Trident.
+
+**Deferred**
+- A claim's casual payee paid by B2C to a supplier's approved phone records the account but does not
+  name it on the B2C row (`payee_account`): that row field drives the employee phone lock.
+- A B2B request still Initiated after 7 days of status queries is left to an M-Pesa Manager (Settle
+  Unknown); no alert yet.
+- Payment proofs are not emailed automatically after a payout. A follow-up could add a setting to
+  send the proof to the supplier on Paid, once suppliers' email addresses are known to be right.
+- The 80 mm formats were checked by rendering them (unit and bench tests), not yet printed on a
+  thermal printer: print one of each on Trident's printer.
+
 ## Round 4: Send via M-Pesa, named payers, payee accounts, claims, merchants and salaries (2026-10-27, branch payouts-r4)
 
 Plan: [../docs/PAYOUTS_R4_PLAN.md](../docs/PAYOUTS_R4_PLAN.md). Design: [docs/PAYOUTS_DESIGN.md](docs/PAYOUTS_DESIGN.md),

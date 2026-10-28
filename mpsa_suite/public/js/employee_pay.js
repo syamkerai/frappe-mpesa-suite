@@ -60,13 +60,20 @@ mpsa_employee_pay.headline = function (frm, r) {
 	frm.dashboard.set_headline(text, colour);
 };
 
+// who sends what is prepared: with maker-checker on (M-Pesa Suite Settings), a payer who did not prepare it
+mpsa_employee_pay.maker_checker = function () {
+	return Boolean((frappe.boot.mpsa || {}).maker_checker);
+};
+
 mpsa_employee_pay.intro = function (r, where) {
 	return `<p>${__("A draft payout of {0} to {1}: what this document still has to pay, in whole shillings.", [
 		mpsa_employee_pay.money(r.amount),
 		where,
-	])}</p><p class="text-muted">${__(
-		"Nothing is sent now: an M-Pesa Payer who did not prepare it sends it with Send via M-Pesa."
-	)}</p>`;
+	])}</p><p class="text-muted">${
+		mpsa_employee_pay.maker_checker()
+			? __("Nothing is sent now: an M-Pesa Payer who did not prepare it sends it with Send via M-Pesa.")
+			: __("Nothing is sent now: an M-Pesa Payer sends it with Send via M-Pesa.")
+	}</p>`;
 };
 
 mpsa_employee_pay.pay_from = function (options, label) {
@@ -179,9 +186,13 @@ mpsa_employee_pay.bulk = function (listview, doctype) {
 				fieldname: "intro",
 				options: `<p>${__(
 					"One draft B2C Payment Disbursement for the employees paid by phone, and a draft B2B request for each one paid to a bank account, paybill or till (their default approved account), each for what the document still has to pay. Documents that cannot be paid are listed with the reason."
-				)}</p><p class="text-muted">${__(
-					"Nothing is sent now: an M-Pesa Payer who did not prepare them sends each payout with Send via M-Pesa."
-				)}</p>`,
+				)}</p><p class="text-muted">${
+					mpsa_employee_pay.maker_checker()
+						? __(
+								"Nothing is sent now: an M-Pesa Payer who did not prepare them sends each payout with Send via M-Pesa."
+						  )
+						: __("Nothing is sent now: an M-Pesa Payer sends each payout with Send via M-Pesa.")
+				}</p>`,
 			},
 			{
 				fieldtype: "Link",

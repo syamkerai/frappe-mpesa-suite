@@ -63,6 +63,8 @@ def _match(row, filters):
 
 
 class FakeDB:
+    db_type = "fake"  # named_lock is a no-op off MariaDB (a test sets "mariadb" to watch the locks)
+
     @staticmethod
     def escape(value, percent=True):
         return "'" + str(value).replace("'", "''") + "'"

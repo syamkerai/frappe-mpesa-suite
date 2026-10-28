@@ -1,0 +1,87 @@
+{#- Payment advice, 80 mm: a Purchase Invoice, Purchase Order, Expense Claim, Employee Advance or Salary
+    Slip and every payment made against it. All data from money_out.payment_print.mpsa_payment_advice
+    (permission-checked; phones masked; totals from the entries booked). -#}
+{%- set p = mpsa_payment_advice(doc) -%}
+{%- macro kes(value) -%}{{ p.currency }} {{ "{:,.2f}".format(value or 0) }}{%- endmacro -%}
+{% include "templates/print/mpsa_80mm_style.html" %}
+<div class="mp80">
+	{% if p.letter_head.image %}<div class="lh"><img src="{{ p.letter_head.image }}" alt=""></div>{% endif %}
+	<div class="box">
+		<div class="title"><b>{{ _(p.title) }}</b><small>{{ p.company }}</small></div>
+		<div class="meta">
+			<div><div class="label">{{ _(p.doctype) }}</div><div class="value">{{ p.name }}</div></div>
+			<div><div class="label">{{ _("Date") }}</div>
+				<div class="value">{{ frappe.utils.formatdate(doc.posting_date or doc.transaction_date or doc.start_date) }}</div></div>
+		</div>
+		<div class="party">
+			<div class="label">{{ _(p.party_label) }}</div>
+			<div class="name">{{ p.party or "" }}</div>
+			{% if p.party_id and p.party_id != p.party %}<div class="sub">{{ p.party_id }}</div>{% endif %}
+		</div>
+
+		{% if p.hidden %}
+		<div class="none">{{ _("Amounts hidden: you may not see salaries.") }}</div>
+		{% else %}
+		<div class="row"><span>{{ _("Total") }}</span><span>{{ kes(p.total) }}</span></div>
+		<div class="row"><span>{{ _("Paid") }}</span><span>{{ kes(p.paid) }}</span></div>
+		<div class="amount"><span class="label">{{ _("Balance Due") if p.left > 0.005 else _("Fully Paid") }}</span>
+			<b>{{ kes(p.left) }}</b></div>
+		{% endif %}
+
+		{% if p.payees %}
+		<div class="section">{{ _("Merchants and Payees") }} ({{ p.payees | length }})</div>
+		<table>
+			<tr><th style="width:62%">{{ _("Payee / To") }}</th><th class="r">{{ _("Amount") }}</th></tr>
+			{% for l in p.payees %}
+			<tr>
+				<td>#{{ l.idx }} {{ l.name }}<div class="sub">{{ l.type }}: {{ l.to }}</div>
+					{% if l.receipt %}<div class="sub">{{ _("Receipt") }}: {{ l.receipt }}</div>{% endif %}
+					{% if l.paid_to %}<div class="sub">{{ _("M-Pesa paid") }}: {{ l.paid_to }}{% if l.verdict %} ({{ _(l.verdict) }}){% endif %}</div>{% endif %}
+					{% if l.staff %}<div class="status">{{ _("Staff or self payment") }}: {{ _(l.staff) }}</div>{% endif %}</td>
+				<td class="r">{{ "{:,.2f}".format(l.amount) }}<div class="status">{{ _(l.status) }}</div></td>
+			</tr>
+			{% endfor %}
+		</table>
+		{% if p.claimant_share is not none %}
+		<div class="row"><span>{{ _("To the claimant") }}</span><span>{{ kes(p.claimant_share) }}</span></div>
+		<div class="row"><span>{{ _("Paid to the claimant") }}</span><span>{{ kes(p.claimant_paid) }}</span></div>
+		{% endif %}
+		{% endif %}
+
+		<div class="section">{{ _("Payment Details") }}{% if p.rows %} ({{ p.rows | length }}){% endif %}</div>
+		{% if p.rows %}
+		<table>
+			<tr><th style="width:50%">{{ _("Paid To / How") }}</th><th style="width:18%">{{ _("Date") }}</th>
+				<th class="r">{{ _("Amount") }}</th></tr>
+			{% for r in p.rows %}
+			<tr>
+				<td>{{ r.name or "-" }}{% if r.number and r.number != r.name %}<div class="sub">{{ r.number }}</div>{% endif %}
+					<div class="sub">{{ r.via }}{% if r.payee %} · {{ _("payee") }}{% endif %}</div>
+					<div class="sub">{{ _("Ref") }}: {{ r.receipt or r.payout }}</div>
+					{% if r.note %}<div class="sub">{{ r.note | truncate(60, True, "..") }}</div>{% endif %}</td>
+				<td>{{ r.when_text or "-" }}</td>
+				<td class="r">{% if r.amount is not none %}{{ "{:,.2f}".format(r.amount) }}{% endif %}
+					<div class="status">{{ _(r.status) }}</div></td>
+			</tr>
+			{% endfor %}
+		</table>
+		{% if not p.hidden and p.left > 0.005 %}
+		<div class="balance"><span>{{ _("Balance Due") }}</span><span>{{ kes(p.left) }}</span></div>
+		{% endif %}
+		{% else %}
+		<div class="none">{{ _("No payment recorded yet.") }}</div>
+		{% endif %}
+
+		<div class="badge"><span>
+			{%- if doc.docstatus == 2 %}{{ _("Cancelled") }}
+			{%- elif doc.docstatus == 0 %}{{ _("Draft") }}
+			{%- elif not p.hidden and p.left <= 0.005 %}{{ _("Paid") }}
+			{%- elif not p.hidden and p.paid > 0.005 %}{{ _("Partly Paid") }}
+			{%- else %}{{ _(doc.status or "Submitted") }}{% endif -%}
+		</span></div>
+		<div class="signs"><div>{{ _("Received By") }}</div><div>{{ _("Approved By") }}</div></div>
+		<div class="foot"><b>{{ _(p.title) }}</b>{{ p.company }}<br>{{ _("Computer generated document.") }}<br>
+			{{ _("Printed") }}: {{ p.printed }}</div>
+	</div>
+	{% if p.letter_head.footer_image %}<div class="lh"><img src="{{ p.letter_head.footer_image }}" alt=""></div>{% endif %}
+</div>

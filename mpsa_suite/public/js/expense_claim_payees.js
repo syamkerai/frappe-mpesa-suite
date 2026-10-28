@@ -2,8 +2,8 @@
 // from the claim by M-Pesa, instead of reimbursing the employee who paid them (money_out.claim_payees).
 // The claimant enters the lines in draft, the expense approver approves them with the claim, someone who
 // prepares payouts presses Pay Merchants and Payees (drafts only), and an M-Pesa Payer who did not
-// prepare them sends each with Send via M-Pesa. Buttons show only to who the server accepts; the
-// server checks everything again.
+// prepare them (maker-checker on) sends each with Send via M-Pesa. Buttons show only to who the server
+// accepts; the server checks everything again.
 const MPSA_PAYEES_API = "mpsa_suite.money_out.claim_payees";
 const MPSA_PAYEE_TYPE = {
 	till: "Till (Buy Goods)",
@@ -150,9 +150,26 @@ const mpsa_payees = {
 			);
 		}
 		if (s.payable_problem) parts.push(`<p style="color: var(--orange-600)">${e(s.payable_problem)}</p>`);
+		// a name that does not match in red; one M-Pesa could not verify (a bank account, a till not named yet) in orange
 		(s.lines || [])
-			.filter((l) => l.status === "Paid" && !l.name_matches && l.name_note)
-			.forEach((l) => parts.push(`<p style="color: var(--red-600)">${__("Row #{0}", [l.idx])}: ${e(l.name_note)}</p>`));
+			.filter((l) => l.status === "Paid" && l.name_note && this.verdict(l) !== "Matches")
+			.forEach((l) => {
+				const colour = this.verdict(l) === "Does Not Match" ? "--red-600" : "--orange-600";
+				parts.push(`<p style="color: var(${colour})">${__("Row #{0}", [l.idx])}: ${e(l.name_note)}</p>`);
+			});
+		(s.lines || [])
+			.filter((l) => l.staff_check === "Blocked")
+			.forEach((l) =>
+				parts.push(`<p style="color: var(--red-600)">${__("Row #{0}", [l.idx])}: ${e(l.staff_note || "")}</p>`)
+			);
+		(s.blocked || []).forEach((b) =>
+			parts.push(
+				`<p style="color: var(--red-600)">${__(
+					"Row #{0}: blocked for claim payees, M-Pesa paid this destination under a staff member's name ({1}, payee row #{2}).",
+					[b.idx, e(b.claim), b.flagged_idx]
+				)}</p>`
+			)
+		);
 		(s.suggestions || []).forEach((x, i) =>
 			parts.push(
 				`<p style="color: var(--blue-600)">${e(x.message)} <button class="btn btn-xs btn-default mpsa-suggest" data-i="${i}">${__(
@@ -160,13 +177,20 @@ const mpsa_payees = {
 				)}</button></p>`
 			)
 		);
-		if (s.reimbursed && frappe.boot.mpsa && frappe.boot.mpsa.can_approve) {
-			parts.push(
-				`<p style="color: var(--orange-600)">${__(
-					"Total Amount Reimbursed shows {0}, but the entries booked against the claim add up to {1}: press Repair Reimbursed Total.",
-					[kes(s.reimbursed.stored), kes(s.reimbursed.booked)]
-				)}</p>`
-			);
+		const flags = frappe.boot.mpsa || {};
+		if (s.reimbursed && (flags.can_approve || flags.can_prepare || flags.can_pay)) {
+			// nothing more is prepared or sent for the claim until it is repaired; the button is the managers'
+			const amounts = [kes(s.reimbursed.stored), kes(s.reimbursed.booked)];
+			const ask = flags.can_approve
+				? __(
+						"Total Amount Reimbursed shows {0}, but the entries booked against the claim add up to {1}: press Repair Reimbursed Total.",
+						amounts
+				  )
+				: __(
+						"Total Amount Reimbursed shows {0}, but the entries booked against the claim add up to {1}: ask an M-Pesa Manager to repair it. Nothing more is paid on this claim until then.",
+						amounts
+				  );
+			parts.push(`<p style="color: var(--orange-600)">${ask}</p>`);
 		}
 		field.$wrapper.html(parts.join(""));
 		field.$wrapper.find(".mpsa-suggest").on("click", (ev) => {
@@ -195,6 +219,7 @@ const mpsa_payees = {
 			);
 		}
 		if (line && line.status === "Paid" && line.name_note) notes.push(e(line.name_note));
+		if (line && line.staff_check && line.staff_note) notes.push(e(line.staff_note));
 		if (line && line.status === "Cancelled" && line.error_message) notes.push(e(line.error_message));
 		field.$wrapper.html(notes.map((n) => `<p class="text-muted">${n}</p>`).join(""));
 	},
@@ -207,7 +232,7 @@ const mpsa_payees = {
 			frm.add_custom_button(__("Paste Payees"), () => this.paste(frm), __("M-Pesa"));
 		}
 		if (frm.doc.docstatus !== 1) return;
-		if (flags.can_prepare && s.enabled && !s.payable_problem) {
+		if (flags.can_prepare && s.enabled && !s.payable_problem && !s.reimbursed) {
 			if (lines.some((l) => l.status === "Draft")) {
 				frm.add_custom_button(__("Pay Merchants and Payees"), () => this.pay(frm, "pay_payees", "Draft"), __("M-Pesa"));
 			}
@@ -221,6 +246,58 @@ const mpsa_payees = {
 		if (flags.can_approve && lines.some((l) => l.status === "Draft" || l.status === "Failed")) {
 			frm.add_custom_button(__("Settle Payee Outside M-Pesa"), () => this.settle(frm), __("M-Pesa"));
 		}
+		if (flags.can_approve && this.flagged(frm).length) {
+			frm.add_custom_button(__("Clear Staff Flag"), () => this.clear_staff(frm), __("M-Pesa"));
+		}
+	},
+
+	// what the name check said: older lines have only Name Matches
+	verdict(l) {
+		return l.name_verdict || (l.name_matches ? "Matches" : "Does Not Match");
+	},
+
+	// the lines flagged as staff or self payments, and those whose destination another claim's flag blocks
+	flagged(frm) {
+		const s = this.state(frm);
+		const names = (s.lines || []).filter((l) => l.staff_check === "Blocked").map((l) => l.name);
+		return [...new Set(names.concat((s.blocked || []).map((b) => b.line)))];
+	},
+
+	// a named M-Pesa Manager who was not involved checked that the destination is no staff member's
+	// (claim_payees.clear_staff_flag): it is paid to claim payees again
+	clear_staff(frm) {
+		const rows = Object.fromEntries((frm.doc.mpsa_payees || []).map((r) => [r.name, r]));
+		const flagged = this.flagged(frm);
+		const options = flagged.map((name) => {
+			const r = rows[name] || {};
+			return { value: name, label: `#${r.idx} ${r.payee_name || ""} ${r.destination || ""}` };
+		});
+		frappe.prompt(
+			[
+				{
+					fieldtype: "Select",
+					fieldname: "line",
+					label: __("Payee Row"),
+					reqd: 1,
+					options,
+					default: flagged.length === 1 ? flagged[0] : undefined,
+				},
+				{
+					fieldtype: "Small Text",
+					fieldname: "reason",
+					label: __("How You Checked"),
+					reqd: 1,
+					description: __("Who you asked and what they showed: this payee is no staff member."),
+				},
+			],
+			(values) =>
+				frappe.xcall(`${MPSA_PAYEES_API}.clear_staff_flag`, { claim: frm.doc.name, ...values }).then(() => {
+					frappe.show_alert({ message: __("Staff flag cleared"), indicator: "green" });
+					frm.reload_doc();
+				}),
+			__("Clear Staff Flag"),
+			__("Clear")
+		);
 	},
 
 	// a Draft or Failed line M-Pesa will not pay (paid by bank instead): Cancelled with how it was paid, so its
@@ -274,9 +351,9 @@ const mpsa_payees = {
 				fieldtype: "HTML",
 				fieldname: "intro",
 				options: `<p>${__(
-					"Draft payouts for {0} payees ({1}): {2} merchants by B2B, one request each, and {3} phones in one B2C batch. Nothing is sent now: an M-Pesa Payer who did not prepare them sends each with Send via M-Pesa.",
+					"Draft payouts for {0} payees ({1}): {2} merchants by B2B, one request each, and {3} phones in one B2C batch.",
 					[rows.length, format_currency(total, "KES", 0), merchants.length, phones.length]
-				)}</p>`,
+				)} ${this.who_sends()}</p>`,
 			},
 		];
 		if (merchants.length) {
@@ -324,8 +401,15 @@ const mpsa_payees = {
 			message:
 				`<p>${__("{0} payees ({1}) are ready to send:", [r.lines, format_currency(r.total, "KES", 0)])}</p>` +
 				`<ul>${links.map((l) => `<li>${l}</li>`).join("")}</ul>` +
-				`<p>${__("An M-Pesa Payer who did not prepare them sends each with Send via M-Pesa.")}</p>`,
+				`<p>${this.who_sends()}</p>`,
 		});
+	},
+
+	// with maker-checker on (M-Pesa Suite Settings), whoever prepared the payouts does not send them
+	who_sends() {
+		return (frappe.boot.mpsa || {}).maker_checker
+			? __("Nothing is sent now: an M-Pesa Payer who did not prepare them sends each with Send via M-Pesa.")
+			: __("Nothing is sent now: an M-Pesa Payer sends each with Send via M-Pesa.");
 	},
 
 	repair(frm) {

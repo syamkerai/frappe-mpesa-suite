@@ -124,7 +124,16 @@ def test_flags_follow_the_role_sets(boot, roles, expected):
     module, frappe = boot
     frappe.session.user = "someone@example.com"
     frappe.user_roles = roles
-    assert module.flags() == dict(dict.fromkeys(module.FLAGS, False), **expected)
+    # maker_checker: the Suite setting (on unless switched off), for every signed-in user
+    assert module.flags() == dict(dict.fromkeys(module.FLAGS, False), maker_checker=True, **expected)
+
+
+def test_the_maker_checker_flag_follows_the_setting(boot):
+    module, frappe = boot
+    frappe.session.user, frappe.user_roles = "someone@example.com", {"HR User"}
+    assert module.flags()["maker_checker"] is True
+    _settings(frappe, refuse_administrator_payouts=1, schedule_maker_checker=0)
+    assert module.flags()["maker_checker"] is False
 
 
 def test_administrator_gets_no_send_or_approve_while_refused(boot):

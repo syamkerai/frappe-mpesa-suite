@@ -212,6 +212,9 @@ class TestSalarySlipPayouts(pp._Base):
         self.assertEqual((state.status, state.entry_status, state.approved_by), ("Paid", "Entry Made", PAYER))
         self.assertEqual(owed.slip_left_to_pay(slip).left, 0)
         self.assertEqual(self._payable_left(pe, employee), 0)
+        # R4.1: the slip's payment advice, its payout masked (who may see salaries: Administrator here)
+        html = t.renders("Salary Slip", slip, "Salary Payment", "M-Pesa B2C", "Fully Paid")
+        self.assertNotIn(PHONE, html)
 
     def test_a_one_off_salary_by_b2b_to_a_bank_account_that_is_not_the_default(self):
         pe, slips = self._payroll()

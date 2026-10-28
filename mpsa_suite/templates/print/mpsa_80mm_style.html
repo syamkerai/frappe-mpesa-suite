@@ -1,0 +1,59 @@
+{#- The suite's 80 mm thermal prints (money_out.payment_print): black on white only, so nothing
+    prints as grey on a thermal printer; 9 to 14 px; 80 mm wide, no page margin (PDF too). -#}
+<meta name="pdfkit-page-width" content="80mm">
+<meta name="pdfkit-page-height" content="297mm">
+<meta name="pdfkit-margin-top" content="0mm">
+<meta name="pdfkit-margin-bottom" content="0mm">
+<meta name="pdfkit-margin-left" content="0mm">
+<meta name="pdfkit-margin-right" content="0mm">
+<style>
+	@page { size: 80mm auto; margin: 0; }
+	@media print {
+		html, body { margin: 0 !important; padding: 0 !important; width: 80mm !important; }
+	}
+	.mp80, .mp80 * { box-sizing: border-box; margin: 0; padding: 0; }
+	.mp80 { width: 80mm; max-width: 80mm; padding: 2mm; font-family: Arial, Helvetica, sans-serif;
+		font-size: 11px; line-height: 1.3; color: #000; background: #fff; font-weight: 600;
+		-webkit-print-color-adjust: exact; print-color-adjust: exact; }
+	.mp80 .lh img { width: 100%; max-width: 76mm; height: auto; display: block; margin: 0 auto 1mm; }
+	.mp80 .box { border: 2px solid #000; padding: 2mm; }
+	.mp80 .title { background: #000; color: #fff; text-align: center; padding: 2mm 1mm; margin-bottom: 2mm; }
+	.mp80 .title b { display: block; font-size: 14px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px; }
+	.mp80 .title small { display: block; font-size: 9px; margin-top: 0.5mm; }
+	.mp80 .meta { display: flex; justify-content: space-between; border-bottom: 2px solid #000;
+		padding-bottom: 1.5mm; margin-bottom: 2mm; }
+	.mp80 .meta div { text-align: center; }
+	.mp80 .label { font-size: 9px; font-weight: 600; }
+	.mp80 .value { font-size: 11px; font-weight: 900; word-break: break-word; }
+	.mp80 .party { border: 2px solid #000; padding: 2mm; margin: 2mm 0; }
+	.mp80 .party .label { text-transform: uppercase; border-bottom: 1px solid #000; padding-bottom: 0.5mm;
+		margin-bottom: 1mm; }
+	.mp80 .party .name { font-size: 13px; font-weight: 900; word-break: break-word; }
+	.mp80 .row { display: flex; justify-content: space-between; padding: 0.8mm 0; border-bottom: 1px dotted #000;
+		font-size: 11px; }
+	.mp80 .row span:last-child { font-weight: 900; text-align: right; max-width: 62%; word-break: break-word; }
+	.mp80 .section { background: #000; color: #fff; font-size: 11px; font-weight: 900; text-transform: uppercase;
+		padding: 1.2mm 2mm; margin: 2mm 0 0; }
+	.mp80 table { width: 100%; border-collapse: collapse; font-size: 9px; }
+	.mp80 th { border: 1px solid #000; padding: 1mm; text-align: left; font-weight: 900; }
+	.mp80 td { border: 1px solid #000; padding: 1mm; vertical-align: top; font-weight: 700; word-break: break-word; }
+	.mp80 .r { text-align: right; }
+	.mp80 .sub { font-size: 9px; font-weight: 600; }
+	.mp80 .status { font-size: 9px; font-weight: 900; text-transform: uppercase; }
+	.mp80 .amount { border: 3px solid #000; text-align: center; padding: 2mm; margin: 2mm 0; }
+	.mp80 .amount b { display: block; font-size: 14px; font-weight: 900; }
+	.mp80 .balance { display: flex; justify-content: space-between; border: 2px solid #000; padding: 1.5mm 2mm;
+		margin-top: 1mm; font-size: 12px; font-weight: 900; }
+	.mp80 .sms { border: 2px dashed #000; padding: 2mm; margin: 2mm 0 1mm; font-family: "Courier New", monospace;
+		font-size: 11px; font-weight: 700; word-break: break-word; }
+	.mp80 .none { border: 1px dashed #000; text-align: center; padding: 2mm; font-size: 9px; font-weight: 900; }
+	.mp80 .badge { text-align: center; margin: 2mm 0; }
+	.mp80 .badge span { display: inline-block; border: 2px solid #000; padding: 1mm 4mm; font-size: 12px;
+		font-weight: 900; text-transform: uppercase; }
+	.mp80 .signs { display: flex; justify-content: space-between; margin-top: 4mm; }
+	.mp80 .signs div { width: 46%; border-top: 1px solid #000; margin-top: 9mm; padding-top: 1mm; font-size: 9px;
+		text-align: center; }
+	.mp80 .foot { text-align: center; border-top: 2px solid #000; margin-top: 2mm; padding-top: 2mm; font-size: 9px; }
+	.mp80 .foot b { font-size: 12px; display: block; }
+	.mp80 .block { border-top: 2px solid #000; margin-top: 2mm; padding-top: 1mm; }
+</style>

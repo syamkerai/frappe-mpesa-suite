@@ -188,9 +188,10 @@ class TestClaimPayees(IntegrationTestCase):
             b2b.book_payment_entry(name)
         return receipt
 
-    def _send_b2c(self, name, results) -> list:
+    def _send_b2c(self, name, results, record: bool = True) -> list:
         """Send via M-Pesa on the batch as the payer, then its payouts made and sent (the connector
-        replaced) and each Result written as the B2C callback writes it: ``results`` by phone."""
+        replaced) and each Result written as the B2C callback writes it: ``results`` by phone.
+        ``record`` False: the Results are on the requests, but not yet on the rows or booked."""
         from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import b2c_payment_disbursement as disb
         from mpsa_suite.services import b2c_response_service
 
@@ -219,8 +220,9 @@ class TestClaimPayees(IntegrationTestCase):
                               transaction_completed_datetime=now_datetime(), receiver_public_name=receiver,
                               utility_acct_avlbl_funds=400000)
             frappe.db.set_value(REQ, request, values)
-            with patch("frappe.enqueue"):
-                b2c_response_service.update_b2c_reference_status(request, enqueue_next=True)
+            if record:
+                with patch("frappe.enqueue"):
+                    b2c_response_service.update_b2c_reference_status(request, enqueue_next=True)
         return requests
 
     def _entries(self, claim) -> list:
@@ -256,7 +258,9 @@ class TestClaimPayees(IntegrationTestCase):
         for name, receiver in names.items():
             self._b2b_result(name, receiver)
         for line in self._lines(claim.name).values():
-            self.assertEqual((line.status, line.name_matches), ("Paid", 1), line.name_note)
+            # R4.1: a bank account is never verified by name (M-Pesa shows the bank's, not the holder's)
+            expected = (0, "Not Verified") if line.payee_type == "Bank Account (via Bank Paybill)" else (1, "Matches")
+            self.assertEqual((line.status, line.name_matches, line.name_verdict), ("Paid", *expected), line.name_note)
         # booked as a reimbursement of the claim, whoever received the money
         self.assertEqual(self._entries(claim.name), [("Employee", self.claimant, 1500), ("Employee", self.claimant, 2000),
                                                      ("Employee", self.claimant, 3000)])
@@ -568,3 +572,152 @@ class TestClaimPayees(IntegrationTestCase):
         self.assertRaisesRegex(frappe.ValidationError, "switched off", self._claim,
                                [{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811",
                                  "amount": 500}], submit=False)
+
+    # ------------------------------------------------------------ round 4.1 (Trident's live test, 2026-10-28)
+    def test_two_payouts_of_one_claim_booked_at_once_in_their_own_transactions_both_count(self):
+        """HR-EXP-2026-00712: two B2C rows of one batch booked 2 s apart left Total Amount Reimbursed at 70 of
+        90; HRMS sums the claim's entries with a plain read, which missed the other booking. Each booking now
+        takes the claim's lock as its first statement (owed.booking_lock). Two connections book the rows,
+        each in its own transaction, the first holding its open while the second starts; both are committed
+        for real, then everything this test made is deleted."""
+        import threading
+        import time
+
+        from hrms.hr.doctype.expense_claim import expense_claim as hrms_claim
+
+        from mpsa_suite.services import b2c_response_service
+
+        claim = self._claim([
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Race Achieng", "phone": "0711000901", "amount": 2000},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Race Barasa", "phone": "0711000902", "amount": 7000},
+        ])
+        made = self._pay(claim.name)
+        requests = self._send_b2c(made["b2c"], {"254711000901": ("Paid", "254711000901 - _T RACE ACHIENG"),
+                                                "254711000902": ("Paid", "254711000902 - _T RACE BARASA")},
+                                  record=False)
+        self.addCleanup(self._delete_committed, [claim.name, made["b2c"], *requests])
+        self._no_commit.stop()
+        frappe.db.commit()  # a second connection sees the claim, the batch and its paid requests
+
+        site, sites_path, errors, inside = frappe.local.site, frappe.local.sites_path, [], threading.Event()
+        original = hrms_claim.update_reimbursed_amount
+
+        def slow(doc):
+            original(doc)
+            if threading.current_thread().name == "booking-1":
+                inside.set()
+                time.sleep(2)  # the first booking keeps its transaction open meanwhile
+
+        def booking(request, name):
+            def run():
+                try:
+                    frappe.init(site=site, sites_path=sites_path)
+                    frappe.connect()
+                    b2c_response_service.update_b2c_reference_status(request, enqueue_next=True)
+                    frappe.db.commit()
+                except Exception:
+                    errors.append(frappe.get_traceback())
+                finally:
+                    frappe.destroy()
+
+            return threading.Thread(target=run, name=name)
+
+        with patch.object(hrms_claim, "update_reimbursed_amount", slow), patch("frappe.enqueue"), \
+                patch("mpsa_suite.money_out.statement.after_payout"):
+            first, second = booking(requests[0], "booking-1"), booking(requests[1], "booking-2")
+            first.start()
+            self.assertTrue(inside.wait(120), errors)
+            second.start()  # starts while the first is booked but not committed
+            first.join(180)
+            second.join(180)
+        self._no_commit.start()
+        self.assertEqual(errors, [])
+        frappe.db.rollback()  # nothing of this connection is pending: read what the two committed
+        self.assertEqual(self._entries(claim.name), [("Employee", self.claimant, 2000),
+                                                     ("Employee", self.claimant, 7000)])
+        self.assertEqual(flt(frappe.db.get_value(CLAIM, claim.name, "total_amount_reimbursed")), 9000)
+
+    def _delete_committed(self, names):
+        """Delete what a test committed: ``names`` (the claim, its batch and payouts), the Payment
+        Entries booked on the claim, and every row of any table that names one of them (their child
+        rows, GL and Payment Ledger Entries, Comments, Versions, Error Logs, shares, emails)."""
+        frappe.db.rollback()
+        claims = [n for n in names if frappe.db.exists(CLAIM, n)]
+        entries = frappe.get_all("Payment Entry Reference", filters={"reference_name": ["in", claims]},
+                                 pluck="parent") if claims else []
+        names = tuple(sorted({*names, *entries}))
+        columns = ("name", "parent", "reference_name", "docname", "voucher_no", "against_voucher",
+                   "against_voucher_no", "share_name", "document_name", "ref_docname")
+        for table, column in frappe.db.sql(
+                """SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = DATABASE()
+                AND table_name LIKE 'tab%%' AND column_name IN %s""", (columns,)):
+            frappe.db.sql(f"DELETE FROM `{table}` WHERE `{column}` IN %s", (names,))
+        frappe.db.commit()
+
+    def test_a_claim_whose_reimbursed_total_disagrees_is_not_paid_until_it_is_set_right(self):
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811",
+                              "amount": 2000}])
+        frappe.db.set_value(CLAIM, claim.name, "total_amount_reimbursed", 500)  # as a lost update leaves it
+        with _as(PREPARER):
+            self.assertRaisesRegex(frappe.ValidationError, "Total Amount Reimbursed shows KES 500, but the entries "
+                                   "booked against it add up to KES 0", self._pay, claim.name)
+            self.assertRaisesRegex(frappe.ValidationError, "Total Amount Reimbursed shows KES 500",
+                                   employee_documents.prepare_b2c, CLAIM, claim.name, SETTINGS)
+        employee_documents.check_paid_total(CLAIM, claim.name)  # the job each payment of the claim queues
+        self.assertEqual(flt(frappe.db.get_value(CLAIM, claim.name, "total_amount_reimbursed")), 0)
+        self.assertTrue(frappe.db.exists("Comment", {"reference_name": claim.name,
+                                                     "content": ["like", "Total Amount Reimbursed set from KES 500%"]}))
+        self.assertTrue(self._pay(claim.name)["b2b"])
+
+    def test_a_till_paid_under_the_claimants_name_is_blocked_until_a_manager_clears_it(self):
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835855",
+                              "amount": 2000}])
+        name = self._pay(claim.name)["b2b"][0]
+        self._send_b2b(name)
+        self._b2b_result(name, "835855 - _T PAYEE CLAIMANT")  # the claimant's own till
+        line = next(iter(self._lines(claim.name).values()))
+        self.assertEqual((line.staff_check, line.sent_by), ("Blocked", PAYER))
+        self.assertIn("the name of the claimant", line.staff_note)
+        self.assertTrue(frappe.db.exists("Error Log", {"method": "M-Pesa claim payee staff or self payment"}))
+        self.assertRaisesRegex(frappe.ValidationError, "835855 is blocked for claim payees", self._claim,
+                               [{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835855",
+                                 "amount": 500}], submit=False)
+        _user(self.manager, "HR User")  # reads the claim
+        with _as(self.manager):
+            claim_payees.clear_staff_flag(claim.name, line.name, "_T a shop the claimant does not own")
+        self.assertEqual(next(iter(self._lines(claim.name).values())).staff_check, "Cleared")
+        self.assertTrue(self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell",
+                                      "shortcode": "835855", "amount": 500}], submit=False).name)
+
+    def test_a_payee_batch_shows_partially_paid_once_one_row_is_paid(self):
+        from mpsa_suite.services import b2c_batch_status
+
+        claim = self._claim([
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Batch Wairimu", "phone": "0711000911", "amount": 1500},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Batch Odhiambo", "phone": "0711000912", "amount": 1200},
+        ])
+        made = self._pay(claim.name)
+        self._send_b2c(made["b2c"], {"254711000911": ("Paid", "254711000911 - _T BATCH WAIRIMU"),
+                                     "254711000912": ("Failed", None)})
+        self.assertEqual(b2c_batch_status.sync_status(made["b2c"]), "Partially Paid")
+        self.assertEqual(frappe.db.get_value(DISB, made["b2c"], "status"), "Partially Paid")
+
+    def test_the_80mm_prints_render_for_a_paid_claim_its_payees_and_each_payout(self):
+        claim = self._claim([
+            {"payee_type": "Till (Buy Goods)", "payee_name": "_T Print Shell", "shortcode": "835866", "amount": 2000},
+            {"payee_type": "Phone (B2C)", "payee_name": "_T Print Wanjiru", "phone": "0711000921", "amount": 1500},
+        ])
+        made = self._pay(claim.name)
+        b2b_name = made["b2b"][0]
+        self._send_b2b(b2b_name)
+        till_receipt = self._b2b_result(b2b_name, "835866 - _T PRINT SHELL")
+        (request,) = self._send_b2c(made["b2c"], {"254711000921": ("Paid", "254711000921 - _T PRINT WANJIRU")})
+        phone_receipt = frappe.db.get_value(REQ, request, "transaction_id")
+        html = t.renders(CLAIM, claim.name, "Expense Claim Payment", "Merchants and Payees", till_receipt,
+                         phone_receipt, "2547****0921", "To the claimant", "6,500.00")
+        self.assertNotIn("254711000921", html)  # phones masked as the send summary shows them
+        t.renders(B2B, b2b_name, f"{till_receipt} Confirmed. KES 2,000.00 paid to _T PRINT SHELL 835866", "_T Print Shell")
+        t.renders(DISB, made["b2c"], f"{phone_receipt} Confirmed. KES 1,500.00 sent to _T PRINT WANJIRU 2547****0921")
+        t.renders(REQ, request, phone_receipt, "M-Pesa Receipt", "Prepared By")
+        entry = frappe.db.get_value(PE, {"reference_no": phone_receipt, "docstatus": 1}, "name")
+        t.renders(PE, entry, f"{phone_receipt} Confirmed.")

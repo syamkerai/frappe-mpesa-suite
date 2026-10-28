@@ -337,6 +337,11 @@ ENDPOINTS = {
     "mpsa_suite.money_out.claim_payees.repair_reimbursed": ("ADMIN_ROLES + read the Expense Claim", ("roles:ADMIN_ROLES", "perm")),
     "mpsa_suite.money_out.claim_payees.settle_line": (
         "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
+    # round 4.1: Send Payment Proof fills Frappe's email composer (nothing is sent by it)
+    "mpsa_suite.money_out.payment_print.proof_recipients": ("Read the payout", ("perm",)),
+    # round 4.1: a destination flagged as a staff or self payment, cleared by a manager who was not involved
+    "mpsa_suite.money_out.claim_payees.clear_staff_flag": (
+        "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
     _D + "b2c_disbursement_request.b2c_disbursement_request.B2CDisbursementRequest.retry_failed_payment": (
         "PAYOUT_ROLES", ("roles:PAYOUT_ROLES",)),
     _D + "b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.retry_failed_payments": (

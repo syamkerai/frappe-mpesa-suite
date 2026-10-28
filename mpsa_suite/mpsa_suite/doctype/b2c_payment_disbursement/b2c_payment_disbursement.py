@@ -12,6 +12,7 @@ from frappe.utils import cint, flt, now
 from ....daraja.guard import B2C_MIN_AMOUNT
 from ....money_out import maker_checker, send_confirm
 from ....permissions import PAYOUT_ROLES, is_direct_call, require, require_named_user
+from ....services.b2c_batch_status import batch_status
 from ....utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
@@ -21,7 +22,6 @@ from .config import DOCTYPE_CONFIGS, DoctypeConfig
 
 # Reference row fields only the payout jobs and Results write (never the form).
 SERVER_ROW_FIELDS = ("b2c_disbursement_request", "payment_status", "reference_no", "reference_date")
-
 
 class B2CPaymentDisbursement(Document):
     """B2C Payment Disbursement Class"""
@@ -411,16 +411,7 @@ class B2CPaymentDisbursement(Document):
             total = len(statuses)
             paid = statuses.count("Paid")
             failed = statuses.count("Failed")
-
-            new_status = "Not Initiated"
-            if paid == total and total > 0:
-                new_status = "Paid"
-            elif failed == total and total > 0:
-                new_status = "Failed"
-            elif paid or failed:
-                new_status = "Partially Paid"
-            elif total > 0:
-                new_status = "Initiated"
+            new_status = batch_status(statuses)
 
             current = frappe.db.get_value(
                 self.doctype,

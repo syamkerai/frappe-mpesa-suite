@@ -160,7 +160,10 @@ Fill in names before you start. One person may hold several of these jobs, but t
     migrate switched it on. Make Entry posts the same way, so it is for someone who may submit
     Payment Entries; the button is hidden from others.
     - The entry is made already submitted, in one save: the workflow's Draft state never runs, so
-      the approvers get no Workflow Action for it (none is left Open) and no Draft email.
+      the approvers get no Workflow Action for its approval and no Draft email. Like an entry
+      approved by hand, each one keeps one Open "Cancel" Workflow Action in the Approved state (the
+      workflow's own way out of Approved): that is expected, and nobody needs to act on it
+      (corrected after the live test of 2026-10-28).
     - A claim or invoice shows Paid as soon as its payout is booked; nobody approves M-Pesa entries.
     - A booking that cannot be submitted (a validation of the entry) is not left as a draft: the
       payout shows why it is not booked, is tried again every 15 minutes, and Make Entry (B2B) books

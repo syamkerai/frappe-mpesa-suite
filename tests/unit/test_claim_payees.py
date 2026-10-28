@@ -43,7 +43,8 @@ _dict = fake_frappe._dict
 LINE_COLUMNS = ("name", "idx", "parent", "parenttype", "parentfield", "payee_type", "payee_name", "destination",
                 "expense_detail", "expense_type", "bank_paybill", "shortcode", "account_number", "phone", "amount",
                 "destination_key", "status", "payout_doctype", "payout_name", "receipt", "paid_on", "sent_on",
-                "error_message", "receiver_name", "name_matches", "name_note", "supplier_account")
+                "error_message", "receiver_name", "name_matches", "name_note", "supplier_account", "name_verdict",
+                "sent_by", "staff_check", "staff_note")
 EXTRA_COLUMNS = {
     B2B: ("claim_payee", "expense_claim", "receiver_public_name", "error_message", "result_desc"),
     ROW: ("claim_payee", "creation"),
@@ -94,7 +95,7 @@ def env(monkeypatch):
         env.meta_fields["Employee"] = {"cell_number", "bank_ac_no"}
         env.drafts, env.problem, env.left = [], None, 1_000_000
         ed = importlib.import_module("mpsa_suite.money_out.employee_documents")
-        monkeypatch.setattr(ed, "payable_problem", lambda doc: env.problem, raising=False)
+        monkeypatch.setattr(ed, "payable_problem", lambda doc, skip_gap=False: env.problem, raising=False)
         env.left_asked = []
 
         def left_to_pay(dt, dn, exclude_payees=()):
@@ -974,7 +975,11 @@ def test_a_bank_account_is_checked_against_its_banks_name(env):
             receiver_shortcode="522522", account_reference="1234567890")
     paid_result(env, "MB2B-1", receiver="522522 - KCB Paybill AC")
     env.cp.on_payout_result(B2B, "MB2B-1")
-    assert stored(env)["name_matches"] == 1 and env.alerts == []
+    # R4.1: the bank's own name is all M-Pesa shows, never who holds the account: not verified, not a match,
+    # and no alarm (a wrong bank still is: test_a_bank_without_its_safaricom_name_is_checked_by_number_only)
+    line = stored(env)
+    assert (line["name_matches"], line["name_verdict"], env.alerts) == (0, "Not Verified", [])
+    assert line["name_note"].startswith("Not verified: M-Pesa paid '522522 - KCB Paybill AC', the bank's own name")
 
 
 def test_a_bank_without_its_safaricom_name_is_checked_by_number_only(env):

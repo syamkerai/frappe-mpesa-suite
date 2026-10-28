@@ -256,6 +256,18 @@ PAYER = "_t-mpesa-payer@example.com"
 MANAGER = "_t-mpesa-manager@example.com"
 
 
+def renders(doctype: str, name: str, *texts) -> str:
+    """The suite's 80 mm print of ``doctype`` ``name`` (money_out.payment_print) as the print preview
+    renders it (Print, PDF and Email wrap this same HTML in Frappe's print page, which needs the
+    site's built assets), checked to hold each of ``texts``. Returns the HTML."""
+    from frappe.www.printview import get_html_and_style
+
+    html = get_html_and_style(doctype, name, print_format=f"M-Pesa 80mm {doctype}", no_letterhead=1)["html"]
+    for text in texts:
+        assert text in html, f"{text!r} not in the 80 mm print of {doctype} {name}"
+    return html
+
+
 def named_user(email: str, *roles) -> str:
     """A System User ``email`` holding at least ``roles`` (made once; commit it in setUpClass)."""
     if not frappe.db.exists("User", email):

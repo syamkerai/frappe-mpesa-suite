@@ -332,6 +332,10 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual(self._line(receipt).status, "Reconciled")
         self.assertEqual(self._line(f"CHG-{receipt}").status, "Reconciled")
         self.assertEqual(owed.left_to_pay(PI, pi.name).left, 6000)
+        # R4.1: the 80 mm payment advice and proof of payment, from the ledger: 4,000 paid, 6,000 due
+        t.renders(PI, pi.name, receipt, "M-Pesa B2B", "4,000.00", "6,000.00")
+        t.renders(b2b.B2B_DOCTYPE, req.name, f"{receipt} Confirmed. KES 4,000.00 paid to")
+        t.renders("Payment Entry", pe.name, f"{receipt} Confirmed.")
 
         b2b.book_payment_entry(req.name)  # a re-run (re-sent Result, the sweep) books nothing
         self.assertEqual(len(self._entries(receipt)), 1)
@@ -435,6 +439,7 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertEqual(flt(frappe.db.get_value(PO, po.name, "advance_paid")), 4000)
         self.assertEqual(self._state(req.name).entry_status, "Entry Made")
         self.assertEqual(owed.left_to_pay(PO, po.name).left, 6000)
+        t.renders(PO, po.name, receipt, "4,000.00", "6,000.00")  # R4.1: the order's payment advice
 
         if not frappe.db.has_column("Payment Entry Reference", "advance_voucher_no"):
             self.skipTest("this ERPNext keeps the order row on the Payment Entry")

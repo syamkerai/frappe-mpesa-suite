@@ -61,7 +61,10 @@ doctype_js = {
     "Sales Invoice": "public/js/sales_invoice.js",
     "Payment Request": "public/js/payment_request.js",
     "Payment Entry": "public/js/payment_entry.js",
-    "B2C Disbursement Request": "public/js/b2c_status_check.js",
+    # Send Payment Proof on a paid payout (money_out.payment_print, R4.1)
+    "B2C Disbursement Request": ["public/js/b2c_status_check.js", "public/js/payment_proof.js"],
+    "B2C Payment Disbursement": "public/js/payment_proof.js",
+    "Mpesa B2B Payment Request": "public/js/payment_proof.js",
     "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
     "Integration Request": "public/js/c2b_verification.js",
     "Supplier": "public/js/supplier.js",
@@ -122,11 +125,14 @@ website_route_rules = [{"from_route": "/pay/<token>", "to_route": "pay"}]
 # Jinja
 # ----------
 
-# add methods and filters to jinja environment
-# jinja = {
-# 	"methods": "mpsa_suite.utils.jinja_methods",
-# 	"filters": "mpsa_suite.utils.jinja_filters"
-# }
+# add methods and filters to jinja environment: the 80 mm payment prints read only through these
+# (permission-checked, phones masked: money_out.payment_print)
+jinja = {
+    "methods": [
+        "mpsa_suite.money_out.payment_print.mpsa_payment_advice",
+        "mpsa_suite.money_out.payment_print.mpsa_payout_proof",
+    ],
+}
 
 # Installation
 # ------------
@@ -213,15 +219,24 @@ doc_events = {
     "Payment Entry": {
         "before_insert": "mpsa_suite.money_in.payment_entry.before_insert",
         "before_validate": "mpsa_suite.money_in.payment_entry.before_validate",
+        # a claim's or advance's paid total checked again after each of its payments (R4.1)
+        "on_submit": "mpsa_suite.money_out.employee_documents.check_paid_total_later",
         # an entry a B2B request links can still be cancelled, or deleted as a draft
-        "on_cancel": "mpsa_suite.money_out.b2b_entries.allow_cancel",
+        "on_cancel": [
+            "mpsa_suite.money_out.b2b_entries.allow_cancel",
+            "mpsa_suite.money_out.employee_documents.check_paid_total_later",
+        ],
         "on_trash": "mpsa_suite.money_out.b2b_entries.unlink_deleted",
     },
     "Journal Entry": {
         "before_insert": "mpsa_suite.money_in.payment_entry.journal_before_insert",
         # HRMS: no bank or cash entry for a payroll while M-Pesa pays salaries of it (money_out.payroll)
         "validate": "mpsa_suite.money_out.payroll.guard_bank_entry",
-        "on_cancel": "mpsa_suite.money_out.b2b_entries.allow_cancel",
+        "on_submit": "mpsa_suite.money_out.employee_documents.check_paid_total_later",
+        "on_cancel": [
+            "mpsa_suite.money_out.b2b_entries.allow_cancel",
+            "mpsa_suite.money_out.employee_documents.check_paid_total_later",
+        ],
         "on_trash": "mpsa_suite.money_out.b2b_entries.unlink_deleted",
     },
     "Payment Request": {

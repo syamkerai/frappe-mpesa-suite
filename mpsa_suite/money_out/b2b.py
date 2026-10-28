@@ -342,8 +342,10 @@ def validate_request(doc, at_submit: bool = False) -> None:
 
 
 def _validate_employee_request(doc, at_submit: bool) -> None:
-    """A payment to an employee's approved bank, paybill or till account, optionally for a Salary Slip."""
-    if cstr(doc.get("supplier")).strip() or doc.get("supplier_mpesa_account"):
+    """A payment to an employee's approved bank, paybill or till account, optionally for a Salary Slip.
+    An Expense Claim payee's request names the supplier account it paid once Paid (claim_payees
+    checks and clears it on a draft)."""
+    if cstr(doc.get("supplier")).strip() or (doc.get("supplier_mpesa_account") and not doc.get("claim_payee")):
         frappe.throw("Pay a supplier or an employee, not both.")
     if cstr(doc.get("purchase_invoice")).strip() or cstr(doc.get("purchase_order")).strip():
         frappe.throw("A payment to an employee cannot pay a Purchase Invoice or Purchase Order.")

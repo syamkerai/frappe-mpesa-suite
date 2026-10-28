@@ -349,10 +349,13 @@ def refresh_entry(doc, entries=None, feed: bool = True, log: bool = True) -> str
 
 @contextlib.contextmanager
 def _locks(name: str, dt, dn, receipt):
-    """R4 order: the document's lock, the receipt's lock, then the request's row; reloaded."""
+    """R4 order: the document's lock, the receipt's lock, then the request's row; reloaded. The
+    document's lock is the first statement of the transaction (owed.booking_lock): what _peek
+    read is committed away first, so the totals ERPNext and HRMS write back on the document count
+    what other bookings committed while this one waited."""
     with contextlib.ExitStack() as stack:
         if dt and dn:
-            stack.enter_context(owed.doc_lock(dt, dn))
+            stack.enter_context(owed.booking_lock(dt, dn))
         if receipt:
             stack.enter_context(money_in_common.named_lock(f"book:{receipt}"))
         frappe.db.get_value(B2B, name, "name", for_update=True)
@@ -1091,6 +1094,18 @@ def refresh_entries(limit: int = 100) -> None:
     cutoff = getdate(add_days(nowdate(), -RETRY_WINDOW_DAYS))
     remind_after = _reminder_days()
     for row in rows:
+        try:
+            dt, dn, _receipt = _peek(row.name)
+            if dt and dn:
+                # before the savepoint: the lock comes first in the row's transaction (owed.booking_lock
+                # commits away what was read), and _refresh_one's own _locks re-enter it
+                with owed.booking_lock(dt, dn):
+                    pass
+        except Exception:
+            frappe.log_error(title="M-Pesa B2B entry check failed", message=f"{row.name}\n{frappe.get_traceback()}",
+                             reference_doctype=B2B, reference_name=row.name)
+            frappe.db.commit()
+            continue
         frappe.db.savepoint("mpesa_b2b_entry")
         try:
             _refresh_one(row.name, cutoff)

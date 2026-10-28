@@ -1,0 +1,48 @@
+{#- Proof of payment, 80 mm: an M-Pesa B2B request, a B2C Payment Disbursement (a block per row), a B2C
+    Disbursement Request or a Payment Entry, each payout as M-Pesa's confirmation SMS reads. All data
+    from money_out.payment_print.mpsa_payout_proof (permission-checked; phones masked). -#}
+{%- set p = mpsa_payout_proof(doc) -%}
+{% include "templates/print/mpsa_80mm_style.html" %}
+<div class="mp80">
+	{% if p.letter_head.image %}<div class="lh"><img src="{{ p.letter_head.image }}" alt=""></div>{% endif %}
+	<div class="box">
+		<div class="title"><b>{{ _(p.title) }}</b><small>{{ p.company }}</small></div>
+		<div class="meta">
+			<div><div class="label">{{ _(p.doctype) }}</div><div class="value">{{ p.name }}</div></div>
+			<div><div class="label">{{ _("Payouts") }}</div><div class="value">{{ p.blocks | length }}</div></div>
+		</div>
+		{% for b in p.blocks %}
+		<div class="{{ 'block' if not loop.first else '' }}">
+			{% if b.sms %}<div class="sms">{{ b.sms }}</div>{% endif %}
+			<div class="party">
+				<div class="label">{{ _("Paid To") }}</div>
+				<div class="name">{{ b.name or "-" }}</div>
+				{% if b.number %}<div class="sub">{{ b.number }}</div>{% endif %}
+				{% if b.party and b.party != b.name %}<div class="sub">{{ _("For") }}: {{ b.party }}</div>{% endif %}
+			</div>
+			{% if b.amount is not none %}<div class="amount"><span class="label">{{ _("Amount") }}</span>
+				<b>KES {{ "{:,.2f}".format(b.amount) }}</b></div>{% endif %}
+			<div class="row"><span>{{ _("Status") }}</span><span>{{ _(b.status) }}</span></div>
+			<div class="row"><span>{{ _("M-Pesa Receipt") }}</span><span>{{ b.receipt or "-" }}</span></div>
+			{% if b.when_text %}<div class="row"><span>{{ _("Paid On") }}</span><span>{{ b.when_text }}</span></div>{% endif %}
+			{% if b.paid_from %}<div class="row"><span>{{ _("Paid From") }}</span><span>{{ b.paid_from }}</span></div>{% endif %}
+			{% if b.charge is not none %}<div class="row"><span>{{ _("Charge") }}{% if b.charge_how %} ({{ b.charge_how }}){% endif %}</span>
+				<span>KES {{ "{:,.2f}".format(b.charge) }}</span></div>{% endif %}
+			{% if b.document %}<div class="row"><span>{{ _("Pays") }}</span><span>{{ b.document }}</span></div>{% endif %}
+			{% if b.note %}<div class="row"><span>{{ _("Why It Failed") }}</span><span>{{ b.note | truncate(80, True, "..") }}</span></div>{% endif %}
+		</div>
+		{% endfor %}
+		{% if p.blocks | length > 1 %}
+		<div class="balance"><span>{{ _("Total") }}</span><span>KES {{ "{:,.2f}".format(p.total) }}</span></div>
+		{% endif %}
+		<div class="row" style="margin-top:2mm"><span>{{ _("Prepared By") }}</span><span>{{ p.prepared_by or "-" }}</span></div>
+		<div class="row"><span>{{ _("Sent By") }}</span><span>{{ p.sent_by or "-" }}</span></div>
+		<div class="badge"><span>
+			{%- if doc.docstatus == 2 %}{{ _("Cancelled") }}{% elif doc.docstatus == 0 %}{{ _("Draft") }}
+			{%- else %}{{ _(doc.status or "Submitted") }}{% endif -%}
+		</span></div>
+		<div class="foot"><b>{{ _(p.title) }}</b>{{ p.company }}<br>{{ _("Computer generated document.") }}<br>
+			{{ _("Printed") }}: {{ p.printed }}</div>
+	</div>
+	{% if p.letter_head.footer_image %}<div class="lh"><img src="{{ p.letter_head.footer_image }}" alt=""></div>{% endif %}
+</div>

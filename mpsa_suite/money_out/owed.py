@@ -113,12 +113,43 @@ def linked_employee_document(doc) -> tuple:
     return found[0] if found else (None, None)
 
 
-def doc_lock(dt: str, dn: str):
+def doc_lock(dt: str, dn: str, timeout: int = 10):
     """The per-document lock B2C's guard takes too, held until commit. A B2B submit holds it
     through the call to M-Pesa, so a second payer waits and may be told to try again."""
     from ..money_in.common import named_lock
 
-    return named_lock(f"b2c-pay:{dt}:{dn}", busy=busy_message(dt, dn))
+    return named_lock(f"b2c-pay:{dt}:{dn}", timeout=timeout, busy=busy_message(dt, dn))
+
+
+# Seconds a booking waits for its document's lock (a B2B send holds it through the call to M-Pesa);
+# a booking that still finds it taken fails and the sweep books it later.
+BOOKING_WAIT = 60
+
+
+def booking_lock(dt: str, dn: str):
+    """The document's lock as the first statement of a booking's transaction (round 4.1).
+
+    ERPNext and HRMS total what a document was paid with plain reads (HRMS's
+    update_reimbursed_amount sums the claim's submitted entries), which see the transaction's
+    snapshot. Taken before the lock, that snapshot misses an entry another booking committed
+    while this one waited, and the total written back is short: two payouts of one claim booked
+    2 s apart left its Total Amount Reimbursed at 70 of 90 (Trident, 2026-10-28). So what the
+    transaction read to know which document to lock is committed away first (fresh_snapshot), and
+    every read after the lock sees what other bookings committed."""
+    fresh_snapshot()
+    return doc_lock(dt, dn, timeout=BOOKING_WAIT)
+
+
+def fresh_snapshot() -> bool:
+    """End a transaction that has only read so far and holds no named lock, so the next read
+    takes a new snapshot. True when it did; never when there is anything to lose (a caller's
+    writes, or a lock held until commit)."""
+    from ..money_in.common import named_locks_held
+
+    if getattr(frappe.db, "transaction_writes", 1) or named_locks_held():
+        return False
+    frappe.db.commit()
+    return True
 
 
 def busy_message(dt: str, dn: str) -> str:

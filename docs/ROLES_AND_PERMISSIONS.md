@@ -312,6 +312,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create and submit PE/JE (posted at once) + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.claim_payees.claim_state` | Read the Expense Claim | perm |
+| `money_out.claim_payees.clear_staff_flag` | ADMIN_ROLES, a named login + read the Expense Claim | roles:ADMIN_ROLES, via:require_named_user, perm |
 | `money_out.claim_payees.parse_payees` | Write the Expense Claim (create one, before its first save) | perm |
 | `money_out.claim_payees.pay_claims` | PREPARE_ROLES + read each Expense Claim | roles:PREPARE_ROLES, perm |
 | `money_out.claim_payees.pay_payees` | PREPARE_ROLES + read the Expense Claim | roles:PREPARE_ROLES, perm |
@@ -322,6 +323,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.employee_documents.prepare_b2b` | PREPARE_ROLES + read the claim / advance + create the request | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_b2c` | PREPARE_ROLES + read the claim / advance + create the disbursement | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_bulk` | PREPARE_ROLES + read each claim / advance + create the payouts | roles:PREPARE_ROLES, perm |
+| `money_out.payment_print.proof_recipients` | Read the payout | perm |
 | `money_out.payroll.from_payroll_entry` | PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule | roles:PREPARE_ROLES, via:require_salary_reader, perm |
 | `money_out.payroll.from_salary_slip` | PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip | via:require_salary_preparer, perm |
 | `money_out.payroll.from_salary_slips` | PREPARE_ROLES who may see salaries + create a schedule + read each Salary Slip | via:require_salary_preparer, perm |

@@ -301,6 +301,11 @@ def _held_locks() -> set:
     return frappe.local.mpesa_named_locks
 
 
+def named_locks_held() -> bool:
+    """Whether this transaction holds a named lock (released only by its commit or rollback)."""
+    return bool(_held_locks())
+
+
 def release_named_locks() -> None:
     held = getattr(frappe.local, "mpesa_named_locks", None) or set()
     frappe.local.mpesa_named_locks = set()

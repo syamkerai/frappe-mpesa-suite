@@ -4,12 +4,23 @@
 // M-Pesa (employee_pay.js, loaded when the action is used; the server checks everything again).
 //
 // Frappe loads this after HRMS's own expense_claim_list.js: its frappe.listview_settings are
-// extended, never replaced, and its onload runs first.
+// extended, never replaced, and its onload runs first. HRMS 15 has no Partially Paid: a claim it
+// shows Unpaid that was reimbursed in part (by M-Pesa, to the employee or its payees) shows Partly
+// Paid; HRMS 16 says Partially Paid itself.
 (function () {
 	const key = "Expense Claim";
 	const all = frappe.listview_settings;
 	if (!all[key]) all[key] = {}; // only when no list script made them
 	const settings = all[key];
+	settings.add_fields = [...new Set([...(settings.add_fields || []), "total_amount_reimbursed", "grand_total"])];
+	const hrms_indicator = settings.get_indicator;
+	settings.get_indicator = function (doc) {
+		const reimbursed = flt(doc.total_amount_reimbursed);
+		if (doc.docstatus === 1 && doc.status === "Unpaid" && reimbursed > 0 && reimbursed < flt(doc.grand_total)) {
+			return [__("Partly Paid"), "orange", "status,=,Unpaid"];
+		}
+		return hrms_indicator ? hrms_indicator.apply(this, arguments) : undefined;
+	};
 	const hrms_onload = settings.onload;
 	settings.onload = function (listview) {
 		if (hrms_onload) hrms_onload.apply(this, arguments);

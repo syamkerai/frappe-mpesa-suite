@@ -210,17 +210,100 @@ def payable_problems(dt: str, values) -> list:
     account_currency = frappe.db.get_value("Account", account, "account_currency") if account else None
     if account_currency and account_currency != "KES":
         problems.append(f"{account} is in {account_currency}. M-Pesa pays KES only.")
+    gap = reimbursed_problem(dt, values)
+    if gap:
+        problems.append(gap)
     if cint(values.docstatus) == 1 and outstanding(dt, values) <= owed.MIN:
         problems.append(f"{name} has nothing left to pay.")
     return problems
 
 
-def payable_problem(doc, doctype: str | None = None) -> str | None:
+def reimbursed_problem(dt: str, values) -> str | None:
+    """A submitted claim whose Total Amount Reimbursed disagrees with the entries booked against it
+    (claim_payees.reimbursed_gap): what it still owes is read from that total, so nothing more is
+    prepared or sent for it, to the claimant or a payee, until it is set right (check_paid_total, or
+    an M-Pesa Manager's Repair Reimbursed Total)."""
+    if dt != EXPENSE_CLAIM or not values or cint(values.get("docstatus")) != 1:
+        return None
+    from .claim_payees import reimbursed_gap
+
+    try:
+        gap = reimbursed_gap(values)
+    except ImportError:
+        return None  # no HRMS: no Expense Claim to pay
+    if not gap:
+        return None
+    return (f"{values.name}'s Total Amount Reimbursed shows KES {money(gap[0])}, but the entries booked against it add "
+            f"up to KES {money(gap[1])}: an M-Pesa Manager repairs it (Repair Reimbursed Total) before it is paid "
+            "again.")
+
+
+# ---------------------------------------------------------------- the paid total HRMS keeps
+def check_paid_total_later(doc, method=None) -> None:
+    """Payment Entry and Journal Entry on_submit and on_cancel (hooks.py): each Expense Claim or
+    Employee Advance the entry pays is checked again by check_paid_total, in a job of its own once
+    this commits. Never raises: the save goes on."""
+    try:
+        for dt, dn in _paid_documents(doc):
+            frappe.enqueue(f"{__name__}.check_paid_total", queue="short", timeout=300, enqueue_after_commit=True,
+                           doctype=dt, name=dn)
+    except Exception:
+        frappe.log_error(title="M-Pesa paid total check not queued", message=f"{doc.name}\n{frappe.get_traceback()}")
+
+
+def _paid_documents(doc) -> list:
+    if doc.doctype == "Payment Entry":
+        found = [(r.get("reference_doctype"), r.get("reference_name")) for r in doc.get("references") or []]
+    else:
+        found = [(r.get("reference_type"), r.get("reference_name")) for r in doc.get("accounts") or []]
+    return sorted({(dt, cstr(dn).strip()) for dt, dn in found if dt in DOCTYPES and cstr(dn).strip()})
+
+
+def check_paid_total(doctype: str, name: str) -> None:
+    """A job, after a payment of an Expense Claim or Employee Advance was submitted or cancelled:
+    what HRMS wrote back as paid (a claim's Total Amount Reimbursed, an advance's Paid Amount) is
+    counted again from the entries, under the document's lock taken first (owed.booking_lock), and
+    set again when it differs, with a Comment. Two bookings that each wrote a total from a snapshot
+    without the other's entry are left right. Idempotent."""
+    if doctype not in DOCTYPES:
+        return
+    with owed.booking_lock(doctype, name):
+        if not frappe.db.exists(doctype, name):
+            return
+        doc = frappe.get_doc(doctype, name)
+        if cint(doc.docstatus) != 1:
+            return
+        if doctype == EXPENSE_CLAIM:
+            from hrms.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
+
+            from .claim_payees import reimbursed_gap
+
+            gap = reimbursed_gap(doc)
+            if not gap:
+                return
+            update_reimbursed_amount(doc)
+            label, before, after = "Total Amount Reimbursed", gap[0], gap[1]
+        else:
+            before = flt(doc.get("paid_amount"), 2)
+            doc.set_total_advance_paid()
+            after = flt(frappe.db.get_value(doctype, name, "paid_amount"), 2)
+            if abs(after - before) < 0.005:
+                return
+            label = "Paid Amount"
+        doc.add_comment("Comment", f"{label} set from KES {money(before)} to KES {money(after)}, the entries booked "
+                                   "against it: two payments were booked at the same moment.")
+
+
+def payable_problem(doc, doctype: str | None = None, skip_gap: bool = False) -> str | None:
     """Why a submitted Expense Claim or Employee Advance may not be paid now, or None. ``doc``: the
-    document, or what read_document read of it."""
+    document, or what read_document read of it. ``skip_gap``: not the reimbursed total's gap
+    (reimbursed_problem), for a form that says it in words of its own."""
     values = _values(doc, doctype)
     dt = doctype or (values or {}).get("doctype") or _doctype_of(doc)
     problems = payable_problems(dt, values)
+    if skip_gap and problems:
+        gap = reimbursed_problem(dt, values)
+        problems = [p for p in problems if p != gap]
     return problems[0] if problems else None
 
 
@@ -551,12 +634,17 @@ def paid_by_mpesa(dt: str, dn: str) -> float:
     return flt(total, 2)
 
 
-def draft_b2c(dt: str, dn: str) -> list:
+def draft_b2c(dt: str, dn: str, payees: bool = True) -> list:
     """Draft B2C Payment Disbursements with a row for the document (they count as paying it only
-    once they are sent)."""
+    once they are sent). ``payees`` False: only rows that pay the employee, not an Expense Claim's
+    casual payees (money_out.claim_payees: their unpaid lines are held back from the employee's
+    share already)."""
+    payee_rows = "" if payees or not frappe.db.has_column(DISB_ROW, "claim_payee") else (
+        " AND COALESCE(ref.claim_payee, '') = ''")
     return [r[0] for r in frappe.db.sql(
         f"""SELECT DISTINCT ref.parent FROM `tab{DISB_ROW}` ref JOIN `tab{DISB}` d ON d.name = ref.parent
-        WHERE ref.reference_doctype = %s AND ref.reference_name = %s AND d.docstatus = 0 ORDER BY ref.parent""",
+        WHERE ref.reference_doctype = %s AND ref.reference_name = %s AND d.docstatus = 0{payee_rows}
+        ORDER BY ref.parent""",
         (dt, dn))]
 
 
@@ -747,7 +835,7 @@ def prepare_b2c(doctype: str, name: str, mpesa_settings: str | None = None) -> d
     frappe.has_permission(doctype, "read", doc=name, throw=True)
     frappe.has_permission(DISB, "create", throw=True)
     values, amount = _payable(doctype, name)
-    drafts = draft_b2c(doctype, name)
+    drafts = draft_b2c(doctype, name, payees=False)  # a draft batch of the claim's payees is theirs
     if drafts:
         frappe.throw(f"Draft B2C Payment Disbursement {', '.join(drafts)} already pays {name}: open it, or delete it first.")
     settings = _shortcode(values.company, "use_b2c", mpesa_settings)

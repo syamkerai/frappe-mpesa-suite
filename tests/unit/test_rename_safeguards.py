@@ -277,8 +277,9 @@ def test_r8_ran_under_old_name(site, log, expected):
     assert handover.ran_under_old_name("mpsa_suite.mpsa_suite.patches.x") is expected
 
 
-def test_r8_registered_patches_are_the_eight_of_release_c():
-    assert len(_registered_patches()) == 8
+def test_r8_registered_patches_are_the_eight_of_release_c_and_round_41s():
+    assert len(_registered_patches()) == 9
+    assert _registered_patches()[-1] == "mpsa_suite.mpsa_suite.patches.claim_payee_name_verdict"
     assert all(p.startswith("mpsa_suite.mpsa_suite.patches.") for p in _registered_patches())
 
 

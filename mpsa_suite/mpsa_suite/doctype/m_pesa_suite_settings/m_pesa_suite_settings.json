@@ -94,6 +94,7 @@
   "claim_payee_max_amount",
   "claim_payee_daily_cap",
   "suggest_supplier_after",
+  "claim_payee_employee_names",
   "accounts_tab",
   "accounts_intro",
   "statement_import_section",
@@ -694,11 +695,19 @@
    "default": "3",
    "depends_on": "allow_claim_payees",
    "description": "A till or paybill paid this often from Expense Claims is suggested to Accounts as a Supplier M-Pesa Account, approved once and then paid like any supplier. 0 = never suggest."
+  },
+  {
+   "fieldname": "claim_payee_employee_names",
+   "fieldtype": "Check",
+   "label": "Block Payees M-Pesa Paid Under an Employee's Name",
+   "default": "1",
+   "depends_on": "allow_claim_payees",
+   "description": "On: a claim payee's destination that M-Pesa paid, now or before, under any Employee's name is flagged as a staff payment and not paid to claim payees until an M-Pesa Manager clears it. Off: only the claimant's own name and the names of who prepared and sent the payout are checked."
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-28 09:00:00.000000",
+ "modified": "2026-10-28 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

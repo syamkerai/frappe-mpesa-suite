@@ -703,10 +703,11 @@ def _tokens(name) -> set:
     return {w for w in words if w not in {"LTD", "LIMITED", "CO", "COMPANY", "THE", "AND", "KENYA", "KE"}}
 
 
-def names_match(expected, received) -> bool:
-    """Loose match: every word of the shorter name appears in the longer one."""
+def names_match(expected, received, min_words: int = 1) -> bool:
+    """Loose match: every word of the shorter name appears in the longer one. ``min_words``: both
+    names have at least that many words (a staff check: one first name alone matches no one)."""
     a, b = _tokens(expected), _tokens(received)
-    if not a or not b:
+    if not a or not b or min(len(a), len(b)) < min_words:
         return False
     small, big = (a, b) if len(a) <= len(b) else (b, a)
     return small <= big
@@ -806,29 +807,41 @@ def confirm_receiver_name(doc, adopt_name: bool = False) -> None:
     doc.add_comment("Comment", note_text + ".")
 
 
-def alert(message, doc, roles=None) -> None:
+def alert(message, doc, roles=None, exclude=(), now: bool = False, rolled_back: bool = False) -> None:
     """A notification to the Notify Role (M-Pesa Suite Settings), or to the users holding one of
-    ``roles``. Never raises."""
+    ``roles``, but ``exclude`` (whoever the alert is about); the Notify Role's users when that
+    leaves no one. Once this commits, as Frappe sends them; ``now``: made in this transaction (a
+    migrate, whose queued alerts were never delivered); ``rolled_back``: queued straight away,
+    for a refusal whose transaction is rolled back. Never raises."""
     try:
-        from frappe.desk.doctype.notification_log.notification_log import enqueue_create_notification
-
-        roles = list(roles or [frappe.db.get_single_value(SUITE, "notify_role") or "Accounts Manager"])
-        users = frappe.get_all(
-            "Has Role", filters={"role": ["in", roles], "parenttype": "User"}, pluck="parent", distinct=True
+        from frappe.desk.doctype.notification_log.notification_log import (
+            enqueue_create_notification,
+            make_notification_logs,
         )
-        users = sorted({u for u in users if u not in ("Administrator", "Guest")})
-        if users:
-            enqueue_create_notification(
-                users,
-                {
-                    "type": "Alert",
-                    "subject": message,
-                    "document_type": doc.doctype,
-                    "document_name": doc.name,
-                },
-            )
+
+        notify_role = frappe.db.get_single_value(SUITE, "notify_role") or "Accounts Manager"
+        skip = {"Administrator", "Guest", *(u for u in exclude or () if u)}
+        users = _holders(roles or [notify_role], skip)
+        if not users and roles:
+            users = _holders([notify_role], skip)
+        if not users:
+            return
+        content = {"type": "Alert", "subject": message, "document_type": doc.doctype, "document_name": doc.name}
+        if now:
+            make_notification_logs(frappe._dict(content), users)
+        elif rolled_back:
+            frappe.enqueue("frappe.desk.doctype.notification_log.notification_log.make_notification_logs",
+                           doc=frappe._dict(content), users=users)
+        else:
+            enqueue_create_notification(users, content)
     except Exception:
         frappe.log_error(frappe.get_traceback(), "M-Pesa alert failed")
+
+
+def _holders(roles, skip) -> list:
+    users = frappe.get_all("Has Role", filters={"role": ["in", list(roles)], "parenttype": "User"}, pluck="parent",
+                           distinct=True)
+    return sorted({u for u in users if u not in skip})
 
 
 def accounts_for(doctype, party) -> list:
@@ -925,7 +938,8 @@ def block_unchecked_approvals() -> dict:
         blocked_now[p.doctype] = count
         if count:
             many = count > 1
+            # made now (R4.1): one queued after the migrate's commit was never delivered on Trident
             alert(f"M-Pesa Suite upgrade: {count} {p.doctype}{'s' if many else ''} approved without a second named "
                   f"person {'are' if many else 'is'} blocked until cancelled, amended and approved again by an M-Pesa "
-                  "Manager.", frappe._dict(doctype=p.doctype, name=None))
+                  "Manager.", frappe._dict(doctype=p.doctype, name=None), now=True)
     return blocked_now

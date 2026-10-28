@@ -61,6 +61,9 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
         frappe.db.set_value("B2C Payment Disbursement Reference", ref_name, update)
         if (line or account) and req.status == "Paid" and not was_paid and req.docstatus == 1:
             _check_receiver_name(req, line, account)  # once, when the row first shows Paid
+        from mpsa_suite.services.b2c_batch_status import sync_status_later
+
+        sync_status_later(req.b2c_payment_disbursement)  # the batch's status follows its rows
         frappe.db.commit()
 
     if enqueue_next and req.status == "Paid":

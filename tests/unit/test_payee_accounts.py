@@ -72,7 +72,7 @@ def env():
         ea = importlib.import_module("mpsa_suite.money_out.employee_accounts")
         alerts = []
         pa_alert = pa.alert
-        pa.alert = lambda message, doc, roles=None: alerts.append((doc.name, message, roles))
+        pa.alert = lambda message, doc, roles=None, **kw: alerts.append((doc.name, message, roles))
         yield fake_frappe._dict(frappe=frappe, pa=pa, sa=sa, ea=ea, alerts=alerts)
         pa.alert = pa_alert
     finally:
