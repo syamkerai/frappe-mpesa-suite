@@ -61,11 +61,16 @@ class FakePaymentEntry:
     def append(self, key, row):
         getattr(self, key).append(types.SimpleNamespace(**row))
 
+    def run_method(self, method, *args, **kwargs):
+        self._frappe.methods_run = [*getattr(self._frappe, "methods_run", []), method]  # the draft's save
+
     def insert(self, ignore_permissions=False):
         self.name = f"ACC-PAY-{next(self._frappe._seq)}"
         self._frappe.db.table("Payment Entry")[self.name] = {
             "name": self.name, "docstatus": 0, "reference_no": self.reference_no, "doc": self,
         }
+        if self.docstatus == 1:  # inserted submitted, in one save (accounting.posting): Frappe runs a submit
+            self.submit()
         return self
 
     def submit(self):

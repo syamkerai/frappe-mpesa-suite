@@ -309,7 +309,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b.order_advances` | Read the order | perm |
 | `money_out.b2b.salary_left` | Read the Salary Slip | perm |
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
-| `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create PE/JE + read request | roles:FINANCE_ROLES, perm |
+| `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create and submit PE/JE (posted at once) + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.claim_payees.claim_state` | Read the Expense Claim | perm |
 | `money_out.claim_payees.parse_payees` | Write the Expense Claim (create one, before its first save) | perm |

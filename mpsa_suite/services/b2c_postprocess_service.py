@@ -48,9 +48,14 @@ def handle_successful_payment(disbursement_name: str, reference_name: str) -> bo
         frappe.db.savepoint("mpesa_b2c_booking")
         try:
             _book(disbursement_name, ref)
-        except Exception:
+        except Exception as e:
             frappe.db.rollback(save_point="mpesa_b2c_booking")
-            _record_booking_error(ref.b2c_disbursement_request, frappe.get_traceback())
+            from mpsa_suite.accounting.posting import period_closed
+
+            _record_booking_error(
+                ref.b2c_disbursement_request, frappe.get_traceback(),
+                closed_period_hint(ref, receipt) if period_closed(e) else None,
+            )
             return False
     return _mark_booked(disbursement_name, ref)
 
@@ -115,22 +120,43 @@ def _mark_booked(disbursement_name: str, ref) -> bool:
     return submitted
 
 
-def _record_booking_error(b2c_request: str | None, traceback: str) -> None:
-    first_failure = not (
-        b2c_request
-        and _has_field("accounting_error")
-        and frappe.db.get_value(B2C_REQUEST_DOCTYPE, b2c_request, "accounting_error")
+def _record_booking_error(b2c_request: str | None, traceback: str, hint: str | None = None) -> None:
+    """A booking that failed: one Error Log, the reason on the request (``accounting_error``) and
+    an alert to the Notify Role (M-Pesa Suite Settings), once per payout and reason (the sweep
+    retries every run). ``hint``: what staff do about it, after the reason."""
+    previous = (
+        frappe.db.get_value(B2C_REQUEST_DOCTYPE, b2c_request, "accounting_error")
+        if b2c_request and _has_field("accounting_error")
+        else None
     )
-    if first_failure:  # the sweep retries every run; log the traceback once
+    if not previous:  # log the traceback once
         frappe.log_error(title=f"B2C accounting failed for {b2c_request}"[:140], message=traceback)
-    if b2c_request and _has_field("accounting_error"):
-        frappe.db.set_value(
-            B2C_REQUEST_DOCTYPE,
-            b2c_request,
-            "accounting_error",
-            traceback.strip().splitlines()[-1][:500] if traceback.strip() else "Unknown error",
-            update_modified=False,
-        )
+    reason = traceback.strip().splitlines()[-1] if traceback.strip() else "Unknown error"
+    reason = f"{reason}. {hint}" if hint else reason
+    if not (b2c_request and _has_field("accounting_error")):
+        return
+    frappe.db.set_value(B2C_REQUEST_DOCTYPE, b2c_request, "accounting_error", reason[:500], update_modified=False)
+    if reason[:500] != previous:
+        from mpsa_suite.money_out.party_accounts import alert
+
+        alert(f"{b2c_request} was paid but could not be booked: {reason}"[:500],
+              frappe._dict(doctype=B2C_REQUEST_DOCTYPE, name=b2c_request))
+
+
+def closed_period_hint(ref, receipt: str) -> str:
+    """What staff do with a payout whose entry ERPNext refuses for its date (a closed Accounting
+    Period, books closed by a Period Closing Voucher, or on or before Accounts Frozen Till, the
+    last two binding Administrator too): its entry made by hand in an open period, carrying the
+    receipt, which booked_docstatus counts as this payout's (a Payment Entry allocated to the
+    document, or a salary's Journal Entry naming the employee) and entry_carrying_receipt keeps
+    from being booked twice."""
+    if ref.reference_doctype == "Salary Slip":
+        how = (f"a Journal Entry with Reference Number {receipt} and {ref.party} as party on the payroll "
+               "payable row")
+    else:
+        how = f"a Payment Entry with Reference No {receipt}, allocated to {ref.reference_doctype} {ref.reference_name}"
+    return (f"Its date is in a closed Accounting Period, in books closed by a Period Closing Voucher or on or before "
+            f"Accounts Frozen Till: make {how}, dated in an open period; the suite counts it as this payout's entry.")
 
 
 # Older paid payouts are left to staff (the Error Log and accounting_error say why).

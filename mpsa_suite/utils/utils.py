@@ -8,6 +8,7 @@ import frappe
 from frappe import _
 from frappe.utils import flt, get_url
 
+from ..accounting.posting import insert_entry
 from .doctype_names import ACCESS_TOKENS_DOCTYPE, MPESA_EXPRESS_REQUEST_DOCTYPE
 
 
@@ -271,8 +272,7 @@ def _book_payment_request_payment(request_doc, payment_request) -> None:
                 })
         pe.reference_no = receipt
         pe.reference_date = frappe.utils.getdate(request_doc.get("transaction_date") or frappe.utils.nowdate())
-        pe.insert(ignore_permissions=True)
-        pe.submit()
+        insert_entry(pe, ignore_permissions=True)  # submitted in one save (accounting.posting)
 
 
 def order_billed_in_full(payment_request) -> bool:
@@ -376,8 +376,7 @@ def _book_on_billed_order(request_doc, payment_request, paid: float) -> None:
             "account": round_off[0], "cost_center": pe.get("cost_center") or round_off[1],
             "amount": flt(written_off * flt(pe.get("source_exchange_rate") or 1), 2),  # company currency
         })
-    pe.insert(ignore_permissions=True)
-    pe.submit()
+    insert_entry(pe, ignore_permissions=True)
 
     # The entry has no request row (the order is billed), so ERPNext does not touch the request.
     # Under half a shilling left, with no invoice still owing it, the request is settled.
@@ -498,7 +497,9 @@ def handle_successful_transaction(request_doc, settings):
                 if books_paid:
                     _book_payment_request_payment(request_doc, payment_request)
                 else:
-                    payment_request.create_payment_entry()
+                    # ERPNext's create_payment_entry() inserts, then submits (a workflow's Draft state):
+                    # built as a draft, posted in one save (accounting.posting) as its insert and submit did
+                    insert_entry(payment_request.create_payment_entry(submit=False), ignore_permissions=True)
             except Exception:
                 log_and_throw_error("Payment Entry Creation Error", request_doc.name)
 
@@ -612,7 +613,8 @@ def handle_successful_transaction(request_doc, settings):
                         if request_doc.transaction_date
                         else frappe.utils.nowdate()
                     )
-                    payment_entry.save(ignore_permissions=True)
+                    # one save, submitted (not a save then a submit): accounting.posting
+                    payment_entry.flags.ignore_permissions = True
                     payment_entry.submit()
                     set_mpesa_request_reconciled(request_doc)
                 except Exception:

@@ -414,6 +414,9 @@ class ErpnextEntry:
     def set(self, key, value):
         setattr(self, key, value)
 
+    def run_method(self, method, *args, **kwargs):
+        pass
+
     def insert(self, **kw):
         return self
 
@@ -463,8 +466,12 @@ class FakePaymentEntry:
     def set_exchange_rate(self):
         self.source_exchange_rate = 1  # a KES company
 
+    def run_method(self, method, *args, **kwargs):
+        pass
+
     def insert(self, ignore_permissions=False):
         self._frappe.entries.append(self)
+        self.submitted = self.get("docstatus") == 1  # inserted submitted, in one save (accounting.posting)
         return self
 
     def submit(self):

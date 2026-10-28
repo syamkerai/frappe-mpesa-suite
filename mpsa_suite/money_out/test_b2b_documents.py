@@ -23,7 +23,7 @@ from frappe.utils import add_days, add_to_date, flt, getdate, now_datetime, nowd
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.money_in import testing as t
-from mpsa_suite.money_out import b2b, b2b_entries, owed, send_confirm
+from mpsa_suite.money_out import b2b, b2b_entries, owed, send_confirm, statement
 
 SETTINGS, SHORTCODE = "TESTB2BDOCS", "600777"
 B2B, PE, JE, BT = b2b.B2B_DOCTYPE, "Payment Entry", "Journal Entry", "Bank Transaction"
@@ -234,8 +234,9 @@ class TestB2BDocuments(IntegrationTestCase):
             t.send_as(self.payer, doc)
         return post
 
-    def _pay(self, name, charge="Business Pay Bill Charge|KES|2.00", book=True) -> str:
-        """Safaricom's Paid Result for the request, then the booking job it enqueues (``book``)."""
+    def _pay(self, name, charge="Business Pay Bill Charge|KES|2.00", book=True, completed=None) -> str:
+        """Safaricom's Paid Result for the request, then the booking job it enqueues (``book``).
+        ``completed``: when Safaricom says it was paid (the payout's day), now when not given."""
         row = frappe.db.get_value(B2B, name, ["conversation_id", "originator_conversation_id"], as_dict=True)
         receipt = self._receipt()
         result = {
@@ -244,7 +245,7 @@ class TestB2BDocuments(IntegrationTestCase):
             "OriginatorConversationID": row.originator_conversation_id or f"OC_{receipt}", "TransactionID": receipt,
             "ResultParameters": {"ResultParameter": [
                 {"Key": "DebitAccountBalance", "Value": "Working Account|KES|50000.00|50000.00|0.00|0.00"},
-                {"Key": "TransCompletedTime", "Value": now_datetime().strftime("%Y%m%d%H%M%S")},
+                {"Key": "TransCompletedTime", "Value": (completed or now_datetime()).strftime("%Y%m%d%H%M%S")},
                 {"Key": "DebitPartyCharges", "Value": charge},
                 {"Key": "ReceiverPartyPublicName", "Value": f"888880 - {SUPPLIER.upper()}"},
             ]},
@@ -589,9 +590,73 @@ class TestB2BDocuments(IntegrationTestCase):
             pe = frappe.get_doc(PE, pe.name)
             self.assertEqual((pe.docstatus, pe.get("workflow_state")), (1, "Approved"))
             self.assertEqual((self._state(req.name).entry_status, self._outstanding(pi.name)), ("Entry Made", 6000))
+            # inserted submitted in one save (accounting.posting): the Draft state never ran, so its approvers
+            # got no Workflow Action that would stay Open on a submitted entry
+            self.assertEqual(frappe.get_all("Workflow Action", filters={
+                "reference_doctype": PE, "reference_name": pe.name, "status": "Open"}), [])
         finally:
             frappe.db.set_value("Workflow", PE_WORKFLOW, "is_active", 0)
             frappe.clear_cache(doctype=PE)
+
+    def _closed_period(self, start, end):
+        """An Accounting Period of the test company closed from ``start`` to ``end`` (ERPNext closes every voucher
+        type it lists, Payment and Journal Entries among them, on insert; an end date after today is refused)."""
+        # the closed DocTypes listed: ERPNext's own bootstrap of them reads attributes off plain dicts
+        # (AccountingPeriod.bootstrap_doctypes_for_closing, v15 and v16)
+        return frappe.get_doc({"doctype": "Accounting Period", "period_name": f"_T B2B Closed {self.tag}",
+                               "company": t.COMPANY, "start_date": start, "end_date": end,
+                               "closed_documents": [{"document_type": PE, "closed": 1},
+                                                    {"document_type": JE, "closed": 1}]}).insert()
+
+    def _fiscal_year_for(self, day) -> None:
+        """testing._fiscal_year makes only this year's: on 1 or 2 January the days before are last year's."""
+        if frappe.db.exists("Fiscal Year", {"year_start_date": ["<=", day], "year_end_date": [">=", day]}):
+            return
+        year = getdate(day).year
+        frappe.get_doc({"doctype": "Fiscal Year", "year": f"{year} M-Pesa Test", "year_start_date": f"{year}-01-01",
+                        "year_end_date": f"{year}-12-31"}).insert()
+        self.addCleanup(lambda: frappe.cache().delete_key("fiscal_years"))  # the rollback removes the year
+
+    def test_a_payout_paid_in_a_closed_period_is_booked_by_make_entry_on_a_later_posting_date(self):
+        # ERPNext refuses an entry dated in a closed Accounting Period (also to Administrator, whom the booking
+        # runs as): the note says to use Make Entry's Posting Date; the entry posted later says both days. The
+        # period ends yesterday (none may end after today) and the entry is posted today: every day of the year
+        # has a Fiscal Year for it
+        today = getdate(nowdate())
+        paid_on = getdate(add_days(today, -1))
+        self._fiscal_year_for(add_days(today, -2))
+        period = self._closed_period(add_days(today, -2), paid_on)
+        req = self._request(4000, supplier=self.supplier)
+        receipt = self._pay(req.name, completed=add_to_date(now_datetime(), days=-1))
+        self.assertEqual((self._entries(receipt), self._journals(receipt)), ([], []))
+        state = self._state(req.name)
+        self.assertEqual(state.entry_status, "Entry Not Made")
+        self.assertIn(b2b_entries.CLOSED_PERIOD, state.entry_note)
+        self.assertEqual(self._line(receipt).withdrawal, 4000)  # its statement line is made all the same
+        # the charge's Journal Entry, dated the same day, waits without undoing the payout's line
+        self.assertEqual(self._journals(f"CHG-{receipt}"), [])
+        self.assertTrue(frappe.db.exists("Mpesa Match Log", {"reference_name": req.name, "result": "Error"}))
+
+        self.assertRaisesRegex(frappe.ValidationError, "closed Accounting Period", b2b_entries.make_entry, req.name,
+                               "Supplier Advance")
+        self.assertRaisesRegex(frappe.ValidationError, "or a later day", b2b_entries.make_entry, req.name,
+                               "Supplier Advance", posting_date=add_days(today, -2))
+        answer = b2b_entries.make_entry(req.name, "Supplier Advance", posting_date=today)
+        pe = frappe.get_doc(PE, answer["name"])
+        self.assertEqual((pe.docstatus, getdate(pe.posting_date), getdate(pe.reference_date), pe.reference_no),
+                         (1, today, paid_on, receipt))
+        self.assertIn(f"Paid on {paid_on}, posted on {today}.", pe.remarks)
+        self.assertEqual(self._state(req.name).entry_status, "Entry Made")
+
+        # the period reopened: the charge that waited is booked on its own day, once
+        frappe.delete_doc("Accounting Period", period.name)
+        for _ in range(2):  # the next sweep, and one after it
+            statement.after_payout(B2B, req.name)
+        (charge,) = self._journals(f"CHG-{receipt}")
+        self.assertEqual((charge.docstatus, getdate(frappe.db.get_value(JE, charge.name, "posting_date"))),
+                         (1, paid_on))
+        self.assertEqual(frappe.db.get_value(B2B, req.name, ["charge_bank_transaction", "mpesa_charge"]),
+                         (self._line(f"CHG-{receipt}").name, 2))
 
     def test_draft_entry_keeps_the_invoice_blocked_until_submitted(self):
         # a draft the suite made before the migrate switched every Mpesa Settings to post at once (or one staff made)

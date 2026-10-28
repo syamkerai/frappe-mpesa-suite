@@ -39,7 +39,7 @@ global.frappe = {
 		Dialog: class { constructor(opts) { this.opts = opts; last_dialog = this; } show() { calls.push(["dialog", this.opts.title]); } hide() {} },
 	},
 	listview_settings: setup.listview_settings_preset ? { [setup.listview_settings_preset]: { onload() { calls.push(["hrms onload"]); } } } : {},
-	model: { can_create: (dt) => Boolean(perms.create[dt]) },
+	model: { can_create: (dt) => Boolean(perms.create[dt]), can_submit: (dt) => !(setup.no_submit || []).includes(dt) },
 	xcall: (method, args) => { calls.push(["xcall", method.split(".").pop(), args]); return Promise.resolve((setup.replies || {})[method.split(".").pop()]); },
 	utils: { escape_html: (s) => String(s), get_form_link: (dt, name) => `/app/${dt}/${name}` },
 	msgprint: (m) => calls.push(["msgprint", typeof m === "string" ? m : m.message]),

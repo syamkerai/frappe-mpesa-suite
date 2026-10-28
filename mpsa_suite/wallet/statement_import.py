@@ -30,6 +30,7 @@ from collections import Counter
 import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate
 
+from ..accounting import posting
 from ..money_in.bank_transaction import _stamp, create_statement_line, find_existing
 from ..money_in.common import as_user, enabled, mpesa_bank_accounts, named_lock, settings_for_shortcode, suite_int
 from ..money_out import statement as payouts
@@ -532,9 +533,7 @@ class Importer:
             frappe.db.savepoint(savepoint)
             try:
                 pe.set_missing_values()
-                pe.insert()
-                if cint(frappe.db.get_single_value("M-Pesa Suite Settings", "submit_statement_entries")):
-                    pe.submit()
+                posting.insert_entry(pe, frappe.db.get_single_value("M-Pesa Suite Settings", "submit_statement_entries"))
             except Exception:
                 frappe.db.rollback(save_point=savepoint)
                 frappe.log_error(title=f"M-Pesa transfer entry for {row.receipt} failed", message=frappe.get_traceback())

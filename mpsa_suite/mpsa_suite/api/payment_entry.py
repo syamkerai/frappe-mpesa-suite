@@ -8,6 +8,7 @@ from frappe.utils import (
     nowdate,
 )
 
+from mpsa_suite.accounting.posting import insert_entry
 from mpsa_suite.mpsa_suite.api.m_pesa_api import (
     sanitize_mobile_number,
 )
@@ -152,10 +153,8 @@ def create_payment_entry(
 
             pe.append("references", reference_row)
 
-    pe.insert(ignore_permissions=True)
-
-    if frappe.utils.cint(submit):
-        pe.submit()
+    # submitted in one save when ``submit`` (accounting.posting: no workflow Draft state)
+    insert_entry(pe, submit, ignore_permissions=True)
 
     return pe
 

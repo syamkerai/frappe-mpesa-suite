@@ -29,6 +29,7 @@ import re
 import frappe
 from frappe.utils import add_days, cint, cstr, flt, getdate, now_datetime, nowdate
 
+from ..accounting import posting
 from ..money_in import common as money_in_common
 from ..permissions import ADMIN_ROLES, FINANCE_ROLES, require, require_named_user
 from . import owed, statement
@@ -48,6 +49,9 @@ MIN = owed.MIN
 money = owed.money
 # Ends every note about money the request's document could not take.
 PAID_TWICE = "Check that the supplier was not paid twice."
+# A booking ERPNext refused for its date (posting.period_closed): the retries keep that date.
+CLOSED_PERIOD = ("The day it was paid is in a closed Accounting Period, in books closed by a Period Closing Voucher "
+                 "or on or before Accounts Frozen Till: press Make Entry and give it a Posting Date in an open period.")
 
 
 # ---------------------------------------------------------------- reading
@@ -450,23 +454,26 @@ def _book(doc, dt, dn, salary: bool = False, employee_document: bool = False) ->
             else:
                 pe, problem = build_payment_entry(doc, dt, dn, doc.supplier, flt(doc.amount))
             pe.flags.ignore_permissions = True
-            pe.insert(ignore_permissions=True)
-            if cint(frappe.db.get_value("Mpesa Settings", doc.mpesa_settings, "submit_b2c_accounting_entries")):
-                pe.submit()
-    except Exception:
+            submit = frappe.db.get_value("Mpesa Settings", doc.mpesa_settings, "submit_b2c_accounting_entries")
+            posting.insert_entry(pe, submit, ignore_permissions=True)
+    except Exception as e:
         frappe.db.rollback(save_point=savepoint)
         traceback = frappe.get_traceback()
         last = (traceback.strip().splitlines() or ["Unknown error"])[-1]
         last = re.sub(r"^[\w.]*(Error|Exception)\w*: ", "", last).strip()[:300] or "Unknown error"
+        # its day is closed or frozen (which binds Administrator too): only Make Entry's Posting Date books it
+        closed = CLOSED_PERIOD if posting.period_closed(e) else None
         note = (
-            f"Could not book automatically: {last}. It is tried again every 15 minutes for {RETRY_WINDOW_DAYS} "
-            f"days, or press Make Entry. Do not make a {'Journal' if salary else 'Payment'} Entry for it by hand."
+            f"Could not book automatically: {last}. "
+            + (closed or f"It is tried again every 15 minutes for {RETRY_WINDOW_DAYS} days, or press Make Entry.")
+            + f" Do not make a {'Journal' if salary else 'Payment'} Entry for it by hand."
         )
         if doc.get("entry_note") != note:  # the sweep retries every run; log each new reason once
             frappe.log_error(title="M-Pesa B2B booking failed", message=f"{doc.name}\n{traceback}",
                              reference_doctype=B2B, reference_name=doc.name)
         set_entry(doc, NOT_MADE, note)
-        _alert_once(doc, f"{doc.name} was paid but could not be booked automatically: {last}")
+        _alert_once(doc, f"{doc.name} was paid but could not be booked automatically: {last}"
+                         + (f". {closed}" if closed else ""))
         return None
     refresh_entry(doc, receipt_entries(doc.transaction_id), feed=False, log=not problem)
     if problem:
@@ -743,12 +750,17 @@ def build_journal_entry(doc, account: str, cost_center, remark: str):
 # ---------------------------------------------------------------- Make Entry and Check Entry Again
 @frappe.whitelist(methods=["POST"])
 def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=None, account=None,
-               cost_center=None, remark=None, salary_slip=None, expense_claim=None, employee_advance=None):
+               cost_center=None, remark=None, salary_slip=None, expense_claim=None, employee_advance=None,
+               posting_date=None):
     """Make the entry of a Paid request now: against an invoice or order, as a supplier advance,
     as a Journal Entry, or (a payment to an employee) as the salary entry of a Salary Slip or the
     Payment Entry of an Expense Claim or Employee Advance. Runs with the user's own ERPNext
     permissions. The entry is posted at once, submitted (in a Payment Entry workflow, its approved
-    state), as the suite's automatic entries are: so only for a user who may submit it."""
+    state), as the suite's automatic entries are: so only for a user who may submit it.
+
+    ``posting_date``: a later day to post it on than the day M-Pesa paid it, which is in a closed
+    Accounting Period, in books closed by a Period Closing Voucher or on or before Accounts Frozen
+    Till; the entry's remark says both days."""
     require(FINANCE_ROLES)
     if kind not in KINDS:
         frappe.throw(f"Entry Type must be one of: {', '.join(KINDS)}")
@@ -779,6 +791,10 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
         dt, dn = kind, cstr(chosen or request.get(owed.EMPLOYEE_DOC_FIELDS[kind])).strip() or None
     if dt and not dn:
         frappe.throw(f"Pick the {dt}.")
+    paid_on = getdate(payout_account(name)[2])
+    posting_date = getdate(posting_date) if posting_date else paid_on
+    if posting_date < paid_on:
+        frappe.throw(f"The Posting Date is the day M-Pesa paid it ({paid_on}) or a later day.")
     _, _, receipt = _peek(name)
     with _locks(name, dt, dn, receipt) as doc:
         if doc.status != "Paid" or not receipt:
@@ -830,14 +846,28 @@ def make_entry(name, kind, supplier=None, purchase_invoice=None, purchase_order=
             _move_salary(doc, dn if kind == SALARY else None)
         else:
             _move_request(doc, dt, dn, supplier)  # checked before the entry is made
-        entry.insert()
-        entry.submit()
+        if posting_date != paid_on:
+            _post_on(entry, paid_on, posting_date)
+        posting.insert_entry(entry)
         refresh_entry(doc, receipt_entries(receipt), feed=False, log=not problem)
         if problem:
             _not_taken(doc, problem)  # the document took only part of it: the rest is an advance
     statement.after_payout(B2B, name)  # the payout line is reconciled with the entry now
     return {"doctype": entry_doctype, "name": entry.name, "docstatus": cint(entry.docstatus),
             "entry_status": doc.get("entry_status")}
+
+
+def _post_on(entry, paid_on, posting_date) -> None:
+    """Make Entry's Posting Date: the entry is posted on ``posting_date``, in an open period. Its
+    Reference (Cheque) Date stays the day M-Pesa paid it, and its remark says both days."""
+    note = f"Paid on {paid_on}, posted on {posting_date}."
+    entry.posting_date = posting_date
+    if entry.doctype == PE:
+        entry.remarks = f"{cstr(entry.remarks).rstrip('.')}. {note}" if entry.get("remarks") else note
+        return
+    entry.user_remark = f"{cstr(entry.user_remark).rstrip('.')}. {note}" if entry.get("user_remark") else note
+    if entry.get("custom_remark"):  # v16 builds its remark from user_remark unless told
+        entry.remark = entry.user_remark
 
 
 def _salary_entry(doc, slip: str) -> tuple:
