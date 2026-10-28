@@ -106,6 +106,7 @@ def test_b2b_ack_marks_initiated_never_paid(env):
     assert "b2b_result?ref=MB2B-1" in body["ResultURL"]
     assert "b2b_queue_timeout?ref=MB2B-1" in body["QueueTimeOutURL"]
     assert row["status"] == "Initiated"
+    assert row["send_started_on"]  # fix check S4/S5: when it was sent, as a scheduled send records it
     assert (row["conversation_id"], row["originator_conversation_id"]) == ("AG_1", "OCID-1")
     assert ("Mpesa B2B Payment Request", "MB2B-1") in env.frappe.db.locks
     assert env.frappe.request_logs[0]["data"]["SecurityCredential"] == "****"

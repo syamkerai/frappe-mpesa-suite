@@ -22,11 +22,26 @@
 		}
 		return null;
 	};
+	// Frappe answers first for an unsaved form ("Not Saved") and where it shows the workflow state (a
+	// Workflow that overrides the status, or a Workflow State column), as frappe.get_indicator decides
+	mpsa_suite_indicators.frappes_own = function (doc, doctype, show_workflow_state) {
+		if (doc.__unsaved) return true;
+		const workflow = frappe.workflow || {};
+		const field = workflow.get_state_fieldname ? workflow.get_state_fieldname(doctype) : null;
+		if (!field || !doc[field]) return false;
+		const flow = (workflow.workflows || {})[doctype];
+		const without_workflow = flow ? flow.override_status : true;
+		const avoid = ((workflow.avoid_status_override || {})[doctype] || []).includes(doc[field]);
+		return (!without_workflow || Boolean(show_workflow_state)) && !avoid;
+	};
 	if (!(frappe.get_indicator && frappe.get_indicator.mpsa_suite)) {
 		const frappe_indicator = frappe.get_indicator;
-		frappe.get_indicator = function (doc, doctype) {
-			const own = mpsa_suite_indicators[doctype || (doc && doc.doctype)];
-			return (own && own(doc)) || frappe_indicator.apply(this, arguments);
+		frappe.get_indicator = function (doc, doctype, show_workflow_state) {
+			const dt = doctype || (doc && doc.doctype);
+			const own = mpsa_suite_indicators[dt];
+			const mine =
+				own && doc && !mpsa_suite_indicators.frappes_own(doc, dt, show_workflow_state) ? own(doc) : null;
+			return mine || frappe_indicator.apply(this, arguments);
 		};
 		frappe.get_indicator.mpsa_suite = true;
 	}

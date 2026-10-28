@@ -135,6 +135,39 @@ def test_a_document_paid_in_part_shows_partly_paid_on_the_list(tmp_path, script,
                                   else {"paid_amount", "advance_amount"})
 
 
+DEFER = """
+// Frappe's own order: Not Saved first, then the workflow state where it is shown, then the states
+frappe.workflow = { workflows: %s, avoid_status_override: {}, get_state_fieldname: (dt) => (%s ? "workflow_state" : null) };
+frappe.get_indicator = (doc, doctype, show_workflow_state) => {
+    if (doc.__unsaved) return ["Not Saved", "orange"];
+    const flow = frappe.workflow.workflows[doctype || doc.doctype];
+    if (doc.workflow_state && (!(flow ? flow.override_status : true) || show_workflow_state)) return [doc.workflow_state, "gray"];
+    return [doc.status, "yellow"];
+};
+load(%s);
+const part = { doctype: %s, docstatus: 1, status: "Unpaid", total_amount_reimbursed: 20, grand_total: 90,
+               paid_amount: 20, advance_amount: 90, workflow_state: "Approved" };
+return [frappe.get_indicator(part)[0], frappe.get_indicator(Object.assign({ __unsaved: 1 }, part))[0],
+        frappe.get_indicator(part, part.doctype, true)[0]];
+"""
+
+
+@pytest.mark.parametrize("script, doctype", [("expense_claim_list.js", "Expense Claim"),
+                                             ("employee_advance_list.js", "Employee Advance")])
+@pytest.mark.parametrize("workflow, shown", [
+    (None, ["Partly Paid", "Not Saved", "Partly Paid"]),  # no workflow: no state to show
+    ({"override_status": 1}, ["Partly Paid", "Not Saved", "Approved"]),  # the Workflow State column shows it
+    ({"override_status": 0}, ["Approved", "Not Saved", "Approved"]),  # the workflow's state is the status
+])
+def test_partly_paid_never_hides_not_saved_or_the_workflow_state(tmp_path, script, doctype, workflow, shown):
+    """Fix check S12: an unsaved edit after submit still shows Not Saved; a workflow's state still shows where
+    Frappe shows it (show_workflow_state, or a Workflow that does not override the status)."""
+    flows = {doctype: workflow} if workflow else {}
+    out = run_desk(tmp_path, [], DEFER % (json.dumps(flows), json.dumps(bool(workflow)), json.dumps(str(JS / script)),
+                                          json.dumps(doctype)))
+    assert out == shown
+
+
 PROOF = """
 load(%s);
 frappe.model.can_email = (doctype, frm) => !(frm.doc.no_email);
@@ -189,31 +222,83 @@ def test_send_payment_proof_goes_to_one_party_only(tmp_path):
 
 BATCH = """
 load(%s);
-frappe.model.can_email = () => true;
-frappe.model.with_doctype = (dt, cb) => cb();
-frappe.model.with_doc = (dt, name) => Promise.resolve({ doctype: dt, name });
+const allow_request = %s;
+frappe.model.can_email = (dt, frm) => (frm ? true : dt === "B2C Disbursement Request" && allow_request);
 frappe.views = { CommunicationComposer: class { constructor(o) {
-    calls.push(["composer", o.doc.doctype, o.doc.name, o.recipients]);
-    this.dialog = { fields_dict: {}, set_value: () => {} }; } } };
+    calls.push(["composer", o.doc.doctype, o.doc.name, o.recipients, o.frm ? o.frm.doc.name : null]);
+    this.dialog = { fields_dict: { select_print_format: {} }, set_value: (f, v) => calls.push(["set", f, v]) }; } } };
 let answer = 0;
 frappe.xcall = (method, args) => { calls.push(["xcall", method.split(".").pop(), args]);
     return Promise.resolve(answer++ ? %s : %s); };
-const frm = mk_frm("B2C Payment Disbursement", { docstatus: 1, status: "Paid" });
+const frm = mk_frm("B2C Payment Disbursement", { docstatus: 1, status: "Paid", party_type: "Employee",
+    transaction_to_pay_against: "Expense Claim", references: [
+        { party: "EMP-1", reference_doctype: "Expense Claim" }, { party: "EMP-2", reference_doctype: "Expense Claim" }] });
 handlers["B2C Payment Disbursement"].refresh(frm);
+if (!frm.actions["Send Payment Proof"]) return { buttons: frm.buttons };
 frm.actions["Send Payment Proof"](); await tick(); await tick();
 const options = last_prompt.fields[0].options;
 last_prompt.cb({ row: "D-1-R2" }); await tick(); await tick();
-return { options, calls };
+const composed_on_batch = calls.some((c) => c[0] === "composer");
+// another request's form first: not the one asked for, nothing opens there
+const other = mk_frm("B2C Disbursement Request", { name: "REQ-1", docstatus: 1, status: "Paid", party_type: "Employee",
+                                                    reference_doctype: "Expense Claim" });
+handlers["B2C Disbursement Request"].refresh(other);
+const req = mk_frm("B2C Disbursement Request", { name: "REQ-2", docstatus: 1, status: "Paid", party_type: "Employee",
+                                                  reference_doctype: "Expense Claim" });
+handlers["B2C Disbursement Request"].refresh(req);
+handlers["B2C Disbursement Request"].refresh(req);  // refreshed again: the composer opened once
+return { buttons: frm.buttons, options, composed_on_batch, calls };
 """
 
 
+ROWS = {"rows": [{"row": "D-1-R1", "label": "#1 EMP-1 2547****0331 KES 1,500.00"},
+                 {"row": "D-1-R2", "label": "#2 EMP-2 2547****0332 KES 900.00"}]}
+ROW = {"doctype": "B2C Disbursement Request", "name": "REQ-2", "recipients": ["two@example.com"],
+       "subject": "Proof of payment: B2C Disbursement Request REQ-2", "print_format": "M-Pesa 80mm B2C Disbursement Request"}
+
+
+def batch(tmp_path, allow_request=True):
+    return run_desk(tmp_path, [], BATCH % (json.dumps(str(JS / "payment_proof.js")), json.dumps(allow_request),
+                                           json.dumps(ROW), json.dumps(ROWS)))
+
+
 def test_a_batch_of_several_parties_proves_one_chosen_rows_payout_to_its_party(tmp_path):
-    rows = {"rows": [{"row": "D-1-R1", "label": "#1 EMP-1 2547****0331 KES 1,500.00"},
-                     {"row": "D-1-R2", "label": "#2 EMP-2 2547****0332 KES 900.00"}]}
-    row = {"doctype": "B2C Disbursement Request", "name": "REQ-2", "recipients": ["two@example.com"],
-           "subject": "Proof of payment: B2C Disbursement Request REQ-2", "print_format": "M-Pesa 80mm X"}
-    out = run_desk(tmp_path, [], BATCH % (json.dumps(str(JS / "payment_proof.js")), json.dumps(row), json.dumps(rows)))
+    """Fix check S1: the row's proof is composed on that payout's own form, where Frappe's composer lists its
+    print formats and attaches the print (with no form it attaches nothing)."""
+    out = batch(tmp_path)
     assert [o["value"] for o in out["options"]] == ["D-1-R1", "D-1-R2"]
-    assert ["xcall", "proof_recipients", {"doctype": "B2C Payment Disbursement", "name": "DOC-1", "row": "D-1-R2"}] in \
-        out["calls"]
-    assert ["composer", "B2C Disbursement Request", "REQ-2", "two@example.com"] in out["calls"]  # that party alone
+    assert ["xcall", "proof_recipients", {"doctype": "B2C Payment Disbursement", "name": "DOC-1", "row": "D-1-R2"}] in         out["calls"]
+    assert not out["composed_on_batch"]
+    assert ["route", "Form", "B2C Disbursement Request", "REQ-2"] in out["calls"]
+    composed = [c for c in out["calls"] if c[0] == "composer"]
+    assert composed == [["composer", "B2C Disbursement Request", "REQ-2", "two@example.com", "REQ-2"]]  # with its form
+    assert ["set", "select_print_format", "M-Pesa 80mm B2C Disbursement Request"] in out["calls"]
+
+
+def test_a_batch_of_several_parties_is_not_offered_to_who_may_not_email_its_payouts(tmp_path):
+    """Fix check S6/S8: each row is proved on its B2C Disbursement Request; an Expense Approver, who may email the
+    batch but has no right on the requests, is not offered a button that cannot finish."""
+    assert batch(tmp_path, allow_request=False)["buttons"] == []
+
+
+SALARY = """
+load(%s);
+frappe.model.can_email = () => true;
+return %s.map(([doctype, doc]) => { const frm = mk_frm(doctype, doc); handlers[doctype].refresh(frm); return frm.buttons; });
+"""
+
+
+def test_an_employee_paid_for_no_claim_or_advance_is_a_salary_and_gets_no_proof(tmp_path):
+    """Fix check S7: as salary_access reads a salary (the server refuses it too)."""
+    paid = {"docstatus": 1, "status": "Paid"}
+    cases = [["Mpesa B2B Payment Request", dict(paid, employee="EMP-1")],
+             ["Mpesa B2B Payment Request", dict(paid, employee="EMP-1", payroll_entry="PAY-1")],
+             ["Mpesa B2B Payment Request", dict(paid, employee="EMP-1", expense_claim="HR-EXP-1")],
+             ["Mpesa B2B Payment Request", dict(paid, supplier="ACME")],
+             ["B2C Disbursement Request", dict(paid, party_type="Employee")],
+             ["B2C Disbursement Request", dict(paid, party_type="Employee", reference_doctype="Employee Advance")],
+             ["B2C Payment Disbursement", dict(paid, party_type="Employee")],
+             ["B2C Payment Disbursement", dict(paid, party_type="Employee", transaction_to_pay_against="Expense Claim",
+                                               references=[{"party": "EMP-1", "reference_doctype": "Expense Claim"}])]]
+    out = run_desk(tmp_path, [], SALARY % (json.dumps(str(JS / "payment_proof.js")), json.dumps(cases)))
+    assert [bool(b) for b in out] == [False, False, True, True, False, True, False, True]

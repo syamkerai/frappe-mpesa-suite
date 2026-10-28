@@ -190,6 +190,55 @@ none was disputed.
 - **R15:** switching maker-checker drops every user's cached boot, so the flag is read again on the
   next page load.
 
+**Fix-check fixes (after be943f5)**
+
+An independent check of be943f5 (docs/R41_FIX_CHECK.md) found 13 problems still standing, S1 to S13.
+All are fixed; for S2 one of its three cases is explained instead (below).
+- **S1: a batch row's proof went out with nothing attached.** Frappe's email composer lists print
+  formats and attaches a print only when it is opened from the document's own form (v15 and v16).
+  The per-row proof was composed with no form. Now the chosen row's B2C Disbursement Request form
+  opens and the composer opens on it, addressed to that row's party, with the suite's 80 mm proof
+  selected.
+- **S2: who may not clear a staff flag (R4, partly fixed before).**
+  - Every person the paid name matches is now on the flag, not only the first. Two employees may
+    share a name, and none of them is alerted or may clear it.
+  - At Clear Staff Flag the clearing manager's own names (their User's full name and each Employee
+    whose User ID they are) are compared with the names M-Pesa paid that destination under (the
+    flagged lines and names_paid_before). A match refuses the clear. This also covers a matched
+    employee who has no User ID.
+  - Not changed: old Blocked lines with an empty staff_involved. None can exist on a site.
+    staff_check (4b2f196) and staff_involved (be943f5) reach a site in the same migrate: both
+    commits are local on r4-1-fixes, never pushed or deployed. Every Blocked line is written by code
+    that records staff_involved, and the new name check applies to all lines anyway.
+- **S3: the send's gap check counted entries HRMS 16 does not.** HRMS 16 leaves out a Payment Entry
+  reference that carries an advance voucher (an Employee Advance's payment reconciled against the
+  claim). HRMS 15, 15.64.6 and the current version-15 branch included, counts it. booked_now now
+  follows the installed HRMS, read from HRMS's own get_total_reimbursed_amount. So the send, Repair
+  Reimbursed Total and check_paid_total agree on both versions.
+- **S4/S5: a request sent with Send via M-Pesa was never asked about.** Only the schedule's send
+  recorded send_started_on.
+  - send_b2b records it now too, in the submit's own transaction, right before the call.
+  - The status sweep asks by send_started_on, or by modified (which the answer set) for a request
+    sent before this.
+- **S6/S8: Send Payment Proof offered to who cannot finish it.** A batch of several parties is proved
+  row by row on its B2C Disbursement Requests. The button needs the email right on those too (an
+  Expense Approver has none), and the server refuses before it lists the rows.
+- **S7: an employee paid by B2B for no slip, claim or advance** (or a payroll's B2B) is a salary, as
+  salary_access reads it everywhere. It gets no emailed proof (server and desk).
+- **S9: staff_involved reached every reader of the claim.** It is now on level 2, which no role reads
+  on Expense Claim, so Frappe strips it from the form, the REST API and reports. claim_state no longer
+  returns it. A save keeps the stored value.
+- **S10: lock order.** The send's gap check now locks the claim's Payment Entry Reference and
+  Journal Entry Account rows before the claim row. That is R4's order and ERPNext/HRMS's order, so a
+  send and a desk entry of the same claim no longer deadlock.
+- **S11:** the Salary Slip advice lists the payroll's bank entries that its paid total counts. One
+  definition serves both: `slip_bank_payments`, used by `salary_slip_paid`.
+- **S12:** "Partly Paid" no longer hides Frappe's "Not Saved" or a workflow state. The wrapper leaves
+  the answer to Frappe for an unsaved form, and wherever Frappe shows the workflow state (a Workflow
+  that overrides the status, or a Workflow State column).
+- **S13:** switching maker-checker drops the cached boot again once the save commits. A page loaded
+  in between had cached the old flag.
+
 **Tests**
 - Unit: 2937 pass (`python -m pytest tests/unit -q`), 88 more than 2849. New: `test_r41_claims.py`,
   `test_r41_employee_docs.py`, `test_r41_print.py`, `test_r41_js.py`; updated where behaviour changed
@@ -214,6 +263,25 @@ none was disputed.
   - at 4b2f196: 515 tests on each version, all pass, none skipped;
   - on the tree of the review fixes: **517 tests on each version, all pass, none skipped** (510 at
     9a9c8ae plus 7 new).
+- Fix-check fixes (S1 to S13):
+  - Unit: **2951 pass**, 14 more than 2937. New tests in `test_r41_js.py` (the row's proof composed
+    on its own form, the email gate, salaries, Not Saved and workflow states), `test_r41_print.py`,
+    `test_r41_claims.py` and `test_money_out_flow.py`. The fake's filters now compare `>=`, `<=` and
+    list filters; they used to let every row through.
+  - Bench, three new tests in `money_out/test_claim_payees.py`:
+    - S2/S9/S4: a second employee of the paid name is on the flag and may not clear it, nor may a
+      manager whose own name was paid. An HR User reads the claim through `frappe.client.get` and
+      `claim_state` without the logins. A direct send records `send_started_on`.
+    - S3: a reference with an advance voucher is counted as the installed HRMS counts it (left out
+      on v16, kept on v15), and the send and HRMS agree.
+    - S4/S5/S7: the sweep asks about a directly sent request by its send time, or by modified when it
+      has none, and not after seven days. An employee B2B for no document is a salary.
+  - Bench, existing tests extended: S8 (an Expense Approver is refused the rows) and S11
+    (`slip_bank_payments` in `money_in/test_fix_payouts.py`).
+  - Bench, full `run-tests --app mpsa_suite` on fresh v15 and v16 sites, 2026-10-28: **520 tests on
+    each version, all pass, none skipped** (517 plus 3 new).
+  - Not checked in a browser: the row's proof opening on its request's form (S1) and the list pills
+    (S12). They are covered by the node desk tests only.
 
   The first race test was not run against the code before the fix; it is built so that the second
   booking starts while the first is held open, as on Trident.

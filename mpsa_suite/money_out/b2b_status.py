@@ -191,20 +191,19 @@ def still_asking(name: str) -> bool:
 def unsettled_due(limit: int = 20) -> list:
     """Sent requests whose Result never came (Initiated, Unknown), due a status query now: old
     enough in that state (UNSETTLED_AFTER_MINUTES), sent less than UNSETTLED_FOR_DAYS ago (by its
-    send_started_on: a request is drafted days before it may be sent), with an
+    send_started_on, which every send records: a request is drafted days before it may be sent;
+    one sent before that was recorded, by its modified, which its answer set), with an
     OriginatorConversationID to ask by, and not asked in the last UNSETTLED_EVERY_MINUTES."""
     now, names = now_datetime(), []
+    since = add_to_date(now, days=-UNSETTLED_FOR_DAYS)
     for status, minutes in UNSETTLED_AFTER_MINUTES.items():
-        names += frappe.get_all(
-            B2B_DOCTYPE,
-            filters={"docstatus": 1, "status": status, "result_code": ["is", "not set"],
-                     "mpesa_settings": ["is", "set"], "originator_conversation_id": ["is", "set"],
-                     "modified": ["<", add_to_date(now, minutes=-minutes)],
-                     "send_started_on": [">=", add_to_date(now, days=-UNSETTLED_FOR_DAYS)]},
-            pluck="name",
-            order_by="modified asc",
-            limit=limit,
-        )
+        due = [["docstatus", "=", 1], ["status", "=", status], ["result_code", "is", "not set"],
+               ["mpesa_settings", "is", "set"], ["originator_conversation_id", "is", "set"],
+               ["modified", "<", add_to_date(now, minutes=-minutes)]]
+        for sent in ([["send_started_on", ">=", since]],
+                     [["send_started_on", "is", "not set"], ["modified", ">=", since]]):
+            names += frappe.get_all(B2B_DOCTYPE, filters=due + sent, pluck="name", order_by="modified asc",
+                                    limit=limit)
     recent = add_to_date(now, minutes=-UNSETTLED_EVERY_MINUTES)
     return [n for n in names if not frappe.db.exists(QUERY_DOCTYPE, {"b2b_request": n, "creation": [">", recent]})][
         :limit]

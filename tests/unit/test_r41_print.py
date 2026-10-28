@@ -92,12 +92,20 @@ def test_what_was_paid_comes_from_the_entries_not_a_stored_total(env, pp, hrms_m
     slip = _dict(doctype="Salary Slip", name="SAL-1", rounded_total=30000, employee="EMP-1", payroll_entry="PAY-1")
     rows = [_dict(amount=30000, status="Failed")]  # the M-Pesa payout failed; the payroll's bank entry paid it
     assert pp.paid_and_left("Salary Slip", slip, rows) == (30000, 30000, 0)
+    # fix check S11: and the advice lists that bank entry, so its rows agree with its total
+    monkeypatch.setattr(disb, "slip_bank_payments", lambda employee, payroll_entry: [_dict(
+        name="ACC-JV-1", voucher_type="Bank Entry", cheque_no="CHQ-7", posting_date=datetime.date(2026, 10, 25),
+        amount=30000)] if (employee, payroll_entry) == ("EMP-1", "PAY-1") else [])
+    listed = pp.payment_rows("Salary Slip", "SAL-1", _dict(slip, employee_name="Mary Atieno"))
+    assert [(r.via, r.payout, r.receipt, r.amount, r.status, r.name) for r in listed] == [
+        ("Bank Entry", "ACC-JV-1", "CHQ-7", 30000, "Paid", "Mary Atieno")]
+    assert pp.payment_rows("Salary Slip", "SAL-1") == []  # no slip given: as before
 
 
 def test_a_salary_slips_amounts_are_hidden_from_who_may_not_see_salaries(env, pp, monkeypatch):
     salary_access = importlib.import_module("mpsa_suite.money_out.salary_access")
     monkeypatch.setattr(salary_access, "can_see_salaries", lambda user=None: False)
-    monkeypatch.setattr(pp, "payment_rows", lambda dt, dn: [_dict(amount=20000, status="Paid", payee=None)])
+    monkeypatch.setattr(pp, "payment_rows", lambda dt, dn, doc=None: [_dict(amount=20000, status="Paid", payee=None)])
     slip = fake_frappe.FakeDoc(env.frappe, "Salary Slip", {"name": "SAL-1", "employee": "EMP-1", "net_pay": 30000,
                                                            "docstatus": 1})
     advice = pp.mpsa_payment_advice(slip)
@@ -162,9 +170,13 @@ def test_a_batch_of_several_parties_is_proved_one_paid_row_to_its_own_party(env,
                  "reference_doctype": CLAIM},
                 {"name": "D-1-R3", "idx": 3, "party_type": "Employee", "party": "EMP-2", "partyb": "254711000333",
                  "allocated_amount": 100, "payment_status": "Failed", "b2c_disbursement_request": "REQ-3",
-                 "reference_doctype": CLAIM}])
+                 "reference_doctype": CLAIM}], transaction_to_pay_against=CLAIM)
     db.table(REQ).update({"REQ-2": {"name": "REQ-2", "party_type": "Employee", "party": "EMP-2",
                                     "reference_doctype": CLAIM}})
+    env.denied.add((REQ, "email"))  # fix check S8: each row is proved on its request, so who may not email those
+    with pytest.raises(env.frappe.PermissionError, match="you may not send email on a B2C Disbursement Request"):
+        pp.proof_recipients(B2C, "D-1")
+    env.denied.discard((REQ, "email"))
     choose = pp.proof_recipients(B2C, "D-1")
     assert choose == {"rows": [{"row": "D-1-R1", "label": "#1 EMP-1 2547****0331 KES 1,500.00"},
                                {"row": "D-1-R2", "label": "#2 EMP-2 2547****0332 KES 900.00"}]}  # paid rows only
@@ -185,6 +197,13 @@ def test_a_salary_payout_gets_no_payment_proof_by_email(env, pp):
                                                                   "salary_slip": "SAL-1"}
     with pytest.raises(env.frappe.ValidationError, match="A salary payout gets no payment proof by email"):
         pp.proof_recipients("Mpesa B2B Payment Request", "MB2B-1")
+    # fix check S7: an employee paid by B2B for no slip, claim or advance is a salary too (salary_access)
+    env.frappe.db.table("Mpesa B2B Payment Request")["MB2B-2"] = {"name": "MB2B-2", "employee": "EMP-1"}
+    with pytest.raises(env.frappe.ValidationError, match="A salary payout gets no payment proof by email"):
+        pp.proof_recipients("Mpesa B2B Payment Request", "MB2B-2")
+    env.frappe.db.table("Mpesa B2B Payment Request")["MB2B-3"] = {"name": "MB2B-3", "employee": "EMP-1",
+                                                                  "expense_claim": CLAIM + "-1"}
+    assert pp.proof_recipients("Mpesa B2B Payment Request", "MB2B-3")["name"] == "MB2B-3"
 
 
 def test_the_proofs_total_is_what_was_paid(env, pp, monkeypatch):

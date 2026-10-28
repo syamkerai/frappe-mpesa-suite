@@ -8,7 +8,7 @@ import json
 from unittest.mock import patch
 
 import frappe
-from frappe.utils import now_datetime, nowdate
+from frappe.utils import flt, now_datetime, nowdate
 
 from mpsa_suite.compat import IntegrationTestCase
 from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import (
@@ -202,6 +202,9 @@ class TestFixPayouts(IntegrationTestCase):
         self._journal(2000, emp, f"{pe}-2")
 
         self.assertEqual(disbursement.salary_slip_paid(slip, emp, pe), 38000)
+        # fix check S11: the slip's advice lists the payroll banking its paid total counts
+        self.assertEqual(sorted((e.voucher_type, flt(e.amount)) for e in disbursement.slip_bank_payments(emp, pe)),
+                         [("Bank Entry", 10000), ("Cash Entry", 1000)])
         self.assertEqual(disbursement.salary_slip_paid(slip), 27000)  # no Payroll Entry: B2C only
         self.assertEqual(disbursement.salary_slip_paid(f"_T-SS-{self.tag}-NONE"), 0)
 

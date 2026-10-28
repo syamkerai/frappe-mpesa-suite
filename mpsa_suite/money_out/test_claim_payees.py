@@ -819,3 +819,97 @@ class TestClaimPayees(IntegrationTestCase):
         self.assertEqual((proof["doctype"], proof["name"], proof["recipients"]),
                          (REQ, row.b2c_disbursement_request, ["_t_colleague@example.com"]))
         t.renders(REQ, row.b2c_disbursement_request, "_T PROOF TWO")  # that payout's own proof
+        # fix check S8: an Expense Approver may email the batch but has no right on its requests: refused
+        # before the rows are offered (the desk does not offer the button either)
+        with _as(APPROVER):
+            self.assertRaisesRegex(frappe.PermissionError, "you may not send email on a B2C Disbursement Request",
+                                   payment_print.proof_recipients, DISB, made["b2c"])
+
+    # ------------------------------------------------------------ fix check of be943f5
+    def test_a_staff_flag_is_about_everyone_of_the_paid_name_and_no_reader_gets_their_logins(self):
+        """S2: a second employee of the paid name (a manager) is on the flag and may not clear it, nor may a
+        manager whose own name M-Pesa paid. S9: the logins it names reach no reader of the claim. S4/S5: a
+        request sent with Send via M-Pesa records when it was sent."""
+        twin_user = _user("_t_cp_twin@example.com", "M-Pesa Manager", "HR User")
+        frappe.get_doc({"doctype": "Employee", "first_name": "_T Payee Claimant", "gender": "Female",
+                        "date_of_birth": "1990-01-01", "date_of_joining": "2020-01-01", "company": t.COMPANY,
+                        "status": "Active", "user_id": twin_user,
+                        # a manager who reads other employees' claims: no User Permission to their own only
+                        "create_user_permission": 0}).insert()  # shares the claimant's name
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835877",
+                              "amount": 2000}])
+        name = self._pay(claim.name)["b2b"][0]
+        self._send_b2b(name)
+        self.assertTrue(frappe.db.get_value(B2B, name, "send_started_on"))  # S4/S5
+        self._b2b_result(name, "835877 - _T PAYEE CLAIMANT")
+        line = next(iter(self._lines(claim.name).values()))
+        self.assertEqual(line.staff_check, "Blocked")
+        self.assertIn(twin_user, frappe.db.get_value(LINE, line.name, "staff_involved"))
+        with _as(PREPARER):  # an HR User reads the claim
+            loaded = frappe.client.get(CLAIM, claim.name)
+            self.assertFalse(any(row.get("staff_involved") for row in loaded[claim_payees.TABLE]))
+            state = claim_payees.claim_state(claim.name)
+            self.assertTrue(state["lines"] and not any("staff_involved" in row for row in state["lines"]))
+        with _as(twin_user):
+            self.assertRaisesRegex(frappe.PermissionError, "The flag is about you", claim_payees.clear_staff_flag,
+                                   claim.name, line.name, "_T not me")
+        _user(self.manager, "HR User")  # reads the claim
+        full_name = frappe.db.get_value("User", self.manager, "full_name")
+        frappe.db.set_value("User", self.manager, "full_name", "_T Payee Claimant")  # goes by the paid name
+        with _as(self.manager):
+            self.assertRaisesRegex(frappe.PermissionError, "The flag is about you", claim_payees.clear_staff_flag,
+                                   claim.name, line.name, "_T checked")
+        frappe.db.set_value("User", self.manager, "full_name", full_name)
+        with _as(self.manager):
+            claim_payees.clear_staff_flag(claim.name, line.name, "_T a shop the claimant does not own")
+        self.assertEqual(frappe.db.get_value(LINE, line.name, "staff_check"), "Cleared")
+
+    def test_the_sends_gap_check_counts_the_claims_entries_as_the_installed_hrms_does(self):
+        """S3: HRMS 16 leaves out a Payment Entry reference with an advance voucher (an Employee Advance's payment
+        reconciled against the claim); HRMS 15 counts it. The send's locking count agrees with HRMS either way,
+        so no gap is refused that Repair Reimbursed Total cannot find."""
+        import hrms
+        from hrms.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
+
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835878",
+                              "amount": 2000}])
+        name = self._pay(claim.name)["b2b"][0]
+        self._send_b2b(name)
+        self._b2b_result(name, "835878 - _T GAP SHELL")
+        ref = frappe.db.get_value("Payment Entry Reference", {"reference_name": claim.name, "docstatus": 1}, "name")
+        self.assertTrue(frappe.db.has_column("Payment Entry Reference", "advance_voucher_type"))
+        frappe.db.set_value("Payment Entry Reference", ref, "advance_voucher_type", "Employee Advance")
+        update_reimbursed_amount(frappe.get_doc(CLAIM, claim.name))  # HRMS's own count
+        doc = frappe.get_doc(CLAIM, claim.name)
+        v16 = int(hrms.__version__.split(".")[0]) >= 16
+        self.assertEqual(claim_payees.hrms_skips_advance_vouchers(), v16)
+        self.assertEqual(flt(doc.total_amount_reimbursed), 0 if v16 else 2000)
+        self.assertEqual(claim_payees.booked_now(claim.name), flt(doc.total_amount_reimbursed))
+        self.assertIsNone(claim_payees.reimbursed_gap(doc, for_update=True))
+        self.assertIsNone(claim_payees.reimbursed_gap(doc))
+
+    def test_a_request_sent_with_send_via_mpesa_whose_result_never_came_is_asked_about(self):
+        """S4/S5: by its send time, which a direct send records now; one sent before that, by its modified."""
+        from frappe.utils import add_to_date
+
+        from mpsa_suite.money_out import b2b_status, payment_print
+
+        claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835879",
+                              "amount": 2000}])
+        name = self._pay(claim.name)["b2b"][0]
+        self._send_b2b(name)  # Send via M-Pesa: the submit, then the call
+        values = frappe.db.get_value(B2B, name, ["status", "send_started_on"], as_dict=True)
+        self.assertEqual(values.status, "Initiated")
+        self.assertTrue(values.send_started_on)
+        earlier = add_to_date(now_datetime(), hours=-2)
+        frappe.db.set_value(B2B, name, {"send_started_on": earlier, "modified": earlier}, update_modified=False)
+        self.assertIn(name, b2b_status.unsettled_due(500))
+        frappe.db.set_value(B2B, name, {"send_started_on": None, "modified": earlier}, update_modified=False)
+        self.assertIn(name, b2b_status.unsettled_due(500))  # sent before the send time was recorded
+        old = add_to_date(now_datetime(), days=-8)
+        frappe.db.set_value(B2B, name, {"send_started_on": None, "modified": old}, update_modified=False)
+        self.assertNotIn(name, b2b_status.unsettled_due(500))  # over seven days: no longer asked about
+        # S7: an employee paid by B2B for no slip, claim or advance is a salary, as salary_access reads it
+        self.assertTrue(payment_print.is_salary_payout(B2B, frappe.get_doc({"doctype": B2B,
+                                                                           "employee": self.claimant})))
+        self.assertFalse(payment_print.is_salary_payout(B2B, frappe.get_doc(B2B, name)))  # the claim's merchant

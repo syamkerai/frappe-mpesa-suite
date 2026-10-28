@@ -1257,29 +1257,41 @@ def salary_slip_paid(
             )
         )
         b2b.pop(exclude_b2b, None)
-    bank = 0.0
-    if employee and payroll_entry:
-        # without the link fields an M-Pesa salary entry would count twice, which only refuses more
-        jea_meta = frappe.get_meta("Journal Entry Account")
-        not_b2c = " ".join(
-            f"AND COALESCE(jea.{field}, '') = ''"
-            for field in ("b2c_payment_disbursement", "mpesa_b2b_payment_request")
-            if jea_meta.has_field(field)
-        )
-        bank = frappe.db.sql(
-            f"""
-            SELECT COALESCE(SUM(jea.debit_in_account_currency), 0)
-            FROM `tabJournal Entry Account` jea
-            JOIN `tabJournal Entry` je ON je.name = jea.parent
-            WHERE je.docstatus = 1 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
-              AND jea.reference_type = 'Payroll Entry' AND jea.reference_name = %s
-              AND jea.party_type = 'Employee' AND jea.party = %s
-              AND jea.debit_in_account_currency > 0
-              {not_b2c}
-            """,
-            (payroll_entry, employee),
-        )[0][0]
+    bank = sum(flt(e.amount) for e in slip_bank_payments(employee, payroll_entry))
     return round(sum(flt(amount) for amount in b2c.values()) + sum(flt(a) for a in b2b.values()) + flt(bank), 2)
+
+
+def slip_bank_payments(employee: str | None, payroll_entry: str | None) -> list:
+    """The payroll banking of a slip (HRMS's Make Bank Entry): each submitted Bank / Cash Journal
+    Entry that pays ``employee`` against the slip's Payroll Entry and was not made by the B2C or B2B
+    flow, as _dict(name, voucher_type, cheque_no, posting_date, amount), what it debits to the
+    employee. salary_slip_paid counts them; the slip's payment advice lists them."""
+    if not employee or not payroll_entry:
+        return []
+    # without the link fields an M-Pesa salary entry would count twice, which only refuses more
+    jea_meta = frappe.get_meta("Journal Entry Account")
+    not_b2c = " ".join(
+        f"AND COALESCE(jea.{field}, '') = ''"
+        for field in ("b2c_payment_disbursement", "mpesa_b2b_payment_request")
+        if jea_meta.has_field(field)
+    )
+    return frappe.db.sql(
+        f"""
+        SELECT je.name, je.voucher_type, je.cheque_no, je.posting_date,
+               SUM(jea.debit_in_account_currency) AS amount
+        FROM `tabJournal Entry Account` jea
+        JOIN `tabJournal Entry` je ON je.name = jea.parent
+        WHERE je.docstatus = 1 AND je.voucher_type IN ('Bank Entry', 'Cash Entry')
+          AND jea.reference_type = 'Payroll Entry' AND jea.reference_name = %s
+          AND jea.party_type = 'Employee' AND jea.party = %s
+          AND jea.debit_in_account_currency > 0
+          {not_b2c}
+        GROUP BY je.name, je.voucher_type, je.cheque_no, je.posting_date
+        ORDER BY je.posting_date, je.name
+        """,
+        (payroll_entry, employee),
+        as_dict=True,
+    )
 
 
 def open_payouts(doctype: str, name: str, exclude_parent: str | None = None, exclude_requests=None) -> list:

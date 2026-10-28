@@ -40,8 +40,15 @@ class _dict(dict):
         self[key] = value
 
 
+def _conditions(filters):
+    """(field, condition) pairs of a dict of filters or a list of [field, op, value] lists."""
+    if isinstance(filters, dict):
+        return filters.items()
+    return [(f[-3], [f[-2], f[-1]]) if f[-2] != "=" else (f[-3], f[-1]) for f in filters]
+
+
 def _match(row, filters):
-    for key, cond in (filters or {}).items():
+    for key, cond in _conditions(filters or {}):
         value = row.get(key)
         if isinstance(cond, (list, tuple)):
             op, arg = cond[0], cond[1]
@@ -53,6 +60,15 @@ def _match(row, filters):
                 return False
             if op == ">" and not (value is not None and value > arg):
                 return False
+            if op in (">=", "<=") and key not in row:
+                continue  # a row a test wrote without that column: as before these were compared
+            if op in (">=", "<=") and value is None:
+                return False  # NULL compares false, as in the database
+            if op in (">=", "<="):
+                # a date, a datetime or its text: compared as the database compares them
+                left, right = (value, arg) if type(value) is type(arg) else (str(value), str(arg))
+                if not (left >= right if op == ">=" else left <= right):
+                    return False
             if op == "is" and arg == "set" and value in (None, ""):
                 return False
             if op == "is" and arg == "not set" and value not in (None, ""):
@@ -252,7 +268,8 @@ def build():
     utils.getdate = lambda v=None: (v.date() if isinstance(v, datetime.datetime) else v) or datetime.date.today()
     utils.nowdate = lambda: datetime.date.today().isoformat()
     utils.now_datetime = lambda: datetime.datetime(2026, 10, 18, 12, 0, 0)
-    utils.add_to_date = lambda dt, minutes=0, hours=0, **kw: dt + datetime.timedelta(minutes=minutes, hours=hours)
+    utils.add_to_date = lambda dt, minutes=0, hours=0, days=0, **kw: dt + datetime.timedelta(
+        days=days, minutes=minutes, hours=hours)
     utils.add_days = lambda date, days: (datetime.date.fromisoformat(str(date)[:10]) + datetime.timedelta(days=days))
     utils.get_url = lambda *a, **kw: "https://erp.example.com"
     utils.get_datetime = lambda v: v

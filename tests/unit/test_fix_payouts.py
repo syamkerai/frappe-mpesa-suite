@@ -102,7 +102,7 @@ def _fake_sql(frappe):
         if "FROM `tabJournal Entry Account` jea" in q:
             payroll_entry, employee = values
             skip_b2c = "b2c_payment_disbursement" in q
-            total = 0.0
+            totals = {}  # slip_bank_payments: each entry with what it debits to the employee
             for row in db.table("Journal Entry Account").values():
                 je = db.table("Journal Entry").get(row["parent"]) or {}
                 if (je.get("docstatus") == 1 and je.get("voucher_type") in ("Bank Entry", "Cash Entry")
@@ -111,8 +111,9 @@ def _fake_sql(frappe):
                         and row.get("party_type") == "Employee" and row.get("party") == employee
                         and flt(row.get("debit_in_account_currency")) > 0
                         and not (skip_b2c and row.get("b2c_payment_disbursement"))):
-                    total += flt(row.get("debit_in_account_currency"))
-            return [[total]]
+                    totals[row["parent"]] = totals.get(row["parent"], 0.0) + flt(row.get("debit_in_account_currency"))
+            return [fake_frappe._dict(name=n, voucher_type="Bank Entry", cheque_no=None, posting_date=None, amount=a)
+                    for n, a in sorted(totals.items())]
         if "FROM `tabB2C Payment Disbursement Reference`" in q:
             parent, parenttype = values
             return [fake_frappe._dict(r) for r in db.table(REF).values()

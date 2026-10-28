@@ -35,7 +35,7 @@ COLUMNS = {
          "unallocated_amount", "reference_no", "posting_date", "creation"),
     PER: ("name", "parent", "idx", "reference_doctype", "reference_name", "allocated_amount",
           "advance_voucher_type", "advance_voucher_no", "payment_term", "docstatus"),
-    JE: ("name", "docstatus", "cheque_no", "creation", "voucher_type"),
+    JE: ("name", "docstatus", "cheque_no", "creation", "voucher_type", "posting_date"),
     JEA: ("name", "parent", "idx", "account", "party_type", "party", "reference_type", "reference_name",
           "debit_in_account_currency", "credit_in_account_currency", "b2c_payment_disbursement",
           "mpesa_b2b_payment_request", "docstatus"),

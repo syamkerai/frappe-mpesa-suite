@@ -54,12 +54,13 @@ class MPesaSuiteSettings(Document):
 
     def refresh_boot_flags(self):
         """The desk's maker_checker flag (boot.py) says who sends what is prepared: its cached boot
-        is dropped for every user when the switch changes, so the next page load reads it again."""
+        is dropped for every user when the switch changes, so the next page load reads it again.
+        Now and once more after the save commits: a page loaded meanwhile read the old settings and
+        cached them again (Frappe clears the settings' own cache after commit too)."""
         before = self.get_doc_before_save()
         if before and cint(before.get("schedule_maker_checker")) != cint(self.get("schedule_maker_checker")):
-            from ....compat import get_cache
-
-            get_cache().delete_value("bootinfo")
+            drop_boot()
+            frappe.db.after_commit.add(drop_boot)
 
     def alert_safety_changes(self):
         """A comment on the settings and an alert to the Notify Role for each WATCHED change: the
@@ -101,6 +102,13 @@ class MPesaSuiteSettings(Document):
         self.last_rejected_callback_on = None
         self.last_rejected_callback_reason = None
         self.save()
+
+
+def drop_boot() -> None:
+    """Every user's cached boot (Frappe's "bootinfo"): the next page load builds it again."""
+    from ....compat import get_cache
+
+    get_cache().delete_value("bootinfo")
 
 
 def _shown(df, value) -> str:

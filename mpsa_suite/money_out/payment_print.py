@@ -263,9 +263,10 @@ def _entries(doctype: str, name: str) -> list:
     return entries
 
 
-def payment_rows(doctype: str, name: str) -> list:
+def payment_rows(doctype: str, name: str, doc=None) -> list:
     """Every payment of the document, oldest first: its M-Pesa payouts (B2B and B2C, the ones that
-    failed too) and the Payment Entries allocated to it that carry no listed payout's receipt."""
+    failed too), the Payment Entries allocated to it that carry no listed payout's receipt and, for a
+    Salary Slip (``doc``), its payroll's bank entries, which its paid total counts (salary_slip_paid)."""
     field = owed.B2B_DOC_FIELDS.get(doctype) or ("salary_slip" if doctype == SLIP else None)
     rows = [_b2b_row(r) for r in (_b2b_requests(field, name) if field else [])]
     rows += [_b2c_row(r) for r in _b2c_requests(doctype, name)]
@@ -273,6 +274,16 @@ def payment_rows(doctype: str, name: str) -> list:
         rows.append(frappe._dict(
             via=e.mode_of_payment or PE, payout=e.name, receipt=cstr(e.reference_no).strip(), amount=e.allocated,
             status="Paid", when=e.posting_date, name=e.party_name or "", number="", payee=None, note=None))
+    if doctype == SLIP and doc is not None:
+        from ..mpsa_suite.doctype.b2c_payment_disbursement.b2c_payment_disbursement import (
+            slip_bank_payments,
+        )
+
+        for e in slip_bank_payments(doc.get("employee"), doc.get("payroll_entry")):
+            rows.append(frappe._dict(
+                via=e.voucher_type, payout=e.name, receipt=cstr(e.cheque_no).strip(), amount=flt(e.amount, 2),
+                status="Paid", when=e.posting_date, name=doc.get("employee_name") or doc.get("employee") or "",
+                number="", payee=None, note=None))
     rows = sorted(rows, key=lambda r: as_datetime(r.when) or datetime.datetime.min)
     for r in rows:
         r.when_text = when_text(r.when)
@@ -381,7 +392,7 @@ def mpsa_payment_advice(doc) -> frappe._dict:
     doctype = doc.doctype
     if doctype not in DOCUMENTS:
         frappe.throw(f"{doctype} has no M-Pesa payment advice.")
-    rows = payment_rows(doctype, doc.name)
+    rows = payment_rows(doctype, doc.name, doc)
     hidden = _salary_hidden(doctype)
     total, paid, left = paid_and_left(doctype, doc, rows)
     label, party, party_id = _party(doctype, doc)
@@ -521,20 +532,25 @@ def proof_recipients(doctype: str, name: str, row: str | None = None) -> dict:
       all pay one party): its own proof, to that party's email.
     - A B2C batch of several parties: never the batch's proof, which lists every party's payout.
       ``{"rows": [...]}``, its paid rows to choose from; called again with ``row``, that row's
-      payout (its B2C Disbursement Request) and that payout's proof, to that row's party only.
-    - Never a salary payout: the employee's Salary Slip is its record, and a proof would put net
-      pay into an email.
+      payout (its B2C Disbursement Request) and that payout's proof, to that row's party only. The
+      desk opens that request's own form to compose it (Frappe attaches a print only there), so
+      the rows are offered only to who may send email on B2C Disbursement Requests.
+    - Never a salary payout (as salary_access reads one: a Salary Slip, or an employee paid for no
+      claim or advance): the payslip is its record, and a proof would put net pay into an email.
     For who may read the payout and send email on what is attached (Frappe's email right)."""
     if doctype not in PAYOUTS:
         frappe.throw(f"{doctype} has no M-Pesa proof of payment.")
     frappe.has_permission(doctype, "read", doc=name, throw=True)
     doc = frappe.get_doc(doctype, name)
     if is_salary_payout(doctype, doc):
-        frappe.throw("A salary payout gets no payment proof by email: the employee's Salary Slip is its record.")
+        frappe.throw("A salary payout gets no payment proof by email: it would put the employee's pay into an email.")
     target = doc
     if doctype == B2C:
         rows = doc.get("references") or []
         if len({_row_party(doc, r) for r in rows}) > 1:
+            if not frappe.has_permission(B2C_REQUEST, "email"):
+                frappe.throw(f"Each party of {name} is sent the proof of their own payout, on its {B2C_REQUEST}: "
+                             f"you may not send email on a {B2C_REQUEST}.", frappe.PermissionError)
             paid = [r for r in rows if r.get("payment_status") == "Paid"
                     and cstr(r.get("b2c_disbursement_request")).strip()]
             if not row:
@@ -552,15 +568,17 @@ def proof_recipients(doctype: str, name: str, row: str | None = None) -> dict:
 
 
 def is_salary_payout(doctype: str, doc) -> bool:
-    """A payout of a salary: a B2B request for a Salary Slip, a B2C payout or batch row paying one, or
-    a Payment Entry allocated to one."""
-    if doctype == B2B:
-        return bool(cstr(doc.get("salary_slip")).strip())
-    if doctype == B2C_REQUEST:
-        return doc.get("reference_doctype") == SLIP
-    if doctype == B2C:
-        return doc.get("transaction_to_pay_against") == SLIP or any(
-            r.get("reference_doctype") == SLIP for r in doc.get("references") or [])
+    """A payout of a salary as the suite reads one everywhere (salary_access.has_salaries): a B2B
+    request to an employee for no claim or advance (a Salary Slip, a payroll's B2B, a payment with no
+    document), a B2C payout or batch paying one, or a Payment Entry allocated to a Salary Slip."""
+    from .salary_access import B2B_DOCUMENT_FIELDS, has_salaries
+
+    if doctype in (B2B, B2C, B2C_REQUEST):
+        fields = ("employee", "salary_slip", "party_type", "reference_doctype", "transaction_to_pay_against",
+                  "references", *B2B_DOCUMENT_FIELDS)
+        values = frappe._dict({f: doc.get(f) for f in fields}, doctype=doctype)
+        return has_salaries(values) or bool(cstr(values.get("salary_slip")).strip()) or (
+            doctype == B2C and values.get("transaction_to_pay_against") == SLIP)
     return any(r.get("reference_doctype") == SLIP for r in doc.get("references") or [])
 
 

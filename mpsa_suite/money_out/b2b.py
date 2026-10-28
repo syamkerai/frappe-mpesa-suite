@@ -65,6 +65,12 @@ def send_b2b(name: str) -> None:
         frappe.throw(f"{doc.name} is paid from payment schedule {doc.payment_schedule}: it is sent by the schedule.")
     check_ready_to_send(doc)
     settings, payload = _payload(doc)
+    # When it was sent (b2b_status asks about a Result that never came, by this): in the submit's own
+    # transaction, so a send that fails before the call leaves none. A request it is set on is never
+    # Not Initiated once committed (apply_ack sets the answer), or it is read as interrupted, as it may be.
+    marker = now_datetime()
+    frappe.db.set_value(B2B_DOCTYPE, doc.name, "send_started_on", marker, update_modified=False)
+    doc.send_started_on = marker
     # Nothing below may raise: the request has (maybe) left the building.
     data, error = post(
         settings, daraja.B2B_ENDPOINT, payload, doctype=B2B_DOCTYPE, name=doc.name, description="Mpesa B2B"

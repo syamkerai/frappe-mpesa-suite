@@ -391,13 +391,24 @@ def test_a_b2b_request_whose_result_never_came_is_asked_about(env, monkeypatch):
                    "creation": datetime.datetime(2026, 9, 1), "send_started_on": old},
         "MB2B-2": {"name": "MB2B-2", "docstatus": 1, "status": "Paid", "result_code": "0", "mpesa_settings": "S",
                    "originator_conversation_id": "OC-2", "modified": old, "creation": old, "send_started_on": old}})
+    sent = {"docstatus": 1, "status": "Initiated", "result_code": None, "mpesa_settings": "S",
+            "creation": datetime.datetime(2026, 9, 1)}
+    env.frappe.db.table(B2B).update({
+        # fix check S4/S5: sent before every send recorded its time (none on it): by its modified, which
+        # its answer set
+        "MB2B-3": dict(sent, name="MB2B-3", originator_conversation_id="OC-3", modified=old, send_started_on=None),
+        # sent nine days ago: no longer asked about, either way
+        "MB2B-4": dict(sent, name="MB2B-4", originator_conversation_id="OC-4", modified=old,
+                       send_started_on=datetime.datetime(2026, 10, 9, 9, 0)),
+        "MB2B-5": dict(sent, name="MB2B-5", originator_conversation_id="OC-5", send_started_on=None,
+                       modified=datetime.datetime(2026, 10, 9, 9, 0))})
     filters = []
     real_get_all = env.frappe.get_all
     env.frappe.get_all = lambda doctype, *a, **kw: filters.append(kw.get("filters")) or real_get_all(doctype, *a, **kw)
     status.sweep()
-    assert asked == ["MB2B-1"]
-    assert all("creation" not in f and "send_started_on" in f for f in filters if f and f.get("status") in (
-        "Initiated", "Unknown"))
+    assert sorted(asked) == ["MB2B-1", "MB2B-3"]
+    unsettled = [f for f in filters if isinstance(f, list)]
+    assert unsettled and not any(c[0] == "creation" for f in unsettled for c in f)
     env.frappe.get_all = real_get_all
 
 
@@ -442,6 +453,65 @@ def test_a_refused_sender_is_kept_on_the_flag_and_may_not_clear_it(staff):
         staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "my own till")
 
 
+# ---------------------------------------------------------------- fix check of be943f5: S2, S9
+def test_every_employee_of_the_paid_name_is_on_the_flag(staff):
+    """S2: two employees share the name M-Pesa paid; the second, an M-Pesa Manager, is involved too: not
+    alerted, and may not clear it."""
+    staff.meta_fields["Employee"] = {"cell_number", "bank_ac_no", "user_id"}
+    staff.frappe.db.table("Employee")["EMP-3"] = {"name": "EMP-3", "employee_name": "John Kamau",
+                                                  "user_id": "manager@example.com"}
+    row = paid_till(staff, "835811 - JOHN KAMAU")
+    assert row["staff_check"] == "Blocked" and "manager@example.com" in row["staff_involved"]
+    alert = next(a for a in staff.staff_alerts if "Staff or self payment" in a[1])
+    assert "manager@example.com" in alert[2]["exclude"]
+    staff.frappe.session.user, staff.frappe.user_roles = "manager@example.com", {"M-Pesa Manager"}
+    with pytest.raises(staff.frappe.PermissionError, match="The flag is about you"):
+        staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "checked")
+
+
+@pytest.mark.parametrize("receiver_name, before", [
+    ("835811 - JOHN KAMAU STORES", None),  # flagged after the payout, on the name it paid
+    (None, "835811 - JOHN KAMAU SHOP"),  # flagged at a refused send, on a name it was paid under before
+])
+def test_a_manager_whose_own_name_was_paid_may_not_clear_it_with_no_user_id(staff, receiver_name, before):
+    """S2: the employee John Kamau has no User ID; the M-Pesa Manager clearing it goes by that name (their
+    User's full name): the flag is about them."""
+    if before:
+        request(staff, payee("LN-0", shortcode="835811"), name="MB2B-0", docstatus=1, status="Paid",
+                receiver_public_name=before)
+    line = payee(shortcode="835811")
+    claim(staff, [line])
+    stored(staff).update(staff_check="Blocked", staff_note="Staff or self payment: x", staff_involved=PAYER,
+                         receiver_name=receiver_name)
+    staff.frappe.db.table("User")["manager@example.com"]["full_name"] = "John Kamau"
+    staff.frappe.session.user, staff.frappe.user_roles = "manager@example.com", {"M-Pesa Manager"}
+    with pytest.raises(staff.frappe.PermissionError, match="The flag is about you"):
+        staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "checked")
+    staff.frappe.db.table("User")["manager@example.com"]["full_name"] = "Mike Manager"  # another person
+    assert staff.cp.clear_staff_flag("HR-EXP-1", "LN-1", "a shop in Thika")["cleared"] == 1
+
+
+def test_who_a_staff_flag_is_about_is_not_given_to_the_claims_readers(staff, hrms_modules):
+    """S9: the logins on staff_involved name a colleague; the form's state leaves them out and the field is
+    on a level no role of the claim reads."""
+    import json
+    import pathlib
+
+    staff.meta_fields["Employee"] = {"cell_number", "bank_ac_no", "user_id"}
+    staff.frappe.db.table("Employee")["EMP-2"]["user_id"] = "jane.doe@example.com"
+    paid_till(staff, "835811 - JOHN KAMAU STORES")
+    assert "jane.doe@example.com" in stored(staff)["staff_involved"]
+    staff.frappe.get_doc = lambda doctype, name=None, **kw: fake_frappe.FakeDoc(staff.frappe, doctype, _dict(
+        staff.frappe.db.table(doctype)[name], mpesa_payees=[_dict(r) for r in staff.frappe.db.table(LINE).values()
+                                                            if r.parent == name]))
+    hrms_stub(staff, booked=0)
+    line = staff.cp.claim_state("HR-EXP-1")["lines"][0]
+    assert line["staff_check"] == "Blocked" and "staff_involved" not in line
+    path = pathlib.Path(staff.cp.__file__).parent.parent / "mpsa_suite" / "doctype" / "m_pesa_claim_payee" /         "m_pesa_claim_payee.json"
+    field = next(f for f in json.loads(path.read_text(encoding="utf-8"))["fields"] if f["fieldname"] == "staff_involved")
+    assert field["permlevel"] == 2  # HRMS's Expense Claim has levels 0 and 1 only (the bench test loads the form)
+
+
 def test_the_gap_guard_reads_both_sides_as_they_are_now_under_the_lock(env, monkeypatch, hrms_modules):
     """R5: under the claim's lock the stored total and the entries are both read with locking reads;
     a snapshot sum against a committed total refused sends while another payout of the claim was booked."""
@@ -461,6 +531,40 @@ def test_the_gap_guard_reads_both_sides_as_they_are_now_under_the_lock(env, monk
     assert any(e[0] == "sql" and e[2] for e in env.log)  # locking reads
     env.frappe.db.table(CLAIM)["HR-EXP-1"]["total_amount_reimbursed"] = 70  # a real gap still shows
     assert env.cp.reimbursed_gap(doc, for_update=True) == (70, 90)
+    # fix check S10: the entries' rows first, the claim's row last, as ERPNext and HRMS take them (R4)
+    env.log.clear()
+    env.cp.reimbursed_gap(doc, for_update=True)
+    order = [e for e in env.log if (e[0] == "sql" and e[2]) or (e[0] == "row" and e[1] == CLAIM and e[3])]
+    assert [e[1] for e in order] == [("Journal Entry Account",), ("Payment Entry Reference",), CLAIM]
+
+
+@pytest.mark.parametrize("hrms_16", [True, False])
+def test_the_gap_guard_counts_the_claims_entries_as_the_installed_hrms_does(env, monkeypatch, hrms_modules, hrms_16):
+    """Fix check S3: HRMS 16 leaves out a Payment Entry reference that carries an advance voucher (an Employee
+    Advance's payment reconciled against the claim); HRMS 15 (15.64.6 too) counts it. The send's count follows
+    the installed HRMS, or it would refuse a gap that Repair Reimbursed Total never finds."""
+    for doctype, column in (("Payment Entry Reference", "docstatus"), ("Journal Entry Account", "docstatus")):
+        monkeypatch.setitem(b2b_fixture.COLUMNS, doctype, tuple(dict.fromkeys(b2b_fixture.COLUMNS[doctype] + (column,))))
+    env.frappe.db.columns = env.frappe.db.columns | {("Payment Entry Reference", "advance_voucher_type")}
+    claim(env, [], total_amount_reimbursed=2000 if hrms_16 else 5000)
+    env.frappe.db.table("Payment Entry Reference").update({
+        "PER-1": {"name": "PER-1", "parent": "PE-1", "reference_name": "HR-EXP-1", "allocated_amount": 2000,
+                  "docstatus": 1},
+        "PER-2": {"name": "PER-2", "parent": "PE-2", "reference_name": "HR-EXP-1", "allocated_amount": 3000,
+                  "docstatus": 1, "advance_voucher_type": "Employee Advance"}})
+    module = hrms_stub(env, booked=2000 if hrms_16 else 5000)
+    if hrms_16:
+        def get_total_reimbursed_amount(doc):  # as HRMS 16 filters: {"advance_voucher_type": None}
+            return 2000
+
+        module.get_total_reimbursed_amount = get_total_reimbursed_amount
+    monkeypatch.setattr(env.cp, "_SKIPS_ADVANCE_VOUCHERS", None)
+    assert env.cp.hrms_skips_advance_vouchers() is hrms_16
+    doc = fake_frappe._dict(name="HR-EXP-1", total_amount_reimbursed=2000 if hrms_16 else 5000, is_paid=0,
+                            grand_total=9000)
+    assert env.cp.booked_now("HR-EXP-1") == (2000 if hrms_16 else 5000)
+    assert env.cp.reimbursed_gap(doc, for_update=True) is None  # the send goes ahead
+    assert env.cp.reimbursed_gap(doc) is None  # and Repair finds nothing either: both agree
 
 
 def test_repair_takes_the_claims_lock_first(env, hrms_modules):
@@ -487,7 +591,13 @@ def test_switching_maker_checker_drops_every_users_cached_boot(env, monkeypatch)
         return types.SimpleNamespace(get=lambda f: {"schedule_maker_checker": value}.get(f),
                                      get_doc_before_save=lambda: before)
 
+    after_commit = []
+    monkeypatch.setattr(env.frappe.db, "after_commit", types.SimpleNamespace(add=after_commit.append), raising=False)
     settings_module.MPesaSuiteSettings.refresh_boot_flags(saved(1))
-    assert dropped == []
+    assert dropped == [] and after_commit == []
     settings_module.MPesaSuiteSettings.refresh_boot_flags(saved(0))
     assert dropped == ["bootinfo"]
+    # fix check S13: once more after the save commits (a page loaded meanwhile cached the old flag)
+    assert after_commit == [settings_module.drop_boot]
+    after_commit[0]()
+    assert dropped == ["bootinfo", "bootinfo"]
