@@ -21,12 +21,12 @@ class TestPrintRetries(IntegrationTestCase):
                              document="Expense Claim HR-EXP-1", note="Insufficient balance",
                              paid_again="REQ-4 · UJS4", hidden=False)
         proof = frappe._dict(title="M-Pesa Payment Proof", doctype="B2C Payment Disbursement", name="D-1",
-                             blocks=[block], paid_again_note="1 failed payout was paid again later (D-2): not listed.",
+                             blocks=[block], paid_again_note="1 failed row was paid again later (D-2): not listed.",
                              prepared_by="", sent_by="", total=0.0, company="", letter_head=frappe._dict(),
                              printed="29-10-2026 21:00")
         html = frappe.render_template(template, {"doc": frappe._dict(docstatus=1, status="Partially Paid"),
                                                  "mpsa_payout_proof": lambda doc: proof})
-        for text in ("Paid Again", "REQ-4 · UJS4", "1 failed payout was paid again later (D-2): not listed."):
+        for text in ("Paid Again", "REQ-4 · UJS4", "1 failed row was paid again later (D-2): not listed."):
             self.assertIn(text, html)
         block.paid_again, proof.paid_again_note = "", ""
         html = frappe.render_template(template, {"doc": frappe._dict(docstatus=1, status="Failed"),

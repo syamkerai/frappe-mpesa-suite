@@ -118,22 +118,36 @@ def without_covered(entries, receipts) -> list:
     return [e for e in entries if not receipt_key(e.get("reference_no")) or receipt_key(e.get("reference_no")) not in keys]
 
 
-def paid_again(rows) -> dict:
-    """{a failed M-Pesa payout: the first later M-Pesa payout of the same thing that was paid} (pure).
-    The same thing: the same payee line (its claim_payee), else the document's own party. A retry
-    pays it on a new payout (Retry Failed Payees, Pay again); a failure nothing paid since is not in
-    it, nor one paid before it (a later part payment that failed is still owed)."""
-    def key(r):
-        return (r.get("payee") or None, None if r.get("payee") else (r.get("party") or None))
+def _retry_key(r) -> tuple:
+    """What a payout pays, as a retry pays it again: its payee line (claim_payee), else its payment
+    schedule line (Plan Again keeps the line), else the document's own party for the same amount (a
+    different part payment is not its retry)."""
+    if r.get("payee"):
+        return ("payee", r.payee)
+    if r.get("line"):
+        return ("line", r.line)
+    return ("party", r.get("party") or None, flt(r.get("amount"), 2))
 
-    paid = [r for r in rows if r.status == "Paid" and r.get("created")]
+
+def paid_again(rows) -> dict:
+    """{a failed M-Pesa payout: the M-Pesa payout that paid the same thing after it} (pure). The
+    same thing: _retry_key. After it: paid (completed) after the failure was made, so an older try
+    retried in place and paid counts too, and a failure made after a paid part is still owed. Never
+    a payout of the failure's own B2C batch: its rows were approved together, a part each, and a
+    retry is a new batch (Retry Failed Payees, Plan Again, Pay again) or the same request."""
+    def done(p):
+        return as_datetime(p.get("when") or p.get("created"))
+
+    paid = [p for p in rows if p.status == "Paid" and done(p)]
     out = {}
     for r in rows:
         if r.status != "Failed" or not r.get("created"):
             continue
-        later = [p for p in paid if key(p) == key(r) and as_datetime(p.created) > as_datetime(r.created)]
+        made = as_datetime(r.created)
+        later = [p for p in paid if p.payout != r.payout and _retry_key(p) == _retry_key(r) and done(p) > made
+                 and not (r.get("batch") and p.get("batch") == r.batch)]
         if later:
-            out[r.payout] = min(later, key=lambda p: as_datetime(p.created))
+            out[r.payout] = min(later, key=done)
     return out
 
 
@@ -213,7 +227,8 @@ def _b2b_requests(field: str, name: str) -> list:
         return []
     fields = ["name", "docstatus", "status", "transaction_id", "receiver_public_name", "receiver_shortcode",
               "account_reference", "command_id", "amount", "trans_completed_time", "error_message", "result_desc",
-              "supplier", "employee", "creation"] + (["claim_payee"] if frappe.db.has_column(B2B, "claim_payee") else [])
+              "supplier", "employee", "creation"] + [f for f in ("claim_payee", "schedule_line")
+                                                     if frappe.db.has_column(B2B, f)]
     rows = frappe.get_all(B2B, filters={field: name, "docstatus": ["in", [1, 2]]}, fields=fields,
                           order_by="creation asc")
     return [r for r in rows if r.docstatus == 1 or r.status == "Paid"]
@@ -228,12 +243,15 @@ def _b2c_requests(doctype: str, name: str) -> list:
                                   "b2c_payment_disbursement_reference", "creation"],
                           order_by="creation asc")
     rows = [r for r in rows if r.docstatus == 1 or r.status == "Paid"]
-    if rows and frappe.db.has_column(B2C_ROW, "claim_payee"):
+    # what the payout's disbursement row pays: its payee line, its payment schedule line
+    extra = [f for f in ("claim_payee", "mpesa_schedule_line") if frappe.db.has_column(B2C_ROW, f)]
+    if rows and extra:
         refs = [r.b2c_payment_disbursement_reference for r in rows if r.b2c_payment_disbursement_reference]
-        payees = {r.name: r.claim_payee for r in frappe.get_all(B2C_ROW, filters={"name": ["in", refs]},
-                                                                fields=["name", "claim_payee"])} if refs else {}
+        found = {x.name: x for x in frappe.get_all(B2C_ROW, filters={"name": ["in", refs]},
+                                                   fields=["name", *extra])} if refs else {}
         for r in rows:
-            r.claim_payee = payees.get(r.b2c_payment_disbursement_reference)
+            x = found.get(r.b2c_payment_disbursement_reference) or {}
+            r.claim_payee, r.schedule_line = x.get("claim_payee"), x.get("mpesa_schedule_line")
     return rows
 
 
@@ -247,7 +265,7 @@ def _b2b_row(r) -> frappe._dict:
         status=r.status or "Not Initiated", when=r.trans_completed_time or r.creation, name=name or to,
         number=masked(number) if number else to, payee=r.get("claim_payee"),
         note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
-        party=r.get("supplier") or r.get("employee"), created=r.creation, batch=None)
+        party=r.get("supplier") or r.get("employee"), line=r.get("schedule_line"), created=r.creation, batch=None)
 
 
 def _b2c_row(r) -> frappe._dict:
@@ -257,7 +275,8 @@ def _b2c_row(r) -> frappe._dict:
         status=r.status or "Not Initiated", when=r.transaction_completed_datetime or r.creation,
         name=name or masked(r.phone_number), number=masked(number or r.phone_number), payee=r.get("claim_payee"),
         note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
-        party=r.get("party"), created=r.creation, batch=r.get("b2c_payment_disbursement"))
+        party=r.get("party"), line=r.get("schedule_line"), created=r.creation,
+        batch=r.get("b2c_payment_disbursement"))
 
 
 def _entries(doctype: str, name: str) -> list:
@@ -470,12 +489,18 @@ def mpsa_payout_proof(doc) -> frappe._dict:
             if request and frappe.db.exists(B2C_REQUEST, request):
                 blocks.append(_b2c_block(frappe.get_doc(B2C_REQUEST, request), row))
             else:
+                dt, dn = row.get("reference_doctype"), row.get("reference_name")
+                status = row.get("payment_status") or "Not Initiated"
                 blocks.append(frappe._dict(
-                    status=row.get("payment_status") or "Not Initiated", receipt="", sms="", name=row.get("party"),
+                    status=status, receipt="", sms="", name=row.get("party"),
                     number=masked(row.get("partyb")), amount=flt(row.get("allocated_amount"), 2), charge=None,
-                    charge_how="", paid_from="", when=None,
-                    document=" ".join(filter(None, [row.get("reference_doctype"), row.get("reference_name")])),
-                    hidden=_salary_hidden(B2C_REQUEST, row)))
+                    charge_how="", paid_from="", when=None, document=" ".join(filter(None, [dt, dn])),
+                    hidden=_salary_hidden(B2C_REQUEST, row), of=(dt, dn) if dt and dn else None,
+                    # a row failed before any payout was made ("Not sent"): matched as that payout would be
+                    probe=frappe._dict(payout=row.get("name"), status=status, payee=row.get("claim_payee"),
+                                       line=row.get("mpesa_schedule_line"), party=row.get("party"),
+                                       amount=flt(row.get("allocated_amount"), 2), batch=doc.name,
+                                       created=row.get("creation") or doc.get("creation"))))
         sent = _sent_by(B2C, doc.name)
     else:
         blocks = _entry_blocks(doc)
@@ -489,7 +514,7 @@ def mpsa_payout_proof(doc) -> frappe._dict:
     paid_again_note = ""
     if doctype == B2C and again and len(again) < len(blocks):
         on = sorted({later.batch or later.payout for later in again.values()})
-        paid_again_note = (f"{len(again)} failed {'payout was' if len(again) == 1 else 'payouts were'} paid again "
+        paid_again_note = (f"{len(again)} failed {'row was' if len(again) == 1 else 'rows were'} paid again "
                            f"later ({', '.join(on)}): not listed.")
         blocks = [b for i, b in enumerate(blocks) if i not in again]
     for b in blocks:
@@ -504,13 +529,18 @@ def mpsa_payout_proof(doc) -> frappe._dict:
 
 
 def _paid_again_of(block, cache: dict) -> frappe._dict | None:
-    """The later M-Pesa payout that paid what the failed payout ``block`` was for (paid_again on its
-    document's payouts, read once per document), None when none has or it pays no document."""
-    if not block.get("payout") or not block.get("of"):
+    """The later M-Pesa payout that paid what the failed ``block`` was for (paid_again on its
+    document's payouts, read once per document; a batch row that made no payout taken with them as
+    its ``probe``), None when none has or it pays no document."""
+    if not block.get("of") or not (block.get("payout") or block.get("probe")):
         return None
     if block.of not in cache:
-        cache[block.of] = paid_again(_mpesa_rows(*block.of))
-    return cache[block.of].get(block.payout)
+        rows = _mpesa_rows(*block.of)
+        cache[block.of] = (rows, paid_again(rows))
+    rows, again = cache[block.of]
+    if block.get("probe"):
+        return paid_again([*rows, block.probe]).get(block.probe.payout)
+    return again.get(block.payout)
 
 
 def _b2b_block(r) -> frappe._dict:
