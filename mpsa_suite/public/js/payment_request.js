@@ -146,7 +146,7 @@ function mpesa_resend_prompt(frm, last) {
       label: __("Phone Number"),
       reqd: 1,
       default: (last && last.phone_number) || frm.doc.phone_number,
-      description: __("Format: 0712345678 or 254712345678"),
+      description: __("Format: 0712345678 / 0112345678, or 254712345678 / 254112345678"),
     },
     (values) => {
       const phone_number = mpsa_collect.msisdn(values.phone_number);

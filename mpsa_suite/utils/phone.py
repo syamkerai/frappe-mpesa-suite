@@ -12,23 +12,32 @@ import re
 _NON_DIGITS = re.compile(r"\D")
 
 # Safaricom, Airtel, Telkom, Equitel, Faiba prefixes (after the leading 0 / 254).
-# Source: Communications Authority of Kenya numbering plan.
+# Source: Communications Authority of Kenya numbering plan (the 011X block is Safaricom's, 010X
+# Airtel's), and Safaricom's 014X / 018X lines of August 2026 (0140-0143, 0180-0182).
 _NETWORK_PREFIXES = {
     "Safaricom": (
         "70", "710", "711", "712", "713", "714", "715", "716", "717", "718", "719",
         "720", "721", "722", "723", "724", "725", "726", "727", "728", "729",
         "740", "741", "742", "743", "745", "746", "748", "757", "758", "759",
-        "768", "769", "79", "110", "111", "112", "113", "114", "115",
+        "768", "769", "79", "11", "140", "141", "142", "143", "180", "181", "182",
     ),
     "Airtel": (
         "730", "731", "732", "733", "734", "735", "736", "737", "738", "739",
         "750", "751", "752", "753", "754", "755", "756", "762", "780", "781",
-        "782", "783", "784", "785", "786", "787", "788", "789", "100", "101", "102",
+        "782", "783", "784", "785", "786", "787", "788", "789", "10",
     ),
     "Telkom": ("770", "771", "772", "773", "774", "775", "776", "777", "778", "779"),
     "Equitel": ("763", "764", "765", "766"),
     "Faiba": ("747",),
 }
+
+# The mobile blocks in use: 07XX, 010X / 011X, 014X and 018X. Every pay path (claim payee lines,
+# pasted payees, B2C rows) takes the same blocks, so a claim never approves a number its payout
+# refuses; another 01 block is added here when it is opened.
+_IN_USE = re.compile(r"254(7\d|1[0148])\d{7}")
+
+# What a user is told to type
+FORMATS = "07XX XXX XXX or 01XX XXX XXX (or 12 digits: 2547... / 2541...)"
 
 
 def digits(value) -> str:
@@ -56,6 +65,12 @@ def normalize_msisdn(value) -> str | None:
     if local[0] not in "71":
         return None
     return "254" + local
+
+
+def payable_msisdn(value) -> str | None:
+    """normalize_msisdn, for a number in a mobile block in use (_IN_USE) only: what B2C may pay."""
+    msisdn = normalize_msisdn(value)
+    return msisdn if msisdn and _IN_USE.fullmatch(msisdn) else None
 
 
 def to_local(value) -> str | None:
@@ -98,3 +113,13 @@ def mask(value) -> str:
     if not msisdn:
         return "***"
     return msisdn[:4] + "****" + msisdn[-4:]
+
+
+def shown(value) -> str:
+    """A number for a message: masked when it is a phone; else its last 3 digits and how many digits
+    it has ('ending 453 (11 digits)'), so a mistyped number is told apart without being shown."""
+    value = str(value or "").strip()
+    if normalize_msisdn(value):
+        return mask(value)
+    num = digits(value)
+    return f"ending {num[-3:]} ({len(num)} digits)" if num else repr(value)

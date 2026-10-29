@@ -494,7 +494,7 @@ function mpesa_show_request_dialog(frm, outstanding, mop_config, parent_dialog =
 					label: __("Phone Number"),
 					reqd: 1,
 					default: phone,
-					description: __("Format: 0712345678 or 254712345678"),
+					description: __("Format: 0712345678 / 0112345678, or 254712345678 / 254112345678"),
 				},
 				// the invoice desk passes no mop_config: the prompt's shortcode comes from the Mode of Payment
 				{
@@ -847,7 +847,7 @@ mpsa_collect.show_dialog = function (frm) {
 						label: __("Customer's Phone"),
 						reqd: 1,
 						default: o.phone,
-						description: __("Format: 0712345678 or 254712345678"),
+						description: __("Format: 0712345678 / 0112345678, or 254712345678 / 254112345678"),
 					},
 					{
 						fieldtype: "Currency",

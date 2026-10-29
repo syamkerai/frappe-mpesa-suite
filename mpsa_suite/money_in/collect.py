@@ -79,7 +79,7 @@ def request_payment(doctype: str, name: str, phone_number: str, amount, payment_
     gateway = _gateway(doc.company, payment_gateway_account)
     phone = normalize_msisdn(phone_number)
     if not phone:
-        frappe.throw(_("Enter the customer's Kenyan mobile number, e.g. 0712345678."))
+        frappe.throw(_("Enter the customer's Kenyan mobile number, e.g. 0712345678 or 0112345678."))
     amount = flt(amount, 2)
     # One prompt at a time per document, held until this request commits (common.named_lock): a
     # second Send for the same order or invoice waits here, then is refused below.

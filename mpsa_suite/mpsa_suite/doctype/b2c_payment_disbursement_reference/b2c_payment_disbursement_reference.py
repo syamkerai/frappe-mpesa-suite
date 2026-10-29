@@ -8,6 +8,7 @@ from frappe.model.document import Document
 from frappe.utils import flt
 
 from ....daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
+from ....utils.phone import FORMATS, normalize_msisdn, payable_msisdn, shown
 
 
 class B2CPaymentDisbursementReference(Document):
@@ -50,7 +51,8 @@ class B2CPaymentDisbursementReference(Document):
 
             if not is_valid_receiver_contact(mobile_no):
                 frappe.throw(
-                    f"Row #{self.idx}: Incorrect Receiver's Mobile Number: {self.partyb}",
+                    f"Row #{self.idx} ({self.party}): the Receiver's Mobile Number {shown(self.partyb)} is not "
+                    f"a number M-Pesa B2C can pay. Enter {FORMATS}.",
                     frappe.ValidationError,
                     title="Incorrect Contact",
                 )
@@ -93,17 +95,16 @@ def b2c_amount_problem(amount) -> str | None:
 
 
 def sanitise_phone_number(phone_number: str) -> str:
-    """Sanitises a given phone_number string"""
+    """A Kenyan mobile number written with spaces, dashes or a '+', or without its leading 0, as
+    2547... / 2541... (utils.phone); anything else as typed, less its '+' and spaces."""
     phone_number = phone_number.replace("+", "").replace(" ", "")
-
-    regex = re.compile(r"^0\d{9}$")
-    if not regex.match(phone_number):
-        return phone_number
-
-    phone_number = "254" + phone_number[1:]
+    if re.fullmatch(r"[\d-]+", phone_number):
+        return normalize_msisdn(phone_number) or phone_number
     return phone_number
 
 
 def is_valid_receiver_contact(receiver: str) -> bool:
-    """True for a Kenyan mobile number: 2547XXXXXXXX, 25410/25411XXXXXXX, or the 07/01, +254 forms."""
-    return bool(re.fullmatch(r"254(7\d{8}|1[01]\d{7})", sanitise_phone_number(str(receiver or "").strip())))
+    """True for a Kenyan mobile number in a block in use (utils.phone.payable_msisdn: 07XX, 010X /
+    011X, 014X, 018X), written 07... / 01..., 2547... / 2541..., +254, or without its leading 0."""
+    number = sanitise_phone_number(str(receiver or "").strip())
+    return number.isdigit() and payable_msisdn(number) == number

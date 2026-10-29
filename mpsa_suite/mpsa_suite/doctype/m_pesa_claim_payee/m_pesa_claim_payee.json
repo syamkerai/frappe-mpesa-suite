@@ -115,7 +115,7 @@
    "label": "Phone",
    "depends_on": "eval:doc.payee_type==\"Phone (B2C)\"",
    "mandatory_depends_on": "eval:doc.payee_type==\"Phone (B2C)\"",
-   "description": "The payee's M-Pesa (Safaricom) number: 07XX XXX XXX or 2547XX XXX XXX."
+   "description": "The payee's M-Pesa (Safaricom) number: 07XX XXX XXX or 01XX XXX XXX (or 12 digits: 2547... / 2541...)."
   },
   {
    "fieldname": "amount",

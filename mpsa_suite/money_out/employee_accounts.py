@@ -15,12 +15,31 @@ import frappe
 from frappe.utils import cstr
 
 from ..permissions import ADMIN_ROLES
+from ..utils.phone import FORMATS, digits, normalize_msisdn, shown
 from . import party_accounts as pa
 
 ACCOUNT_DOCTYPE = pa.EMPLOYEE_ACCOUNT
 PHONE, BANK = pa.PHONE, pa.BANK
 B2B_TYPES = pa.B2B_TYPES
 NO_SLIP = "A payment to an employee with no Salary Slip is paid by an M-Pesa Manager."
+
+
+def check_cell_number(doc, method=None) -> None:
+    """Employee validate (hooks.py doc_events): a Cell Number typed or changed that reads as a Kenyan
+    number (0..., 254..., or 7... / 1... of up to 10 digits) but is no Kenyan mobile number is
+    refused. Pay employee (phone), HR's SMS and the claim payees' 'never an employee's phone' check
+    all read it, and a digit lost there (25416... for 0716...) only showed later. Another country's
+    number, and an Employee saved without changing it, are left alone."""
+    value = cstr(doc.get("cell_number")).strip()
+    if not value or not (doc.is_new() or doc.has_value_changed("cell_number")) or normalize_msisdn(value):
+        return
+    num = digits(value)
+    kenyan = (num.startswith("254") or (num.startswith("0") and not num.startswith("00"))
+              or (num[:1] in ("7", "1") and len(num) <= 10))
+    if not kenyan or (value.startswith("+") and not num.startswith("254")):
+        return
+    frappe.throw(f"Cell Number {shown(value)} is not a Kenyan mobile number. Enter {FORMATS}. To write it with 254, "
+                 "drop only the leading 0: 0111 234 567 is 254111234567.", title="Check the Cell Number")
 
 
 def own_payment_problem(employee, user=None) -> str | None:

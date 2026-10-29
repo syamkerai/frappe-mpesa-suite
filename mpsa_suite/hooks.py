@@ -262,6 +262,10 @@ doc_events = {
         "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
         "on_cancel": "mpsa_suite.money_out.employee_documents.on_cancel",  # its failed payouts do not hold it
     },
+    # HRMS: a mistyped Kenyan Cell Number refused when it is typed (Pay employee (phone), HR's SMS)
+    "Employee": {
+        "validate": "mpsa_suite.money_out.employee_accounts.check_cell_number",
+    },
 }
 
 # Scheduled Tasks

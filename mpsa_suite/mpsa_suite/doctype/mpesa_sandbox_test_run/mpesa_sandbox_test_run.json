@@ -139,7 +139,7 @@
    "fieldname": "tester_phone",
    "fieldtype": "Data",
    "label": "Your Phone (for STK prompts)",
-   "description": "Your own Safaricom number, 2547XXXXXXXX. Sandbox prompts move no money."
+   "description": "Your own Safaricom number, 2547XXXXXXXX or 2541XXXXXXXX. Sandbox prompts move no money."
   },
   {
    "fieldname": "column_break_setup",

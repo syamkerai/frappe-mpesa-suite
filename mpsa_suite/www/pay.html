@@ -44,7 +44,7 @@
 				{% if not phone_locked %}
 				<label class="mps-label" for="mps-phone">{{ _("M-Pesa phone number")|e }}</label>
 				<input id="mps-phone" class="mps-input" type="tel" inputmode="numeric" autocomplete="tel"
-					placeholder="07XX XXX XXX" maxlength="16">
+					placeholder="07XX XXX XXX or 01XX XXX XXX" maxlength="16">
 				{% else %}
 				<div class="mps-muted">{{ _("The prompt goes to")|e }} {{ payment.phone|e }}</div>
 				{% endif %}

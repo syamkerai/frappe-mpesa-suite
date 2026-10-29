@@ -61,7 +61,7 @@ from ..daraja import apis
 from ..daraja import money_out as daraja
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..permissions import ADMIN_ROLES, PREPARE_ROLES, require, require_named_user
-from ..utils.phone import is_safaricom, mask, normalize_msisdn, to_local
+from ..utils.phone import FORMATS, is_safaricom, mask, network_of, normalize_msisdn, payable_msisdn, to_local
 from . import owed
 from . import party_accounts as pa
 
@@ -300,10 +300,11 @@ def clean_line(row, own=None, warnings=None) -> None:
     if row.get("payee_type") not in TYPES:
         frappe.throw(f"Row #{row.idx}: Pay To must be {', '.join(TYPES[:-1])} or {TYPES[-1]}.")
     if row.payee_type == PHONE:
-        msisdn = normalize_msisdn(row.get("phone"))
+        # the B2C row's rule (utils.phone.payable_msisdn): a claim never approves a number its payout refuses
+        msisdn = payable_msisdn(row.get("phone"))
         if not msisdn:
             frappe.throw(f"Row #{row.idx}: {cstr(row.get('phone')) or 'no phone'} is not a Kenyan mobile number "
-                         "(07XX XXX XXX or 2547XX XXX XXX).")
+                         f"M-Pesa can pay ({FORMATS}).")
         row.phone = msisdn
         row.shortcode = row.account_number = row.bank_paybill = None
         if not is_safaricom(msisdn) and warnings is not None:
@@ -923,7 +924,10 @@ def name_check(line, received, bank_name=None) -> tuple:
     prefix = number_prefix(received)
     if prefix and not _same_number(prefix, line):
         expected = describe(line, masked=True) if line.get("payee_type") == PHONE else cstr(line.get("shortcode")).strip()
-        return False, f"M-Pesa paid {shown!r}: number {_masked_number(prefix)}, not {expected}."
+        paid = _masked_number(prefix)
+        # 0110 and 0111 lines with the same last four digits mask alike
+        hidden = " (they differ in the hidden digits: compare the full numbers)" if paid == expected else ""
+        return False, f"M-Pesa paid {shown!r}: number {paid}, not {expected}{hidden}."
     if line.get("payee_type") == BANK:
         bank_name = cstr(bank_name).strip()
         if not bank_name:
@@ -2096,9 +2100,10 @@ def table_rows(table) -> list:
 
 
 def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
-    """Each pasted row checked: a name, a Safaricom number (B2C pays M-Pesa lines only; a number
-    moved from another network is added by hand), whole shillings B2C may pay, never an
-    employee's phone, and no phone twice (in the list, or on the claim already)."""
+    """Each pasted row checked: a name, a number B2C may pay that is not another network's (B2C pays
+    M-Pesa lines only; a number moved from another network is added by hand; a number of a block no
+    network list names yet is taken, and the claim's save warns), whole shillings B2C may pay, never
+    an employee's phone, and no phone twice (in the list, or on the claim already)."""
     found = found or frappe._dict(destinations={}, bank_numbers={})
     seen = {normalize_msisdn(p) for p in existing or [] if normalize_msisdn(p)}
     checked = []
@@ -2106,10 +2111,10 @@ def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
         errors = []
         if not cstr(r.payee_name).strip():
             errors.append("no name")
-        msisdn = normalize_msisdn(r.phone)
+        msisdn = payable_msisdn(r.phone)
         if not msisdn:
-            errors.append(f"{r.phone or 'no phone'} is not a Kenyan mobile number")
-        elif not is_safaricom(msisdn):
+            errors.append(f"{r.phone or 'no phone'} is not a Kenyan mobile number M-Pesa can pay ({FORMATS})")
+        elif network_of(msisdn) not in ("Safaricom", None):
             errors.append(f"{to_local(msisdn)} does not start like a Safaricom number (B2C pays M-Pesa lines only: add "
                           "it by hand if it is an M-Pesa line moved from another network)")
         amount = parse_amount(r.amount_text)

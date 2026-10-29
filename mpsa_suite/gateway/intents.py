@@ -116,7 +116,7 @@ def _new_intent(client, amount, order_ref, phone, key, description, reference_do
     if phone:
         msisdn = normalize_msisdn(phone)
         if not msisdn:
-            raise ApiError(422, "invalid_phone", "phone must be a Kenyan mobile number, e.g. 0712345678.")
+            raise ApiError(422, "invalid_phone", "phone must be a Kenyan mobile number, e.g. 0712345678 or 0112345678.")
 
     customer = None
     if reference_doctype or reference_name:

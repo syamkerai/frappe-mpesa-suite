@@ -700,26 +700,3 @@ function generateUUIDv4() {
 	});
 	return uuid;
 }
-
-function validatePhoneNumber(phoneNumber) {
-	// Validates the receiver phone numbers
-	if (phoneNumber.startsWith("2547")) {
-		const pattern = /^2547\d{8}$/;
-		return pattern.test(phoneNumber);
-	} else {
-		const pattern = /^(25410|25411)\d{7}$/;
-		return pattern.test(phoneNumber);
-	}
-}
-
-function sanitisePhoneNumber(phoneNumber) {
-	phoneNumber = phoneNumber.replace("+", "").replace(/\s/g, "");
-
-	const regex = /^0\d{9}$/;
-	if (!regex.test(phoneNumber)) {
-		return phoneNumber;
-	}
-
-	phoneNumber = "254" + phoneNumber.substring(1);
-	return phoneNumber;
-}

@@ -857,7 +857,7 @@ def test_get_references_takes_the_approved_phone(env):
     assert identify(None, fake_frappe._dict(employee="EMP-2"), "Employee", "Mpesa Disbursement") == {
         "account_number": PHONE}
     assert identify(None, fake_frappe._dict(employee="EMP-3"), "Employee", "Mpesa Disbursement") == {
-        "account_number": "0711000333"}  # no approved phone: the Cell Number while the setting is off
+        "account_number": "254711000333"}  # no approved phone: the Cell Number (254 form) while the setting is off
     lock_on(env)
     assert identify(None, fake_frappe._dict(employee="EMP-3"), "Employee", "Mpesa Disbursement") == {
         "account_number": ""}

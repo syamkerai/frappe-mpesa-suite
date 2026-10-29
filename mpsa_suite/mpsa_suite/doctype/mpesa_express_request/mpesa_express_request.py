@@ -67,7 +67,7 @@ class MpesaExpressRequest(Document):
 
         if self.phone_number and not validate_phone_number(self.phone_number):
             frappe.throw(
-                "Invalid phone number format. Please ensure it is in the correct format, e.g., 254712345678."
+                "Invalid phone number format. Please ensure it is in the correct format, e.g., 254712345678 or 254112345678."
             )
 
     def validate_payment_request_amount(self):

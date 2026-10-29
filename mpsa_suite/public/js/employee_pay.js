@@ -102,6 +102,10 @@ mpsa_employee_pay.pay_phone = function (frm, r) {
 		);
 		return;
 	}
+	if (r.phone_problem) {
+		frappe.msgprint(e(r.phone_problem));
+		return;
+	}
 	const where = r.phone_approved
 		? __("the approved phone {0}", [e(r.phone)])
 		: __("the Cell Number {0} (not an approved phone)", [e(r.phone)]);

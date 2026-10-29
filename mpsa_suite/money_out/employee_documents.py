@@ -36,7 +36,7 @@ from frappe.utils import cint, cstr, flt, nowdate
 
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..utils.phone import normalize_msisdn
+from ..utils.phone import FORMATS, normalize_msisdn, payable_msisdn, shown
 from ..permissions import PREPARE_ROLES, require
 from . import employee_accounts, owed, party_accounts
 
@@ -336,14 +336,26 @@ def b2c_phone(employee) -> tuple:
         return cstr(party_accounts.get_account(EMPLOYEE_ACCOUNT, account).phone).strip(), account
     if approved_phones_only():
         return "", None
-    return cstr(frappe.db.get_value("Employee", employee, "cell_number")).strip(), None
+    # as 2547... / 2541... when B2C can pay it; one it cannot as typed (cell_number_problem says why)
+    cell = cstr(frappe.db.get_value("Employee", employee, "cell_number")).strip()
+    return payable_msisdn(cell) or cell, None
+
+
+def cell_number_problem(employee, phone) -> str | None:
+    """Why the Cell Number b2c_phone found cannot be paid by B2C (an approved phone always can), or
+    None: the Pay employee (phone) refusal, before any payout is made."""
+    if not phone or payable_msisdn(phone):
+        return None
+    return (f"The Cell Number on {employee} ({shown(phone)}) is not a Kenyan mobile number M-Pesa can pay. HR "
+            f"corrects it on the Employee: {FORMATS}.")
 
 
 def _approved_phone(employee, phone):
-    """The employee's approved phone account for ``phone`` (one that can be paid now first), or None."""
-    phone = cstr(phone).strip()
+    """The employee's approved phone account for ``phone`` (one that can be paid now first), or None:
+    the same number however it is written (07..., 2547..., +254...)."""
+    phone = normalize_msisdn(phone)
     matches = [a for a in party_accounts.accounts_of(EMPLOYEE_ACCOUNT, employee, (PHONE,))
-               if phone and cstr(a.phone).strip() == phone]
+               if phone and normalize_msisdn(a.phone) == phone]
     usable = [a for a in matches if not party_accounts.usable_problem(a, employee, EMPLOYEE_ACCOUNT)]
     return (usable or matches or [None])[0]
 
@@ -698,6 +710,7 @@ def _pay_options(dt: str, values) -> dict:
                 if not party_accounts.usable_problem(a, employee, EMPLOYEE_ACCOUNT)]
     return {
         "phone": _masked_phone(phone),
+        "phone_problem": cell_number_problem(employee, phone),
         "phone_approved": bool(phone_account),
         "approved_phones_only": approved_phones_only(),
         "b2b_accounts": [{"name": a.name, "label": _account_label(a), "is_default": cint(a.is_default)}
@@ -844,7 +857,7 @@ def prepare_b2c(doctype: str, name: str, mpesa_settings: str | None = None) -> d
     phone, account = b2c_phone(values.employee)
     if not phone:
         frappe.throw(_no_phone(values.employee))
-    problem = _b2c_amount_problem(values.employee, amount)
+    problem = cell_number_problem(values.employee, phone) or _b2c_amount_problem(values.employee, amount)
     if problem:
         frappe.throw(problem)
     doc = _new_b2c_disbursement(values.company, settings, doctype, party_account(doctype, values))
@@ -938,7 +951,8 @@ def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_setti
             b2b_docs.append((values, amount))
         else:
             phone, account = b2c_phone(values.employee)
-            problem = _b2c_amount_problem(values.employee, amount) if phone else _no_phone(values.employee)
+            problem = (cell_number_problem(values.employee, phone) or _b2c_amount_problem(values.employee, amount)
+                       if phone else _no_phone(values.employee))
             if problem:
                 skipped.append({"name": name, "reason": problem})
             else:

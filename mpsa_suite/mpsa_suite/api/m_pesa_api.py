@@ -365,6 +365,7 @@ def initiate_stk_push(**args) -> any:
         apis.require(args.payment_gateway[6:], apis.STK)  # outside the try: the caller must see it
     if args.get("doctype") == MPESA_EXPRESS_REQUEST_DOCTYPE and args.get("document_name"):
         _check_can_prompt_again(args.document_name)  # desk button and both retry_stkpush
+    mobile_number = sanitize_mobile_number(args.phone_number or args.sender)  # outside the try: a bad number is said
 
     try:
         callback_url = build_callback_url(
@@ -373,7 +374,6 @@ def initiate_stk_push(**args) -> any:
         mpesa_settings = frappe.get_doc(
             MPESA_SETTINGS_DOCTYPE, args.payment_gateway[6:]
         )
-        mobile_number = sanitize_mobile_number(args.phone_number or args.sender)
         amount = stk_amount(args.request_amount)
         business_shortcode = mpesa_settings.business_shortcode
         timestamp = daraja_timestamp()
@@ -610,10 +610,19 @@ def publish_stk_status(status: str, payment_request):
 
 
 def sanitize_mobile_number(number: str) -> str:
-    """2547XXXXXXXX / 2541XXXXXXXX via utils.phone; falls back to "254" + last 9 digits."""
-    from ...utils.phone import normalize_msisdn
+    """2547XXXXXXXX / 2541XXXXXXXX via utils.phone (a '+254 0712...' that kept its 0 too); any other
+    number is refused, never guessed from its last 9 digits, which can be another subscriber's."""
+    from ...utils.phone import FORMATS, digits, normalize_msisdn, shown
 
-    return normalize_msisdn(number) or "254" + "".join(filter(str.isdigit, str(number or "")))[-9:]
+    msisdn = normalize_msisdn(number)
+    num = digits(number)
+    if not msisdn and len(num) == 13 and num.startswith("2540"):
+        msisdn = normalize_msisdn("254" + num[4:])
+    if not msisdn and num:
+        frappe.throw(_("{0} is not a Kenyan mobile number: enter {1}.").format(shown(number), FORMATS))
+    if not msisdn:
+        frappe.throw(_("Enter the M-Pesa phone number: {0}.").format(FORMATS))
+    return msisdn
 
 
 def get_token(app_key, app_secret, base_url):

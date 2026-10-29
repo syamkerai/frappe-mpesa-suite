@@ -34,7 +34,7 @@ Success, HTTP 200:
 
 Failure, with an HTTP error status:
 ```json
-{"message": {"ok": false, "error": {"code": "invalid_phone", "message": "phone must be a Kenyan mobile number, e.g. 0712345678."}}}
+{"message": {"ok": false, "error": {"code": "invalid_phone", "message": "phone must be a Kenyan mobile number, e.g. 0712345678 or 0112345678."}}}
 ```
 
 A `payment` object:

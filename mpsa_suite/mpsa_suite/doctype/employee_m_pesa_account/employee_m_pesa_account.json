@@ -84,7 +84,7 @@
    "mandatory_depends_on": "eval:doc.account_type==\"Phone (B2C)\"",
    "search_index": 1,
    "in_list_view": 1,
-   "description": "The Safaricom line registered in the employee's name, e.g. 0722 000 000."
+   "description": "The Safaricom line registered in the employee's name, e.g. 0722 000 000 or 0111 000 000."
   },
   {
    "fieldname": "bank_paybill",

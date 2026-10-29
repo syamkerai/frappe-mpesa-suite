@@ -71,8 +71,8 @@ def test_an_on_hold_default_phone_is_never_passed_over_for_the_cell_number(env):
     assert env.ed.b2c_phone("EMP-2") == ("", None)
     env.frappe.db.table(EMPACC)["MEA-2"]["active_from"] = NOW - datetime.timedelta(days=2)
     assert env.ed.b2c_phone("EMP-2") == (PHONE, "MEA-2")
-    # no approved phone at all: the Cell Number while the lock is off, nothing once it is on
-    assert env.ed.b2c_phone("EMP-3") == ("0711000333", None)
+    # no approved phone at all: the Cell Number (254 form) while the lock is off, nothing once it is on
+    assert env.ed.b2c_phone("EMP-3") == ("254711000333", None)
     lock_on(env)
     assert env.ed.b2c_phone("EMP-3") == ("", None)
 

@@ -9,6 +9,7 @@ from mpsa_suite.utils.phone import (
     msisdn_sha256,
     network_of,
     normalize_msisdn,
+    payable_msisdn,
     to_local,
 )
 
@@ -51,8 +52,17 @@ def test_sha256_matches_safaricom_c2b_hash():
     [
         ("0712345678", "Safaricom"),
         ("0110123456", "Safaricom"),
+        ("0115123456", "Safaricom"),
+        ("0118123456", "Safaricom"),
+        ("0119123456", "Safaricom"),
+        ("254118123456", "Safaricom"),
+        ("0140123456", "Safaricom"),
+        ("0143123456", "Safaricom"),
+        ("0180123456", "Safaricom"),
+        ("0182123456", "Safaricom"),
         ("0733123456", "Airtel"),
         ("0100123456", "Airtel"),
+        ("0106123456", "Airtel"),
         ("0771123456", "Telkom"),
         ("0763123456", "Equitel"),
         ("0747123456", "Faiba"),
@@ -62,9 +72,37 @@ def test_network_of(raw, network):
     assert network_of(raw) == network
 
 
+@pytest.mark.parametrize("raw", ["0144123456", "0183123456"])
+def test_network_of_an_unopened_block_is_unknown(raw):
+    assert network_of(raw) is None
+
+
 def test_is_safaricom():
     assert is_safaricom("0722000000")
+    assert is_safaricom("0119 000 000")
+    assert is_safaricom("0142000000")
     assert not is_safaricom("0733000000")
+    assert not is_safaricom("0101000000")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("0712345678", "254712345678"),
+        ("0111 444 514", "254111444514"),
+        ("0101444514", "254101444514"),
+        ("+254 142 000 280", "254142000280"),
+        ("0182000280", "254182000280"),
+        ("111444514", "254111444514"),
+    ],
+)
+def test_payable_msisdn_takes_the_blocks_in_use(raw, expected):
+    assert payable_msisdn(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["0122345678", "0132345678", "0152345678", "0192345678", "25416055453", "", None])
+def test_payable_msisdn_refuses_other_numbers(raw):
+    assert payable_msisdn(raw) is None
 
 
 def test_mask_hides_middle_digits():

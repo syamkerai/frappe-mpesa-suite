@@ -61,8 +61,22 @@ class TestB2CPaymentDisbursementReference(FrappeTestCase):
 
     def test_is_valid_receiver_contact(self):
         for contact in ("254712345678", "+254712345678", "0712345678", "0112345678", "+254112345678",
-                        "254102345678"):
+                        "254102345678", "0118123456", "0119123456", "0140123456", "254143123456", "0180123456",
+                        "+254 182 123 456", "0111-444-514", "111444514"):
             self.assertTrue(is_valid_receiver_contact(contact), contact)
         for contact in ("07123456789", "25471234567", "+25471234567", "0712345678a", "01123456789",
-                        "254122345678", ""):
+                        "254122345678", "0152345678", "25416055453", ""):
             self.assertFalse(is_valid_receiver_contact(contact), contact)
+
+    def test_a_014x_line_is_paid_and_stored_in_254_form(self):
+        row = self._row(partyb="0142 000 280")
+        row.validate()
+        self.assertEqual(row.partyb, "254142000280")
+
+    def test_a_refused_number_is_named_masked_with_the_forms_to_use(self):
+        with self.assertRaises(frappe.ValidationError) as caught:
+            self._row(partyb="25416055453").validate()
+        message = str(caught.exception)
+        self.assertNotIn("25416055453", message)
+        self.assertIn("ending 453 (11 digits)", message)
+        self.assertIn("01XX XXX XXX", message)

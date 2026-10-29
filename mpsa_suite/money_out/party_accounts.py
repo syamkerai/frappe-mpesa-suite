@@ -35,7 +35,7 @@ from frappe.utils import add_to_date, cint, cstr, get_datetime, now_datetime
 
 from ..daraja import money_out as daraja
 from ..permissions import ADMIN_ROLES, CONFIG_ROLES, administrator_refused, require, require_named_user
-from ..utils.phone import is_safaricom, normalize_msisdn
+from ..utils.phone import FORMATS, is_safaricom, normalize_msisdn, payable_msisdn
 from . import send_confirm
 
 SUITE = "M-Pesa Suite Settings"
@@ -176,9 +176,9 @@ def _clear(doc, *fields) -> None:
 
 
 def _check_phone(doc, p) -> None:
-    msisdn = normalize_msisdn(doc.get("phone"))
+    msisdn = payable_msisdn(doc.get("phone"))  # the B2C row's rule: an account B2C can pay
     if not msisdn:
-        frappe.throw(f"Enter the {p.label}'s M-Pesa phone number (07XX XXX XXX or 2547XX XXX XXX)")
+        frappe.throw(f"Enter the {p.label}'s M-Pesa phone number ({FORMATS})")
     doc.phone = msisdn
     _clear(doc, "shortcode", "account_number", "bank_paybill", "bank", "account_holder_name")
     if not is_safaricom(msisdn):
