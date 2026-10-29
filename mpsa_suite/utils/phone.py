@@ -31,13 +31,15 @@ _NETWORK_PREFIXES = {
     "Faiba": ("747",),
 }
 
-# The mobile blocks in use: 07XX, 010X / 011X, 014X and 018X. Every pay path (claim payee lines,
-# pasted payees, B2C rows) takes the same blocks, so a claim never approves a number its payout
-# refuses; another 01 block is added here when it is opened.
-_IN_USE = re.compile(r"254(7\d|1[0148])\d{7}")
+# The mobile blocks in use: 07XX, 010X / 011X, 0140-0143 and 0180-0182. Every pay path (claim
+# payee lines, pasted payees, payee accounts, B2C rows) and the Employee's Cell Number take the same
+# blocks, so a claim never approves a number its payout refuses; a block is added here (and to
+# _NETWORK_PREFIXES and FORMATS) when it is opened.
+_IN_USE = re.compile(r"254(?:(?:7\d|1[01])\d{7}|(?:14[0-3]|18[0-2])\d{6})")
 
 # What a user is told to type
-FORMATS = "07XX XXX XXX or 01XX XXX XXX (or 12 digits: 2547... / 2541...)"
+FORMATS = ("07XX XXX XXX or 01XX XXX XXX (010X, 011X, 0140-0143, 0180-0182), or the 12 digits "
+           "2547... / 2541...")
 
 
 def digits(value) -> str:
@@ -65,6 +67,21 @@ def normalize_msisdn(value) -> str | None:
     if local[0] not in "71":
         return None
     return "254" + local
+
+
+def repaired_msisdn(value) -> str | None:
+    """normalize_msisdn, or the same for a number written with a prefix too many: the 0 kept after
+    254 ('+254 0712...'), or the 00 / 0 of international dialling ('00254 712...', '0254712...').
+    For what a person typed (STK, a Cell Number); normalize_msisdn itself stays strict, as the C2B
+    hash and matching use it."""
+    msisdn = normalize_msisdn(value)
+    if msisdn or "e+" in str(value or "").lower():
+        return msisdn
+    num = digits(value)
+    for prefix in ("002540", "00254", "02540", "0254", "2540"):
+        if num.startswith(prefix) and len(num) == len(prefix) + 9:
+            return normalize_msisdn("254" + num[len(prefix):])
+    return None
 
 
 def payable_msisdn(value) -> str | None:

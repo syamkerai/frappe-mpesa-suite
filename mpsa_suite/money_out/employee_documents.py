@@ -341,11 +341,15 @@ def b2c_phone(employee) -> tuple:
     return payable_msisdn(cell) or cell, None
 
 
-def cell_number_problem(employee, phone) -> str | None:
-    """Why the Cell Number b2c_phone found cannot be paid by B2C (an approved phone always can), or
-    None: the Pay employee (phone) refusal, before any payout is made."""
+def cell_number_problem(employee, phone, account=None) -> str | None:
+    """Why the phone b2c_phone found (``account``: its approved account, if any) cannot be paid by
+    B2C, or None: the Pay employee (phone) refusal, before any payout is made. An account approved
+    since r4.2 always can; one approved before may hold a number outside the blocks in use."""
     if not phone or payable_msisdn(phone):
         return None
+    if account:
+        return (f"The approved phone on {account} ({shown(phone)}) is not a number M-Pesa can pay: a manager cancels "
+                f"and amends it ({FORMATS}).")
     return (f"The Cell Number on {employee} ({shown(phone)}) is not a Kenyan mobile number M-Pesa can pay. HR "
             f"corrects it on the Employee: {FORMATS}.")
 
@@ -710,7 +714,7 @@ def _pay_options(dt: str, values) -> dict:
                 if not party_accounts.usable_problem(a, employee, EMPLOYEE_ACCOUNT)]
     return {
         "phone": _masked_phone(phone),
-        "phone_problem": cell_number_problem(employee, phone),
+        "phone_problem": cell_number_problem(employee, phone, phone_account),
         "phone_approved": bool(phone_account),
         "approved_phones_only": approved_phones_only(),
         "b2b_accounts": [{"name": a.name, "label": _account_label(a), "is_default": cint(a.is_default)}
@@ -857,7 +861,7 @@ def prepare_b2c(doctype: str, name: str, mpesa_settings: str | None = None) -> d
     phone, account = b2c_phone(values.employee)
     if not phone:
         frappe.throw(_no_phone(values.employee))
-    problem = cell_number_problem(values.employee, phone) or _b2c_amount_problem(values.employee, amount)
+    problem = cell_number_problem(values.employee, phone, account) or _b2c_amount_problem(values.employee, amount)
     if problem:
         frappe.throw(problem)
     doc = _new_b2c_disbursement(values.company, settings, doctype, party_account(doctype, values))
@@ -951,8 +955,8 @@ def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_setti
             b2b_docs.append((values, amount))
         else:
             phone, account = b2c_phone(values.employee)
-            problem = (cell_number_problem(values.employee, phone) or _b2c_amount_problem(values.employee, amount)
-                       if phone else _no_phone(values.employee))
+            problem = (cell_number_problem(values.employee, phone, account)
+                       or _b2c_amount_problem(values.employee, amount) if phone else _no_phone(values.employee))
             if problem:
                 skipped.append({"name": name, "reason": problem})
             else:

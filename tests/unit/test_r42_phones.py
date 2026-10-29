@@ -85,7 +85,8 @@ def ea(claims_env):
     return importlib.import_module("mpsa_suite.money_out.employee_accounts")
 
 
-@pytest.mark.parametrize("typed", ["25416055453", "0727 123 4567", "072712345", "+254 7271234567", "716055453 1"])
+@pytest.mark.parametrize("typed", ["25416055453", "0727 123 4567", "072712345", "+254 7271234567", "716055453 1",
+                                   "0121 234 567", "0152000280", "0144 123 456", "+254 152 000 280"])
 def test_a_mistyped_kenyan_cell_number_is_refused_when_it_is_typed(claims_env, ea, typed):
     with pytest.raises(claims_env.frappe.ValidationError, match="is not a Kenyan mobile number") as caught:
         ea.check_cell_number(Employee(typed, before="0716 055 453"))
@@ -94,9 +95,32 @@ def test_a_mistyped_kenyan_cell_number_is_refused_when_it_is_typed(claims_env, e
 
 
 @pytest.mark.parametrize("typed", ["0111 444 514", "254118444514", "+254 142 000 280", "0722000111", "", "+44 7911 123456",
-                                   "12025550123", "00447911123456"])
-def test_a_kenyan_mobile_or_a_foreign_number_is_left_alone(ea, typed):
-    ea.check_cell_number(Employee(typed, new=True))
+                                   "12025550123", "00447911123456", "020 2345678", "+254 20 2345678", "0803 123 4567",
+                                   "0", "N/A"])
+def test_a_kenyan_mobile_a_landline_or_a_foreign_number_is_left_alone(claims_env, ea, typed):
+    doc = Employee(typed, new=True)
+    ea.check_cell_number(doc)
+    assert doc.cell_number == typed and not claims_env.frappe.messages
+
+
+@pytest.mark.parametrize("typed", ["+254 0712 345 678", "2540712345678", "00254 712 345 678", "0254712345678",
+                                   "+00254 111 444 514"])
+def test_a_cell_number_with_a_prefix_too_many_is_stored_in_254_form(claims_env, ea, typed):
+    doc = Employee(typed, before="")
+    ea.check_cell_number(doc)
+    assert doc.cell_number in ("254712345678", "254111444514")
+    assert "saved as 254" in claims_env.frappe.messages[-1]
+
+
+def test_a_new_employee_copied_with_another_ones_mistyped_number_is_saved_with_a_warning(claims_env, ea):
+    # HRMS Employee Transfer with a new Employee ID (and Duplicate) inserts a copy of the employee
+    claims_env.frappe.db.table("Employee")["EMP-OLD"] = {"name": "EMP-OLD", "cell_number": "25416055453"}
+    doc = Employee("25416055453", new=True)
+    doc.name = "EMP-NEW"
+    ea.check_cell_number(doc)
+    assert "copied from another Employee" in claims_env.frappe.messages[-1]
+    with pytest.raises(claims_env.frappe.ValidationError):  # typed fresh: refused
+        ea.check_cell_number(Employee("25418000851", new=True))
 
 
 def test_an_employee_saved_without_changing_its_cell_number_is_not_refused(ea):
@@ -125,6 +149,28 @@ def test_pay_employee_by_phone_refuses_a_cell_number_b2c_cannot_pay_before_any_p
         env.ed.prepare_b2c(EC, "HR-EXP-3")
     assert env.ed.cell_number_problem("EMP-3", "254118444514") is None
     assert env.ed.cell_number_problem("EMP-3", "") is None  # no number: _no_phone says why
+    # an account approved before r4.2 with a number outside the blocks in use: the account is named
+    assert env.ed.cell_number_problem("EMP-3", "254122345678", "MEA-7").startswith(
+        "The approved phone on MEA-7 (2541****5678) is not a number M-Pesa can pay")
+
+
+def test_the_form_says_why_a_cell_number_cannot_be_paid(env):
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"HR Manager"}
+    env.frappe.db.table("Employee")["EMP-3"]["cell_number"] = "25416055453"
+    claim(env, "HR-EXP-3", employee="EMP-3")
+    status = env.ed.document_status(EC, "HR-EXP-3")
+    assert status["phone_problem"].startswith("The Cell Number on EMP-3 (ending 453 (11 digits))")
+    env.frappe.db.table("Employee")["EMP-3"]["cell_number"] = "0711 000 333"
+    assert env.ed.document_status(EC, "HR-EXP-3")["phone_problem"] is None
+
+
+def test_pay_by_mpesa_on_the_list_skips_a_cell_number_b2c_cannot_pay(env):
+    env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User", "HR Manager"}
+    env.frappe.db.table("Employee")["EMP-3"]["cell_number"] = "25416055453"
+    claim(env, "HR-EXP-3", employee="EMP-3")
+    out = env.ed.prepare_bulk(EC, ["HR-EXP-3"])
+    assert not out.get("b2c") and out["skipped"][0]["name"] == "HR-EXP-3"
+    assert out["skipped"][0]["reason"].startswith("The Cell Number on EMP-3")
 
 
 # ---------------------------------------------------------------- an approved phone however it is written

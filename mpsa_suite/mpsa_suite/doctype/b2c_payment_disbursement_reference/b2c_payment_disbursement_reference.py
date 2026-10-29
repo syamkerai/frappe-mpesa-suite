@@ -47,7 +47,7 @@ class B2CPaymentDisbursementReference(Document):
             )
 
         if self.partyb:
-            mobile_no = sanitise_phone_number(self.partyb)
+            mobile_no = sanitise_phone_number(str(self.partyb).strip())
 
             if not is_valid_receiver_contact(mobile_no):
                 frappe.throw(
@@ -95,10 +95,11 @@ def b2c_amount_problem(amount) -> str | None:
 
 
 def sanitise_phone_number(phone_number: str) -> str:
-    """A Kenyan mobile number written with spaces, dashes or a '+', or without its leading 0, as
-    2547... / 2541... (utils.phone); anything else as typed, less its '+' and spaces."""
-    phone_number = phone_number.replace("+", "").replace(" ", "")
-    if re.fullmatch(r"[\d-]+", phone_number):
+    """A Kenyan mobile number written with spaces, dashes, dots, brackets or a '+', or without its
+    leading 0, as 2547... / 2541... (utils.phone); anything else (a letter in it) as typed, less its
+    '+' and spaces."""
+    phone_number = str(phone_number or "").strip().replace("+", "").replace(" ", "")
+    if re.fullmatch(r"[\d\s.()\-]+", phone_number):
         return normalize_msisdn(phone_number) or phone_number
     return phone_number
 

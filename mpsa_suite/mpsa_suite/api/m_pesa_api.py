@@ -610,14 +610,13 @@ def publish_stk_status(status: str, payment_request):
 
 
 def sanitize_mobile_number(number: str) -> str:
-    """2547XXXXXXXX / 2541XXXXXXXX via utils.phone (a '+254 0712...' that kept its 0 too); any other
-    number is refused, never guessed from its last 9 digits, which can be another subscriber's."""
-    from ...utils.phone import FORMATS, digits, normalize_msisdn, shown
+    """2547XXXXXXXX / 2541XXXXXXXX via utils.phone (also '+254 0712...', '00254 712...' and
+    '0254712...': utils.phone.repaired_msisdn); any other number is refused, never guessed from its
+    last 9 digits, which can be another subscriber's."""
+    from ...utils.phone import FORMATS, digits, repaired_msisdn, shown
 
-    msisdn = normalize_msisdn(number)
+    msisdn = repaired_msisdn(number)
     num = digits(number)
-    if not msisdn and len(num) == 13 and num.startswith("2540"):
-        msisdn = normalize_msisdn("254" + num[4:])
     if not msisdn and num:
         frappe.throw(_("{0} is not a Kenyan mobile number: enter {1}.").format(shown(number), FORMATS))
     if not msisdn:

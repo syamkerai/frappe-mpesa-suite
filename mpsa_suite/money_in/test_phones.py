@@ -13,11 +13,12 @@ from mpsa_suite.mpsa_suite.api import m_pesa_api
 class TestStkPhoneNumbers(IntegrationTestCase):
     def test_a_kenyan_mobile_number_is_normalised(self):
         for typed, msisdn in (("0111 444 514", "254111444514"), ("0142000280", "254142000280"),
-                              ("+254 0712 345 678", "254712345678"), ("254712345678", "254712345678")):
+                              ("+254 0712 345 678", "254712345678"), ("254712345678", "254712345678"),
+                              ("00254 712 345 678", "254712345678"), ("0254712345678", "254712345678")):
             self.assertEqual(m_pesa_api.sanitize_mobile_number(typed), msisdn, typed)
 
     def test_a_mistyped_number_is_refused_not_guessed(self):
-        # '254' + the last 9 digits of these is another real Safaricom number (0112 345 670)
+        # the old '254' + last 9 digits gave another subscriber's number (0112 345 670 for the first two)
         for typed in ("0111234567.0", "0111 234 5670", "25416055453"):
             with self.assertRaises(frappe.ValidationError, msg=typed) as caught:
                 m_pesa_api.sanitize_mobile_number(typed)

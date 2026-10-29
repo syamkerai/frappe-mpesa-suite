@@ -73,6 +73,14 @@ class TestB2CPaymentDisbursementReference(FrappeTestCase):
         row.validate()
         self.assertEqual(row.partyb, "254142000280")
 
+    def test_a_contact_number_with_dots_brackets_or_odd_spaces_is_paid_in_254_form(self):
+        for typed in ("0712.345.678", "(0712) 345 678", "0712\xa0345\xa0678", "0712345678\n", " 0712-345-678\t"):
+            row = self._row(partyb=typed)
+            row.validate()
+            self.assertEqual(row.partyb, "254712345678", repr(typed))
+        for typed in ("0144123456", "0183123456"):  # not opened yet
+            self.assertFalse(is_valid_receiver_contact(typed), typed)
+
     def test_a_refused_number_is_named_masked_with_the_forms_to_use(self):
         with self.assertRaises(frappe.ValidationError) as caught:
             self._row(partyb="25416055453").validate()

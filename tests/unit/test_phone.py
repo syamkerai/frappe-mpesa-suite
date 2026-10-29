@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from mpsa_suite.utils.phone import (
+    FORMATS,
     is_safaricom,
     looks_like_sha256,
     mask,
@@ -10,6 +11,7 @@ from mpsa_suite.utils.phone import (
     network_of,
     normalize_msisdn,
     payable_msisdn,
+    repaired_msisdn,
     to_local,
 )
 
@@ -100,9 +102,36 @@ def test_payable_msisdn_takes_the_blocks_in_use(raw, expected):
     assert payable_msisdn(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["0122345678", "0132345678", "0152345678", "0192345678", "25416055453", "", None])
+@pytest.mark.parametrize("raw", ["0122345678", "0132345678", "0152345678", "0192345678", "0144123456", "0149123456",
+                                 "0183123456", "25416055453", "", None])
 def test_payable_msisdn_refuses_other_numbers(raw):
     assert payable_msisdn(raw) is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("0712 345 678", "254712345678"),
+    ("+254 0712 345 678", "254712345678"),
+    ("2540111444514", "254111444514"),
+    ("00254 712 345 678", "254712345678"),
+    ("002540712345678", "254712345678"),
+    ("0254712345678", "254712345678"),
+    ("02540712345678", "254712345678"),
+])
+def test_repaired_msisdn_drops_a_prefix_too_many(raw, expected):
+    assert repaired_msisdn(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["25416055453", "0025471234567", "+44 7911 123456", "2.54712E+11", "07123456789", ""])
+def test_repaired_msisdn_guesses_nothing_else(raw):
+    assert repaired_msisdn(raw) is None
+
+
+def test_normalize_msisdn_stays_strict_for_the_c2b_hash():
+    assert normalize_msisdn("00254712345678") is None and normalize_msisdn("+254 0712 345 678") is None
+
+
+def test_formats_name_the_blocks_in_use():
+    assert "07XX XXX XXX" in FORMATS and "010X, 011X, 0140-0143, 0180-0182" in FORMATS
 
 
 def test_mask_hides_middle_digits():

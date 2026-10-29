@@ -66,9 +66,11 @@ class MpesaExpressRequest(Document):
             apis.require(self.settings, apis.STK)  # submitted requests still take their callbacks
 
         if self.phone_number and not validate_phone_number(self.phone_number):
-            frappe.throw(
-                "Invalid phone number format. Please ensure it is in the correct format, e.g., 254712345678 or 254112345678."
-            )
+            # '712345678', '0712-345-678', '+254 0712...' as the prompt sends them (2547... / 2541...),
+            # or refused with the forms to type; never guessed
+            from ...api.m_pesa_api import sanitize_mobile_number
+
+            self.phone_number = sanitize_mobile_number(self.phone_number)
 
     def validate_payment_request_amount(self):
         payment_request = frappe.get_doc("Payment Request", self.reference_name)

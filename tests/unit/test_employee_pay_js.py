@@ -162,6 +162,15 @@ def test_pay_employee_by_phone_without_one_explains_instead():
     assert out["fields"] == [] and "has no approved phone that can be paid now" in out["calls"][-1][1]
 
 
+def test_pay_employee_by_phone_to_a_cell_number_b2c_cannot_pay_explains_instead():
+    problem = "The Cell Number on EMP-1 (ending 453 (11 digits)) is not a Kenyan mobile number M-Pesa can pay."
+    replies = {"document_status": dict(STATUS, phone="2541****5453", phone_approved=False, phone_problem=problem)}
+    out = run(PAY.format(label="Pay employee (phone)", values="{}"),
+              {"mpsa": {"can_prepare": True}, "perms": BOTH, "replies": replies})
+    assert out["fields"] == [] and out["calls"][-1] == ["msgprint", problem]
+    assert not [c for c in out["calls"] if c[0] == "xcall" and c[1] == "prepare_b2c"]
+
+
 def test_pay_employee_to_an_account_picks_the_default_and_asks_the_shortcode_when_there_are_two():
     status = dict(STATUS, b2b_settings=["Astral 600999", "Astral 600888"])
     replies = {"document_status": status, "prepare_b2b": {"doctype": "Mpesa B2B Payment Request", "name": "MB2B-1"}}
