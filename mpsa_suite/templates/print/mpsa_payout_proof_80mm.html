@@ -30,8 +30,10 @@
 				<span>KES {{ "{:,.2f}".format(b.charge) }}</span></div>{% endif %}
 			{% if b.document %}<div class="row"><span>{{ _("Pays") }}</span><span>{{ b.document }}</span></div>{% endif %}
 			{% if b.note %}<div class="row"><span>{{ _("Why It Failed") }}</span><span>{{ b.note | truncate(80, True, "..") }}</span></div>{% endif %}
+			{% if b.paid_again %}<div class="row"><span>{{ _("Paid Again") }}</span><span>{{ b.paid_again }}</span></div>{% endif %}
 		</div>
 		{% endfor %}
+		{% if p.paid_again_note %}<div class="none">{{ p.paid_again_note }}</div>{% endif %}
 		{% if p.blocks | length > 1 %}
 		<div class="balance"><span>{{ _("Total Paid") }}</span><span>KES {{ "{:,.2f}".format(p.total) }}</span></div>
 		{% endif %}

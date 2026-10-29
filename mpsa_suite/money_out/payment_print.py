@@ -10,6 +10,8 @@ two Jinja methods here (hooks.py ``jinja``), never frappe.get_all in a template:
 - a phone is masked as the send summary shows it (2547****0111), a long account number too;
 - the name M-Pesa paid is split on its first " - " only (the number before it, the name after);
 - a Payment Entry carrying a payout's receipt is that payout's, listed once;
+- a failed payout that a later M-Pesa payout of the same thing paid (a retry) is left off a
+  document's advice and a batch's proof; its own proof says where it was paid again;
 - what was paid and what is left come from the entries booked (HRMS's count for a claim, the
   Payment Ledger for an invoice), never a stored total a race could leave short (round 4.1, item 1).
 """
@@ -116,6 +118,25 @@ def without_covered(entries, receipts) -> list:
     return [e for e in entries if not receipt_key(e.get("reference_no")) or receipt_key(e.get("reference_no")) not in keys]
 
 
+def paid_again(rows) -> dict:
+    """{a failed M-Pesa payout: the first later M-Pesa payout of the same thing that was paid} (pure).
+    The same thing: the same payee line (its claim_payee), else the document's own party. A retry
+    pays it on a new payout (Retry Failed Payees, Pay again); a failure nothing paid since is not in
+    it, nor one paid before it (a later part payment that failed is still owed)."""
+    def key(r):
+        return (r.get("payee") or None, None if r.get("payee") else (r.get("party") or None))
+
+    paid = [r for r in rows if r.status == "Paid" and r.get("created")]
+    out = {}
+    for r in rows:
+        if r.status != "Failed" or not r.get("created"):
+            continue
+        later = [p for p in paid if key(p) == key(r) and as_datetime(p.created) > as_datetime(r.created)]
+        if later:
+            out[r.payout] = min(later, key=lambda p: as_datetime(p.created))
+    return out
+
+
 # ---------------------------------------------------------------- reading
 def _check(doc) -> None:
     frappe.has_permission(doc.doctype, "read", doc=doc.name, throw=True)
@@ -192,7 +213,7 @@ def _b2b_requests(field: str, name: str) -> list:
         return []
     fields = ["name", "docstatus", "status", "transaction_id", "receiver_public_name", "receiver_shortcode",
               "account_reference", "command_id", "amount", "trans_completed_time", "error_message", "result_desc",
-              "creation"] + (["claim_payee"] if frappe.db.has_column(B2B, "claim_payee") else [])
+              "supplier", "employee", "creation"] + (["claim_payee"] if frappe.db.has_column(B2B, "claim_payee") else [])
     rows = frappe.get_all(B2B, filters={field: name, "docstatus": ["in", [1, 2]]}, fields=fields,
                           order_by="creation asc")
     return [r for r in rows if r.docstatus == 1 or r.status == "Paid"]
@@ -203,7 +224,8 @@ def _b2c_requests(doctype: str, name: str) -> list:
                                                 "docstatus": ["in", [1, 2]]},
                           fields=["name", "docstatus", "status", "transaction_id", "receiver_public_name",
                                   "phone_number", "amount", "transaction_completed_datetime", "error_message",
-                                  "result_desc", "b2c_payment_disbursement_reference", "creation"],
+                                  "result_desc", "party", "b2c_payment_disbursement",
+                                  "b2c_payment_disbursement_reference", "creation"],
                           order_by="creation asc")
     rows = [r for r in rows if r.docstatus == 1 or r.status == "Paid"]
     if rows and frappe.db.has_column(B2C_ROW, "claim_payee"):
@@ -224,7 +246,8 @@ def _b2b_row(r) -> frappe._dict:
         via="M-Pesa B2B", payout=r.name, receipt=cstr(r.transaction_id).strip(), amount=flt(r.amount, 2),
         status=r.status or "Not Initiated", when=r.trans_completed_time or r.creation, name=name or to,
         number=masked(number) if number else to, payee=r.get("claim_payee"),
-        note=(r.result_desc or r.error_message) if r.status == "Failed" else None)
+        note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
+        party=r.get("supplier") or r.get("employee"), created=r.creation, batch=None)
 
 
 def _b2c_row(r) -> frappe._dict:
@@ -233,7 +256,8 @@ def _b2c_row(r) -> frappe._dict:
         via="M-Pesa B2C", payout=r.name, receipt=cstr(r.transaction_id).strip(), amount=flt(r.amount, 2),
         status=r.status or "Not Initiated", when=r.transaction_completed_datetime or r.creation,
         name=name or masked(r.phone_number), number=masked(number or r.phone_number), payee=r.get("claim_payee"),
-        note=(r.result_desc or r.error_message) if r.status == "Failed" else None)
+        note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
+        party=r.get("party"), created=r.creation, batch=r.get("b2c_payment_disbursement"))
 
 
 def _entries(doctype: str, name: str) -> list:
@@ -263,13 +287,21 @@ def _entries(doctype: str, name: str) -> list:
     return entries
 
 
-def payment_rows(doctype: str, name: str, doc=None) -> list:
-    """Every payment of the document, oldest first: its M-Pesa payouts (B2B and B2C, the ones that
-    failed too), the Payment Entries allocated to it that carry no listed payout's receipt and, for a
-    Salary Slip (``doc``), its payroll's bank entries, which its paid total counts (salary_slip_paid)."""
+def _mpesa_rows(doctype: str, name: str) -> list:
+    """The document's M-Pesa payouts (B2B and B2C, the ones that failed too) as printed."""
     field = owed.B2B_DOC_FIELDS.get(doctype) or ("salary_slip" if doctype == SLIP else None)
     rows = [_b2b_row(r) for r in (_b2b_requests(field, name) if field else [])]
-    rows += [_b2c_row(r) for r in _b2c_requests(doctype, name)]
+    return rows + [_b2c_row(r) for r in _b2c_requests(doctype, name)]
+
+
+def payment_rows(doctype: str, name: str, doc=None) -> list:
+    """Every payment of the document, oldest first: its M-Pesa payouts (B2B and B2C, a failed one too
+    unless a later payout of the same thing paid it: paid_again), the Payment Entries allocated to it
+    that carry no listed payout's receipt and, for a Salary Slip (``doc``), its payroll's bank
+    entries, which its paid total counts (salary_slip_paid)."""
+    rows = _mpesa_rows(doctype, name)
+    retried = paid_again(rows)
+    rows = [r for r in rows if r.payout not in retried]
     for e in without_covered(_entries(doctype, name), [r.receipt for r in rows]):
         rows.append(frappe._dict(
             via=e.mode_of_payment or PE, payout=e.name, receipt=cstr(e.reference_no).strip(), amount=e.allocated,
@@ -417,7 +449,8 @@ def mpsa_payout_proof(doc) -> frappe._dict:
     """What the proof of payment of a B2B request, a B2C Payment Disbursement (a block per row), a B2C
     Disbursement Request or a Payment Entry prints: each payout as M-Pesa's confirmation SMS reads, its
     receiver (a phone masked), the shortcode it left from (Mpesa Settings), its charge, the document it
-    paid, and who prepared and who sent it."""
+    paid, and who prepared and who sent it. A failed payout that a later one paid (paid_again) says
+    where; a batch leaves such rows off with a line saying so, unless it has no other row to show."""
     _check(doc)
     doctype = doc.doctype
     if doctype not in PAYOUTS:
@@ -447,15 +480,37 @@ def mpsa_payout_proof(doc) -> frappe._dict:
     else:
         blocks = _entry_blocks(doc)
         sent = _sent_by(PE, doc.name)
+    again, cache = {}, {}
+    for i, b in enumerate(blocks):
+        later = _paid_again_of(b, cache) if b.status == "Failed" else None
+        b.paid_again = (f"{later.payout} · {later.receipt}" if later.receipt else later.payout) if later else ""
+        if later:
+            again[i] = later
+    paid_again_note = ""
+    if doctype == B2C and again and len(again) < len(blocks):
+        on = sorted({later.batch or later.payout for later in again.values()})
+        paid_again_note = (f"{len(again)} failed {'payout was' if len(again) == 1 else 'payouts were'} paid again "
+                           f"later ({', '.join(on)}): not listed.")
+        blocks = [b for i, b in enumerate(blocks) if i not in again]
     for b in blocks:
         b.when_text = when_text(b.when)
         if b.hidden:  # a salary the reader may not see: who and the receipt, never how much
             b.update(amount=None, charge=None, sms="")
     return frappe._dict(title=TITLE[doctype], doctype=doctype, name=doc.name, blocks=blocks,
-                        prepared_by=_who(prepared), sent_by=_who(sent),
+                        paid_again_note=paid_again_note, prepared_by=_who(prepared), sent_by=_who(sent),
                         # what left the shortcode: Paid payouts only (a failed or unsent row moved no money)
                         total=flt(sum(flt(b.amount) for b in blocks if not b.hidden and b.status == "Paid"), 2),
                         **_common(doc))
+
+
+def _paid_again_of(block, cache: dict) -> frappe._dict | None:
+    """The later M-Pesa payout that paid what the failed payout ``block`` was for (paid_again on its
+    document's payouts, read once per document), None when none has or it pays no document."""
+    if not block.get("payout") or not block.get("of"):
+        return None
+    if block.of not in cache:
+        cache[block.of] = paid_again(_mpesa_rows(*block.of))
+    return cache[block.of].get(block.payout)
 
 
 def _b2b_block(r) -> frappe._dict:
@@ -478,7 +533,8 @@ def _b2b_block(r) -> frappe._dict:
         party=party, document=f"{PAID_BY_B2B[field]} {r.get(field)}" if field else "",
         sms=sms(receipt, r.get("amount"), name or party, to, r.get("trans_completed_time"), False) if paid else "",
         note=(r.get("result_desc") or r.get("error_message")) if r.get("status") == "Failed" else None,
-        hidden=_salary_hidden(B2B, r))
+        hidden=_salary_hidden(B2B, r), payout=r.get("name"),
+        of=(PAID_BY_B2B[field], r.get(field)) if field else None)
 
 
 def _b2c_block(r, row=None) -> frappe._dict:
@@ -500,7 +556,9 @@ def _b2c_block(r, row=None) -> frappe._dict:
         sms=sms(receipt, r.get("amount"), name or party, phone, r.get("transaction_completed_datetime"), True)
         if paid else "",
         note=(r.get("result_desc") or r.get("error_message")) if r.get("status") == "Failed" else None,
-        hidden=_salary_hidden(B2C_REQUEST, r))
+        hidden=_salary_hidden(B2C_REQUEST, r), payout=r.get("name"),
+        of=(r.get("reference_doctype"), r.get("reference_name")) if r.get("reference_doctype") and r.get(
+            "reference_name") else None)
 
 
 def _entry_blocks(doc) -> list:
