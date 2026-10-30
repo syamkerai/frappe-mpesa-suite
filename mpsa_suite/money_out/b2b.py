@@ -33,7 +33,7 @@ import contextlib
 import re
 
 import frappe
-from frappe.utils import cint, cstr, flt, now_datetime
+from frappe.utils import cint, cstr, flt, get_datetime, now_datetime
 
 from ..daraja import apis
 from ..daraja import money_out as daraja
@@ -221,7 +221,7 @@ def _record_result(result: dict, ref: str | None) -> None:
             "conversation_id": doc.conversation_id or result.get("ConversationID"),
             "originator_conversation_id": doc.originator_conversation_id
             or result.get("OriginatorConversationID"),
-            "transaction_id": result.get("TransactionID"),
+            "transaction_id": daraja.result_receipt(result, outcome == "Paid"),
             # a Buy Goods (till) Result states no time: when it arrived, flagged as estimated
             # until a Transaction Status query gives Safaricom's own (money_out.b2b_status)
             "trans_completed_time": completed or (now_datetime() if outcome == "Paid" else None),
@@ -305,6 +305,46 @@ def is_employee(doc) -> bool:
 
 def salary_slip(doc) -> str | None:
     return cstr(doc.get("salary_slip")).strip() or None
+
+
+def refused_before(shortcode, command_id, exclude: str | None = None) -> frappe._dict | None:
+    """The last request M-Pesa refused because it found no receiver for this number
+    (daraja.RECEIVER_INVALID), when no request has paid the number since (by when it paid: a request
+    made earlier may have paid after): sending to it again unchanged fails the same way. None
+    otherwise."""
+    shortcode = cstr(shortcode).strip()
+    if not shortcode or command_id not in daraja.B2B_COMMANDS:
+        return None
+    same = {"docstatus": ["in", [1, 2]], "receiver_shortcode": shortcode, "command_id": command_id}
+    refusals = frappe.get_all(
+        B2B_DOCTYPE, filters={**same, "status": "Failed", "result_code": daraja.RECEIVER_INVALID,
+                              **({"name": ["!=", exclude]} if exclude else {})},
+        fields=["name", "creation"])
+    if not refusals:
+        return None
+    refused = max(refusals, key=lambda r: get_datetime(r.creation))
+    if frappe.db.exists(B2B_DOCTYPE, {**same, "status": "Paid", "trans_completed_time": [">", refused.creation]}):
+        return None
+    return refused
+
+
+def refused_warning(shortcode, command_id, exclude: str | None = None) -> str | None:
+    """'MB2B-1 to 813712 failed: <what to do>' when M-Pesa refused the number before (refused_before)."""
+    refused = refused_before(shortcode, command_id, exclude)
+    if not refused:
+        return None
+    return f"{refused.name} to {cstr(shortcode).strip()} failed: {daraja.failure_hint(daraja.RECEIVER_INVALID, command_id)}"
+
+
+def receiver_hint(doc) -> str | None:
+    """The B2B form's warning about its receiver: why M-Pesa refused it and what to do (a failed
+    request), or that M-Pesa refused the same number before (a draft), so nobody sends to it again
+    unchanged (Bromak's till was tried three times, 2026-10-30)."""
+    if doc.docstatus == 1 and doc.status == "Failed":
+        return daraja.failure_hint(doc.get("result_code"), doc.get("command_id"))
+    if doc.docstatus == 0:
+        return refused_warning(doc.get("receiver_shortcode"), doc.get("command_id"), exclude=doc.name)
+    return None
 
 
 def validate_request(doc, at_submit: bool = False) -> None:

@@ -692,7 +692,32 @@ def _document_problem(line, schedule, found, for_update: bool) -> str | None:
 
 
 def _warnings(line) -> list:
-    """Worth reading before paying: M-Pesa money the supplier got outside this schedule."""
+    """Worth reading before paying: a paybill or till M-Pesa refused as no receiver, and M-Pesa money
+    the supplier got outside this schedule."""
+    return _refused(line) + _paid_outside(line)
+
+
+def _refused(line) -> list:
+    """A B2B line to a paybill or till M-Pesa refused as no receiver, with nothing paid to it since
+    (b2b.refused_warning): Plan Again and Pay Selected to it unchanged fail the same way."""
+    if line.route not in (B2B_PAYBILL, B2B_TILL):
+        return []
+    kind, shortcode = line.get("one_off_type"), line.get("one_off_shortcode")
+    if line.party:
+        account_doctype = PARTY_ACCOUNT.get(line.party_type or "")
+        acc = frappe.db.get_value(account_doctype, line.payee_account, ["account_type", "shortcode"],
+                                  as_dict=True) if account_doctype and line.payee_account else None
+        kind, shortcode = (acc.account_type, acc.shortcode) if acc else (None, None)
+    if kind not in (party_accounts.PAYBILL, party_accounts.TILL):
+        return []  # a bank account: the bank's own paybill
+    from . import b2b
+
+    refused = b2b.refused_warning(shortcode, party_accounts.COMMAND_FOR[kind])
+    return [refused] if refused else []
+
+
+def _paid_outside(line) -> list:
+    """M-Pesa money the supplier got outside this schedule."""
     if not line.party or line.party_type != "Supplier":
         return []
     dt, _ = _document(line)
@@ -1322,7 +1347,8 @@ def sync_line(request) -> None:
             return
         values = frappe.db.get_value(
             B2B, name, ["name", "docstatus", "status", "schedule_line", "transaction_id", "trans_completed_time",
-                        "entry_status", "error_message", "result_desc", "send_started_on"], as_dict=True)
+                        "entry_status", "error_message", "result_desc", "result_code", "command_id", "send_started_on"],
+            as_dict=True)
         if not values or not cstr(values.schedule_line).strip():
             return
         line = frappe.db.get_value(LINE, values.schedule_line, ["name", "parent", "request", *SYSTEM], as_dict=True)
@@ -1376,10 +1402,13 @@ def _mirror(values) -> dict:
     elif status == "Failed":
         line_status = FAILED
         problem = _plain(values.error_message or values.result_desc) or "M-Pesa refused it."
+        hint = daraja.failure_hint(values.get("result_code"), values.get("command_id"))
+        if hint:  # sending again to the same number fails the same way: say what to do instead
+            problem = f"{problem} {hint}"
     else:
         line_status = SENDING
     paid = line_status == PAID
-    return {"status": line_status, "receipt": cstr(values.transaction_id).strip() or None,
+    return {"status": line_status, "receipt": (cstr(values.transaction_id).strip() or None) if paid else None,
             "paid_on": values.trans_completed_time if paid else None,
             "entry_status": values.entry_status if paid else None, "last_problem": problem}
 

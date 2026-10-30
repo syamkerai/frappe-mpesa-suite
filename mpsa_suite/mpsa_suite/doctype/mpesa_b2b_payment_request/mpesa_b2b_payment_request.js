@@ -76,6 +76,15 @@ frappe.ui.form.on("Mpesa B2B Payment Request", {
 				"blue"
 			);
 		}
+		// M-Pesa refused this receiver (or, on a draft, the same number before): what to do instead
+		const receiver_hint = (frm.doc.__onload || {}).receiver_hint;
+		if (receiver_hint) {
+			// in a div: show_message inserts text with no tag as text, which would escape it a second time
+			frm.dashboard.set_headline(
+				`<div>${frappe.utils.escape_html(receiver_hint)}</div>`,
+				frm.doc.docstatus === 1 ? "red" : "orange"
+			);
+		}
 		if (frm.doc.docstatus === 0 && !frm.is_new()) mpsa_b2b.load_left(frm, false);
 		mpsa_b2b.entry_actions(frm);
 		// Ask Safaricom (Transaction Status): what a till's Result left out (receiver, charge,

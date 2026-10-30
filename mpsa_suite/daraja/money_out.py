@@ -250,6 +250,34 @@ def b2b_outcome(result: dict) -> str:
     return "Paid" if result_ok(result) else "Failed"
 
 
+def result_receipt(result: dict, paid: bool):
+    """The M-Pesa receipt a payout's Result gives, kept only when it paid: a failed Result's
+    TransactionID is no receipt (B2B sends a placeholder like "UJU0000000", B2C the failed
+    attempt's ID), and the raw Result stays in its Integration Request."""
+    receipt = str((result or {}).get("TransactionID") or "").strip()
+    return receipt if paid and receipt else None
+
+
+# B2B Result when M-Pesa finds no receiver for the number it was given (seen live, 2026-10-30)
+RECEIVER_INVALID = "SFC_IC0003"
+
+
+def failure_hint(result_code, command_id) -> str | None:
+    """What to do about a B2B failure that sending again to the same number cannot fix, or None.
+    "Receiver party is invalid" on Buy Goods: M-Pesa's business payments take a till's Store Number
+    (or Head Office number), which can differ from the till number customers pay."""
+    if str(result_code or "").strip().upper() != RECEIVER_INVALID:
+        return None
+    if command_id == B2B_BUY_GOODS:
+        return ("M-Pesa refused this till number as the receiver. Business payments to a till go to its Store "
+                "Number (or Head Office number), which can differ from the till number customers pay. Ask the "
+                "business for it (their Lipa na M-Pesa SMS, or *234# > M-PESA Business Till > Query My Till), "
+                "or for a paybill, and pay that number instead. Sending again to the same number fails the "
+                "same way.")
+    return ("M-Pesa does not know this paybill number as a receiver. Check the number with the business and "
+            "pay the right one instead. Sending again to the same number fails the same way.")
+
+
 def b2c_status_outcome(result: dict, expected_amount=None) -> tuple[str, str]:
     """Decide what a Transaction Status result means for a B2C payout.
 

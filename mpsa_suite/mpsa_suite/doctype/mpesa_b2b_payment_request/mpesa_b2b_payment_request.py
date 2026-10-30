@@ -5,7 +5,7 @@ import frappe
 from frappe.model.document import Document
 
 from ....money_out import maker_checker, send_confirm
-from ....money_out.b2b import send_b2b, validate_request
+from ....money_out.b2b import receiver_hint, send_b2b, validate_request
 from ....money_out.schedule import INTERRUPTED, assert_line_due, check_request
 from ....permissions import ADMIN_ROLES, PAYOUT_ROLES, require, require_named_user
 
@@ -24,6 +24,12 @@ MAY_HAVE_PAID = ("Initiated", "Paid", "Unknown")
 
 class MpesaB2BPaymentRequest(Document):
     """Pay a supplier's paybill or till from an M-Pesa shortcode. Submitting sends it."""
+
+    def onload(self):
+        # the form's warning when M-Pesa refused this receiver, or refused the same number before
+        hint = receiver_hint(self)
+        if hint:
+            self.set_onload("receiver_hint", hint)
 
     def validate(self):
         if self.docstatus == 0:

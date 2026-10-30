@@ -111,6 +111,12 @@ def receipt_key(value) -> str:
     return cstr(value).strip().upper()
 
 
+def paid_receipt(r) -> str:
+    """A payout's M-Pesa receipt, only when it paid: a failed one may still hold the placeholder or
+    the failed attempt's ID that M-Pesa sent (stored before round 4.2), which is no receipt."""
+    return cstr(r.get("transaction_id")).strip() if r.get("status") == "Paid" else ""
+
+
 def without_covered(entries, receipts) -> list:
     """The Payment Entries whose Reference No is no listed payout's receipt (pure): an entry the
     suite booked for a payout carries its receipt and is that payout's, printed once."""
@@ -261,7 +267,7 @@ def _b2b_row(r) -> frappe._dict:
     if cstr(r.account_reference).strip():
         to += f" acc {masked_account(r.account_reference)}"
     return frappe._dict(
-        via="M-Pesa B2B", payout=r.name, receipt=cstr(r.transaction_id).strip(), amount=flt(r.amount, 2),
+        via="M-Pesa B2B", payout=r.name, receipt=paid_receipt(r), amount=flt(r.amount, 2),
         status=r.status or "Not Initiated", when=r.trans_completed_time or r.creation, name=name or to,
         number=masked(number) if number else to, payee=r.get("claim_payee"),
         note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
@@ -271,7 +277,7 @@ def _b2b_row(r) -> frappe._dict:
 def _b2c_row(r) -> frappe._dict:
     number, name = split_receiver(r.receiver_public_name)
     return frappe._dict(
-        via="M-Pesa B2C", payout=r.name, receipt=cstr(r.transaction_id).strip(), amount=flt(r.amount, 2),
+        via="M-Pesa B2C", payout=r.name, receipt=paid_receipt(r), amount=flt(r.amount, 2),
         status=r.status or "Not Initiated", when=r.transaction_completed_datetime or r.creation,
         name=name or masked(r.phone_number), number=masked(number or r.phone_number), payee=r.get("claim_payee"),
         note=(r.result_desc or r.error_message) if r.status == "Failed" else None,
@@ -548,8 +554,8 @@ def _b2b_block(r) -> frappe._dict:
     to = cstr(r.get("receiver_shortcode")).strip()
     if cstr(r.get("account_reference")).strip():
         to += f" acc {masked_account(r.account_reference)}"
-    receipt = cstr(r.get("transaction_id")).strip()
-    charge, how = _charge(B2B, r)
+    receipt = paid_receipt(r)
+    charge, how = _charge(B2B, r) if r.get("status") == "Paid" else (None, "")  # a failed payout cost nothing
     field = next((f for f in PAID_BY_B2B if cstr(r.get(f)).strip()), None)
     payee = cstr(r.get("claim_payee")).strip()
     party = (r.get("supplier") or r.get("employee") or "")
@@ -569,9 +575,9 @@ def _b2b_block(r) -> frappe._dict:
 
 def _b2c_block(r, row=None) -> frappe._dict:
     number, name = split_receiver(r.get("receiver_public_name"))
-    receipt = cstr(r.get("transaction_id")).strip()
+    receipt = paid_receipt(r)
     phone = masked(number or r.get("phone_number"))
-    charge, how = _charge(B2C_REQUEST, r)
+    charge, how = _charge(B2C_REQUEST, r) if r.get("status") == "Paid" else (None, "")  # nor this one
     payee = cstr((row or {}).get("claim_payee")).strip()
     party = r.get("party") or ""
     if payee:
@@ -595,10 +601,12 @@ def _entry_blocks(doc) -> list:
     """A Payment Entry: the M-Pesa payout whose receipt it carries, else the entry itself."""
     receipt = cstr(doc.get("reference_no")).strip()
     if receipt:
-        request = frappe.db.get_value(B2C_REQUEST, {"transaction_id": receipt, "docstatus": ["in", [1, 2]]}, "name")
+        request = frappe.db.get_value(B2C_REQUEST, {"transaction_id": receipt, "status": "Paid",
+                                                    "docstatus": ["in", [1, 2]]}, "name")
         if request:
             return [_b2c_block(frappe.get_doc(B2C_REQUEST, request))]
-        request = frappe.db.get_value(B2B, {"transaction_id": receipt, "docstatus": ["in", [1, 2]]}, "name")
+        request = frappe.db.get_value(B2B, {"transaction_id": receipt, "status": "Paid", "docstatus": ["in", [1, 2]]},
+                                      "name")
         if request:
             return [_b2b_block(frappe.get_doc(B2B, request))]
     documents = ", ".join(f"{r.reference_doctype} {r.reference_name}" for r in doc.get("references") or [])

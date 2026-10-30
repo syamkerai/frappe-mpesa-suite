@@ -9,6 +9,7 @@ from frappe.utils import get_datetime
 
 from ...daraja.apis import initiator_party_a
 from ...daraja.guard import is_zero_code
+from ...daraja.money_out import result_receipt
 from ...utils.doctype_names import B2C_REQUEST_DOCTYPE, MPESA_SETTINGS_DOCTYPE
 from ..abstract import B2CConnector
 from ..base_connector import (
@@ -283,12 +284,14 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             params = [params]
         result_dict = {p.get("Key"): p.get("Value") for p in params if isinstance(p, dict)}
 
+        paid = str(result.get("ResultCode")) == "0"
         update_map = {
-            "status": "Paid" if str(result.get("ResultCode")) == "0" else "Failed",
+            "status": "Paid" if paid else "Failed",
             "result_code": result.get("ResultCode"),
             "result_desc": result.get("ResultDesc"),
             "conversation_id": result.get("ConversationID"),
-            "transaction_id": result.get("TransactionID"),
+            # a failed attempt's TransactionID is no receipt (it stays in the callback's log)
+            "transaction_id": result_receipt(result, paid),
             "recipient_is_registered_customer": result_dict.get(
                 "B2CRecipientIsRegisteredCustomer"
             ),

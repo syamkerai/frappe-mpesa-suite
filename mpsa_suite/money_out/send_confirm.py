@@ -508,13 +508,21 @@ def _payee_problems(doc) -> list:
 def _warnings(doc) -> list:
     """What the person approving should check, which does not stop them: a payee account that pays a
     third party's bank account, or an employee paid to a business paybill or till (the warnings
-    party_accounts.validate_account shows when the account is saved)."""
+    party_accounts.validate_account shows when the account is saved); and a B2B payment, or a paybill
+    or till account, to a number M-Pesa refused as no receiver and nothing has paid since
+    (b2b.refused_warning: sending to it unchanged fails the same way)."""
+    from . import b2b
     from . import party_accounts as pa
 
+    if doc.doctype == B2B:
+        refused = b2b.refused_warning(doc.get("receiver_shortcode"), doc.get("command_id"), exclude=doc.name)
+        return [refused] if refused else []
     if doc.doctype not in ACCOUNTS:
         return []
     p = pa.profile(doc)
-    out = []
+    command = {pa.PAYBILL: "BusinessPayBill", pa.TILL: "BusinessBuyGoods"}.get(doc.get("account_type"))
+    refused = b2b.refused_warning(doc.get("shortcode"), command) if command else None
+    out = [refused] if refused else []
     if pa.is_bank(doc):
         name = pa.party_name(p, doc.get(p.party_field))
         holder = cstr(doc.get("account_holder_name")).strip()

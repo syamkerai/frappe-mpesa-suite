@@ -97,6 +97,7 @@
    "fieldname": "shortcode",
    "fieldtype": "Data",
    "label": "Till / Paybill Number",
+   "description": "Till: its Store Number (or Head Office number), which M-Pesa business payments go to; M-Pesa can refuse the till number customers pay. Paybill: as the business gives it.",
    "depends_on": "eval:doc.payee_type && doc.payee_type!=\"Phone (B2C)\"",
    "mandatory_depends_on": "eval:doc.payee_type==\"Till (Buy Goods)\" || doc.payee_type==\"Paybill\"",
    "read_only_depends_on": "eval:doc.payee_type==\"Bank Account (via Bank Paybill)\""

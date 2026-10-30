@@ -64,7 +64,7 @@
    "reqd": 1,
    "default": "Paybill",
    "in_list_view": 1,
-   "description": "Phone (B2C): paid to an M-Pesa line. Paybill: a business paybill with the account number it gave you. Till (Buy Goods): a till number. Bank Account (via Bank Paybill): paid to an account at a bank through the bank's M-Pesa paybill, picked from M-Pesa Bank Paybills."
+   "description": "Phone (B2C): paid to an M-Pesa line. Paybill: a business paybill with the account number it gave you. Till (Buy Goods): the till's Store Number (or Head Office number), which M-Pesa business payments go to; M-Pesa can refuse the till number customers pay (\"Receiver party is invalid\"). Bank Account (via Bank Paybill): paid to an account at a bank through the bank's M-Pesa paybill, picked from M-Pesa Bank Paybills."
   },
   {
    "fieldname": "phone",
@@ -92,7 +92,7 @@
    "label": "Paybill / Till Number",
    "in_list_view": 1,
    "search_index": 1,
-   "description": "Paybill or till: exactly as given in writing, digits only. Bank account: the bank's paybill, copied from the bank.",
+   "description": "Paybill: exactly as given in writing, digits only. Till: its Store Number (or Head Office number), exactly as the business gives it in writing (their Lipa na M-Pesa SMS, or *234# > M-PESA Business Till > Query My Till), digits only. Bank account: the bank's paybill, copied from the bank.",
    "depends_on": "eval:doc.account_type!=\"Phone (B2C)\"",
    "mandatory_depends_on": "eval:doc.account_type==\"Paybill\" || doc.account_type==\"Till (Buy Goods)\"",
    "read_only_depends_on": "eval:doc.account_type==\"Bank Account (via Bank Paybill)\""
