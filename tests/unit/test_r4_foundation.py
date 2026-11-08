@@ -107,7 +107,21 @@ def test_another_user_can_be_asked_about(env):
 def boot(env):
     perms, frappe = env
     _settings(frappe, refuse_administrator_payouts=1)
+    frappe.pr_create = True  # create on Payment Request (the site's permission rules)
+    frappe.has_permission = lambda doctype, ptype="read", *a, **kw: (
+        doctype == "Payment Request" and ptype == "create" and frappe.pr_create
+    )
     return importlib.import_module("mpsa_suite.boot"), frappe
+
+
+def test_collecting_needs_create_on_payment_request_too(boot):
+    # the desk cannot tell (ERPNext sets in_create on Payment Request, so frappe.model.can_create
+    # is false for everyone): the flag carries the server's permission
+    module, frappe = boot
+    frappe.session.user, frappe.user_roles = "someone@example.com", {"Sales User"}
+    assert module.flags()["can_collect"] is True
+    frappe.pr_create = False
+    assert module.flags()["can_collect"] is False
 
 
 @pytest.mark.parametrize("roles,expected", [

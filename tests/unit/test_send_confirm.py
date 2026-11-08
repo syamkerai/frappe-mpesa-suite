@@ -795,6 +795,7 @@ def test_who_made_a_reversal_cannot_send_it(env):
 def test_system_manager_is_offered_neither_send_nor_approve(env, roles, expected):
     boot = importlib.import_module("mpsa_suite.boot")
     env.frappe.session.user, env.frappe.user_roles = "someone@example.com", roles
+    env.frappe.has_permission = lambda doctype, ptype="read", *a, **kw: True  # create on Payment Request
     assert boot.flags() == dict(dict.fromkeys(boot.FLAGS, False), maker_checker=True, **expected)
 
 

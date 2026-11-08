@@ -206,7 +206,9 @@ def test_a_submitted_invoice_offers_request_payment_to_collectors_who_create_pay
     shown = ["M-Pesa > Request Payment"]
     assert _buttons(tmp_path, SI_FILES, "Sales Invoice", SUBMITTED_SI, mpsa=COLLECT, perms=PR_CREATE)[0] == shown
     assert _buttons(tmp_path, SI_FILES, "Sales Invoice", SUBMITTED_SI, mpsa={}, perms=PR_CREATE)[0] == []
-    assert _buttons(tmp_path, SI_FILES, "Sales Invoice", SUBMITTED_SI, mpsa=COLLECT)[0] == []
+    # create on Payment Request is in can_collect (boot.py): frappe.model.can_create is always false
+    # for it on a real site (ERPNext sets in_create), so the form never asks it
+    assert _buttons(tmp_path, SI_FILES, "Sales Invoice", SUBMITTED_SI, mpsa=COLLECT)[0] == shown
     for change in ({"is_pos": 1}, {"is_return": 1}, {"outstanding_amount": 0}, {"currency": "USD"}, {"docstatus": 0}):
         doc = dict(SUBMITTED_SI, **change)
         assert _buttons(tmp_path, SI_FILES, "Sales Invoice", doc, mpsa=COLLECT, perms=PR_CREATE)[0] == [], change

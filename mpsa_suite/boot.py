@@ -40,7 +40,10 @@ def flags(user: str | None = None) -> dict:
         "can_prepare": not roles.isdisjoint(PREPARE_ROLES),
         "can_pay": named and not roles.isdisjoint(PAYOUT_ROLES),
         "can_approve": named and not roles.isdisjoint(ADMIN_ROLES),
-        "can_collect": not roles.isdisjoint(COLLECT_ROLES),
+        # and may create a Payment Request, the server's own rule (money_in.collect): the desk's
+        # frappe.model.can_create is always false for it (ERPNext sets in_create on Payment Request)
+        "can_collect": not roles.isdisjoint(COLLECT_ROLES)
+        and bool(frappe.has_permission("Payment Request", "create", user=user)),
         "can_configure": not roles.isdisjoint(CONFIG_ROLES),
         "can_see_salaries": bool(can_see_salaries(user)),
         "maker_checker": bool(maker_checker_on()),

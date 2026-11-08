@@ -791,7 +791,9 @@ function mpesa_inject_dialog_styles() {
 frappe.provide("mpsa_collect");
 
 mpsa_collect.can_request = function () {
-	return Boolean(frappe.boot.mpsa?.can_collect) && frappe.model.can_create("Payment Request");
+	// can_collect already includes create on Payment Request (boot.py); frappe.model.can_create
+	// cannot say it: ERPNext marks Payment Request in_create, so it is false for everyone
+	return Boolean(frappe.boot.mpsa?.can_collect);
 };
 
 // 0712345678, 712345678 or +254 712 345 678 -> 254712345678 (what the prompt's server functions store)
