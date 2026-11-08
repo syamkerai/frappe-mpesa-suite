@@ -39,7 +39,11 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 # app_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
 # mpsa_send.js: the "Send via M-Pesa" / "Approve" confirmation every payout and payee account form uses
-app_include_js = ["/assets/mpsa_suite/js/utils.js", "/assets/mpsa_suite/js/mpsa_send.js"]
+# ?v=<content hash>: /assets is cached as immutable for a year, so a changed script needs a new URL
+# (assets.py). Private import name: Frappe collects every public name in hooks.py as a hook.
+from mpsa_suite.assets import versioned as _versioned  # noqa: E402
+
+app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js")]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"

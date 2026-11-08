@@ -5,6 +5,7 @@ Suite Settings fields and the Expense Claim / Employee Advance links on the B2B 
 import ast
 import importlib
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -276,8 +277,25 @@ def _defines(dotted: str) -> bool:
 
 
 def test_desk_scripts_include_the_send_confirmation():
-    assert _hook("app_include_js") == ["/assets/mpsa_suite/js/utils.js", "/assets/mpsa_suite/js/mpsa_send.js"]
+    # app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js")]
+    calls = _hooks()["app_include_js"].elts
+    assert [(c.func.id, c.args[0].value) for c in calls] == [("_versioned", "utils.js"), ("_versioned", "mpsa_send.js")]
     assert (APP / "public" / "js" / "mpsa_send.js").is_file()
+
+
+def test_desk_script_urls_change_when_the_script_does(tmp_path, monkeypatch):
+    # /assets is served immutable for a year: a changed script must be a new URL, an unchanged one the same
+    assets = importlib.import_module("mpsa_suite.assets")
+    for name in ("utils.js", "mpsa_send.js"):
+        url = assets.versioned(name)
+        assert re.fullmatch(rf"/assets/mpsa_suite/js/{re.escape(name)}\?v=[0-9a-f]{{12}}", url), url
+        assert assets.versioned(name) == url
+    monkeypatch.setattr(assets, "JS_DIR", tmp_path)
+    (tmp_path / "x.js").write_text("a")
+    first = assets.versioned("x.js")
+    (tmp_path / "x.js").write_text("b")
+    assert assets.versioned("x.js") != first
+    assert assets.versioned("missing.js") == "/assets/mpsa_suite/js/missing.js"
 
 
 def _scripts(hook: dict) -> list:
