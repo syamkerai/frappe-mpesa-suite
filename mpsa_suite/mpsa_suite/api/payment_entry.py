@@ -121,6 +121,14 @@ def create_payment_entry(
     pe.paid_to_account_currency = (
         party_account_currency if payment_type == "Pay" else bank.account_currency
     )
+    # ERPNext 15.124 stopped filling these in set_missing_values, and set_amounts then divides by
+    # get_exchange_rate() = None (TypeError). Set them here: 1 for the company currency.
+    pe.source_exchange_rate = (
+        1 if pe.paid_from_account_currency == company_currency else (conversion_rate or 1)
+    )
+    pe.target_exchange_rate = (
+        1 if pe.paid_to_account_currency == company_currency else (conversion_rate or 1)
+    )
     pe.paid_amount = paid_amount
     pe.received_amount = received_amount
     pe.letter_head = frappe.get_value("Company", company, "default_letter_head")
