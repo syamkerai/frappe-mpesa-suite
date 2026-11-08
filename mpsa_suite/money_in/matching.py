@@ -26,7 +26,9 @@ from .common import (
     REVERSAL_HOLDS,
     compact,
     enabled,
+    is_fully_billed,
     log_match,
+    order_invoices,
     parse_transtime,
     reversed_registers,
     suite_int,
@@ -124,9 +126,16 @@ def book_for_submitted_orders(limit: int = 100) -> None:
         (REVERSAL_HOLDS, limit),
         pluck="name",
     )
+    from .sales_order import book_on_invoice
+
     for name in rows:
         frappe.db.savepoint("mpesa_so_book")
         try:
+            so_name = frappe.db.get_value(REGISTER, name, "matched_reference_name")
+            if so_name and is_fully_billed(so_name):
+                # invoiced since the receipt was matched: it pays the order's invoice
+                book_on_invoice(frappe.get_doc(REGISTER, name), frappe.get_doc("Sales Order", so_name))
+                continue
             book_register(name, "Sales Order")
         except Exception:
             frappe.db.rollback(save_point="mpesa_so_book")
@@ -159,6 +168,8 @@ def match_register(name: str) -> Match | None:
         log_match("Unmatched", register=register, once=True, details=f"Account reference: {register.billrefnumber or '-'}")
         return None
 
+    match = retarget_billed_order(register, match)
+
     if match.get("hold"):
         log_match("Matched", match.method, register=register, once=True, details=match.details)
         return None
@@ -176,6 +187,38 @@ def match_register(name: str) -> Match | None:
 
     booking.apply_match(register, match)
     return match
+
+
+def retarget_billed_order(register, match):
+    """A receipt for an order that is already invoiced pays that order's invoice.
+
+    ERPNext refuses payments against a fully billed order, and paying the customer's oldest
+    invoices instead puts one buyer's money on another's debt when walk-in sales share one
+    customer (Cash Cust - ...). So: the order's own open invoice; one whose balance equals the
+    amount when several are open; otherwise staff decide.
+    """
+    if match.get("doctype") != "Sales Order" or match.get("hold") or match.get("ambiguous"):
+        return match
+    if not is_fully_billed(match.name):
+        return match
+    tol = tolerance()
+    open_invoices = [i for i in order_invoices(match.name) if flt(i.outstanding_amount) > tol]
+    if not open_invoices:
+        return Match(method=match.method, hold=True, customer=match.get("customer"),
+                     details=f"Sales Order {match.name} is invoiced and its invoices are paid: left for staff")
+    if len(open_invoices) > 1:
+        exact = [i for i in open_invoices if abs(flt(i.outstanding_amount) - flt(register.transamount)) <= tol]
+        if len(exact) != 1:
+            return Match(method=match.method, ambiguous=True, candidates=[i.name for i in open_invoices],
+                         details=f"Sales Order {match.name} has several open invoices")
+        open_invoices = exact
+    invoice = open_invoices[0]
+    details = f"Sales Order {match.name} invoiced as {invoice.name}"
+    if match.get("details"):
+        details = f"{match.details}; {details}"
+    return Match(method=match.method, doctype="Sales Invoice", name=invoice.name,
+                 customer=invoice.customer or match.get("customer"), details=details,
+                 **({"express": match.express} if match.get("express") else {}))
 
 
 # ---------------------------------------------------------------- resolvers

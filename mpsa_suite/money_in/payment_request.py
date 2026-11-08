@@ -5,7 +5,7 @@ from frappe.utils import add_days, cstr, flt, nowdate
 
 from ..permissions import COLLECT_ROLES, require
 from ..utils.phone import to_local
-from .common import EXPRESS, REGISTER, enabled, tolerance
+from .common import EXPRESS, REGISTER, enabled, order_settled_by_invoices, tolerance
 
 
 def is_mpesa(doc) -> bool:
@@ -139,7 +139,7 @@ def sync_statuses() -> None:
             settled = bool(
                 so and so.docstatus == 1 and flt(so.advance_paid) > 0
                 and flt(so.advance_paid) + tol >= flt(so.rounded_total or so.grand_total)
-            )
+            ) or bool(so and order_settled_by_invoices(pr.reference_name))  # paid on its invoice
         elif pr.reference_doctype == "Sales Invoice":
             si = frappe.db.get_value("Sales Invoice", pr.reference_name, ["docstatus", "outstanding_amount"], as_dict=True)
             settled = bool(si and si.docstatus == 1 and flt(si.outstanding_amount) <= tol)

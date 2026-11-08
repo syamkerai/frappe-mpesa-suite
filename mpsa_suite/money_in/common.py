@@ -55,6 +55,37 @@ def erpnext_installed() -> bool:
     return "erpnext" in frappe.get_installed_apps()
 
 
+# ---------------------------------------------------------------- invoiced orders
+def is_fully_billed(sales_order: str) -> bool:
+    """Submitted order ERPNext no longer takes payments against (it only pays unbilled orders)."""
+    so = frappe.db.get_value("Sales Order", sales_order, ["docstatus", "per_billed"], as_dict=True)
+    return bool(so and so.docstatus == 1 and flt(so.per_billed) >= 99.99)
+
+
+def order_invoices(sales_order: str) -> list:
+    """Submitted, non-return Sales Invoices that bill this order (name, customer, outstanding_amount)."""
+    names = sorted(set(frappe.get_all(
+        "Sales Invoice Item", filters={"sales_order": sales_order, "docstatus": 1}, pluck="parent"
+    ) or []))
+    rows = []
+    for name in names:
+        row = frappe.db.get_value(
+            "Sales Invoice", name, ["name", "customer", "outstanding_amount", "is_return", "docstatus"], as_dict=True
+        )
+        if row and row.docstatus == 1 and not row.is_return:
+            rows.append(row)
+    return rows
+
+
+def order_settled_by_invoices(sales_order: str) -> bool:
+    """A fully billed order whose invoices are all paid: what the customer owed on it is settled."""
+    if not is_fully_billed(sales_order):
+        return False
+    invoices = order_invoices(sales_order)
+    tol = tolerance()
+    return bool(invoices) and all(flt(i.outstanding_amount) <= tol for i in invoices)
+
+
 # ---------------------------------------------------------------- shortcode -> books
 def settings_for_shortcode(shortcode) -> str | None:
     """Mpesa Settings name for a paybill/till number (business shortcode or till).

@@ -9,7 +9,17 @@ import frappe
 from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime, strip_html
 
 from ..compat import get_setting
-from .common import MATCH_LOG, REGISTER, as_user, enabled, log_match, reversed_registers, suite, tolerance
+from .common import (
+    MATCH_LOG,
+    REGISTER,
+    as_user,
+    enabled,
+    is_fully_billed,
+    log_match,
+    reversed_registers,
+    suite,
+    tolerance,
+)
 
 REFUSED = "could not release it"  # in the Match Log details of a refused release
 
@@ -54,6 +64,12 @@ def process_order(so_name: str) -> None:
         return
     so = frappe.get_doc("Sales Order", so_name)
     receipts = receipts_for(so_name)
+    if so.docstatus == 1 and is_fully_billed(so_name):
+        # invoiced: ERPNext takes no more payments on the order; its receipts pay its invoice
+        for reg in receipts:
+            if reg.docstatus == 0 and not reg.get("payment_entry"):
+                book_on_invoice(reg, so)
+        return
     if so.docstatus == 2 or so.status in ("Closed", "Completed"):
         # order is gone: book its waiting receipts as customer advances instead of retrying forever
         for reg in receipts:
@@ -84,6 +100,31 @@ def process_order(so_name: str) -> None:
     for reg in receipts:
         if reg.docstatus == 0 and not reg.get("payment_entry"):
             book_register(reg.name, "Sales Order")
+
+
+def book_on_invoice(reg, so) -> None:
+    """Book a receipt for an invoiced order on that order's own open invoice.
+
+    All its invoices paid: the money is the customer's, booked as their advance (as for a
+    completed order). Several open invoices and none matching the amount: left for staff.
+    """
+    from .booking import book_register, stamp
+    from .matching import Match, retarget_billed_order
+
+    match = retarget_billed_order(
+        reg, Match(method="Sales Order", doctype="Sales Order", name=so.name, customer=so.customer)
+    )
+    if match.get("ambiguous"):
+        log_match("Ambiguous", "Sales Order", register=reg, once=True, candidates=match.candidates,
+                  reference_doctype="Sales Order", reference_name=so.name, details=match.details)
+        return
+    if match.get("doctype") == "Sales Invoice":
+        stamp(reg, match)
+        book_register(reg.name, "Sales Order")
+        return
+    reg.db_set({"matched_reference_doctype": None, "matched_reference_name": None,
+                "match_method": "Customer advance (order invoiced and paid)"}, update_modified=False)
+    book_register(reg.name, "Sales Order")
 
 
 def release_order(so_name: str) -> None:
