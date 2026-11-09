@@ -3,21 +3,30 @@
 A draft order cannot take an advance in ERPNext, so receipts wait (matched, unbooked)
 until they cover the order. Then the order is released through its Workflow as the
 configured approver user, and every receipt is booked as an advance against it.
+
+Receipts are C2B registers and paid STK prompts on the order's Payment Requests. A prompt
+paid on a draft order cannot be booked either (ERPNext: "Sales Order must be submitted"), so
+it waits here like a register and counts toward the order (money_in.stk_verify.book sends it
+here instead of failing). When Safaricom also sends a C2B register for a prompt's receipt, the
+prompt books it and the register is not counted.
 """
 
 import frappe
-from frappe.utils import add_to_date, cstr, flt, get_datetime, now_datetime, strip_html
+from frappe.utils import add_to_date, cint, cstr, flt, get_datetime, now_datetime, strip_html
 
 from ..compat import get_setting
 from .common import (
+    EXPRESS,
     MATCH_LOG,
     REGISTER,
     as_user,
     enabled,
     is_fully_billed,
     log_match,
+    receipt_reversal,
     reversed_registers,
     suite,
+    suite_int,
     tolerance,
 )
 
@@ -54,7 +63,66 @@ def receipts_for(so_name: str) -> list:
     )
     names = list(dict.fromkeys(by_ref + by_match))
     held = set(reversed_registers(names))
-    return [frappe.get_doc(REGISTER, n) for n in names if n not in held]
+    registers = [frappe.get_doc(REGISTER, n) for n in names if n not in held]
+    carried = prompt_receipts(r.transid for r in registers)
+    # a receipt an STK prompt carries is the prompt's (paid_prompts_for): its register would cancel
+    # itself as a duplicate on submit, and counting both would count the money twice
+    return [r for r in registers if cstr(r.transid).strip() not in carried]
+
+
+def prompt_receipts(transids) -> set:
+    """The receipts among ``transids`` that a submitted Mpesa Express Request carries."""
+    transids = [t for t in dict.fromkeys(cstr(t).strip() for t in transids) if t]
+    if not transids:
+        return set()
+    return set(frappe.get_all(EXPRESS, filters={"transaction_id": ["in", transids], "docstatus": 1},
+                              pluck="transaction_id"))
+
+
+def _verified_only(filters: dict) -> dict:
+    """Only prompts Safaricom confirmed (STK Query), where the site has the verification field."""
+    if frappe.get_meta(EXPRESS).has_field("verification_status"):
+        filters["verification_status"] = "Verified"
+    return filters
+
+
+def paid_prompts_for(so_name: str) -> list:
+    """Paid STK prompts on the order's Payment Requests that are not booked yet.
+
+    Cancelled requests count too: a re-prompt supersedes (cancels) the older request, and the
+    customer may have paid the older prompt meanwhile (stk_verify books it on the newer one).
+    Only Completed, confirmed prompts with a receipt that no submitted Payment Entry carries and
+    no reversal holds. Rows: name, transaction_id, amount, transaction_date.
+    """
+    requests = payment_requests_for(so_name)
+    if not requests:
+        return []
+    rows = frappe.get_all(
+        EXPRESS,
+        filters=_verified_only({"reference_doctype": "Payment Request", "reference_name": ["in", requests],
+                                "docstatus": 1, "status": "Completed", "is_reconciled": 0,
+                                "transaction_id": ["is", "set"]}),
+        fields=["name", "transaction_id", "amount", "transaction_date"],
+        order_by="creation asc",
+    )
+    out, seen = [], set()
+    for row in rows:
+        receipt = cstr(row.transaction_id).strip()
+        if not receipt or receipt in seen:
+            continue
+        if frappe.db.exists("Payment Entry", {"reference_no": receipt, "docstatus": 1}):
+            continue  # booked another way (its C2B register, by hand)
+        if receipt_reversal(receipt):
+            continue  # the money is, or may be, back with the payer
+        seen.add(receipt)
+        out.append(row)
+    return out
+
+
+def _book_prompt(name: str) -> None:
+    from .stk_verify import book
+
+    book(name, commit=False)  # inside the caller's transaction; a failure is rolled back and logged there
 
 
 def process_order(so_name: str) -> None:
@@ -64,11 +132,14 @@ def process_order(so_name: str) -> None:
         return
     so = frappe.get_doc("Sales Order", so_name)
     receipts = receipts_for(so_name)
+    prompts = paid_prompts_for(so_name)
     if so.docstatus == 1 and is_fully_billed(so_name):
         # invoiced: ERPNext takes no more payments on the order; its receipts pay its invoice
         for reg in receipts:
             if reg.docstatus == 0 and not reg.get("payment_entry"):
                 book_on_invoice(reg, so)
+        for prompt in prompts:  # booked on the order's open invoices (utils._book_on_billed_order)
+            _book_prompt(prompt.name)
         return
     if so.docstatus == 2 or so.status in ("Closed", "Completed"):
         # order is gone: book its waiting receipts as customer advances instead of retrying forever
@@ -77,21 +148,26 @@ def process_order(so_name: str) -> None:
                 reg.db_set({"matched_reference_doctype": None, "matched_reference_name": None,
                             "match_method": "Customer advance (order closed)"}, update_modified=False)
                 book_register(reg.name, "Sales Order")
+        for prompt in prompts:
+            log_match("Error", "Sales Order", express=prompt, once=True, reference_doctype="Sales Order",
+                      reference_name=so_name,
+                      details=f"M-Pesa prompt {prompt.name} (receipt {prompt.transaction_id}) was paid for an order "
+                              "that is closed or cancelled: book it by hand.")
         return
 
-    if not receipts:
+    if not receipts and not prompts:
         return
     for reg in receipts:  # make sure every receipt points at the order and its customer
         if reg.docstatus == 0 and reg.get("matched_reference_name") != so_name:
             stamp(reg, frappe._dict(customer=so.customer, doctype="Sales Order", name=so_name, method="Sales Order"))
 
-    received = sum(flt(r.transamount) for r in receipts)
+    received = sum(flt(r.transamount) for r in receipts) + sum(flt(p.amount) for p in prompts)
     due = flt(so.rounded_total or so.grand_total)
 
     if so.docstatus == 0:
         if received + tolerance() < due:
             return  # partial payment: wait for the rest
-        _write_details(so, receipts)
+        _write_details(so, receipts, prompts)
         release_order(so_name)
         so.reload()
         if so.docstatus != 1:
@@ -100,6 +176,8 @@ def process_order(so_name: str) -> None:
     for reg in receipts:
         if reg.docstatus == 0 and not reg.get("payment_entry"):
             book_register(reg.name, "Sales Order")
+    for prompt in prompts:
+        _book_prompt(prompt.name)
 
 
 def book_on_invoice(reg, so) -> None:
@@ -256,7 +334,7 @@ def _credit_controller_hint(user: str) -> str:
     return f" If the credit limit stopped it: give {user} the '{role}' role (Accounts Settings > Credit Controller)."
 
 
-def _write_details(so, receipts) -> None:
+def _write_details(so, receipts, prompts=()) -> None:
     field = cstr(suite().get("sales_order_details_field")).strip()
     if not field or not so.meta.has_field(field):
         return
@@ -266,11 +344,15 @@ def _write_details(so, receipts) -> None:
         if r.transid and r.transid not in existing:
             payer = r.full_name or "M-Pesa"
             lines.append(f"M-Pesa {r.transid} KES {flt(r.transamount):,.2f} {payer}".strip())
+    for p in prompts:
+        if p.transaction_id and p.transaction_id not in existing:
+            lines.append(f"M-Pesa {p.transaction_id} KES {flt(p.amount):,.2f} STK prompt {p.name}")
     values = {field: "\n".join(lines)}
     if so.meta.has_field("custom_payment_date_time_"):
         from .common import parse_transtime
 
         times = [parse_transtime(r.transtime) for r in receipts]
+        times += [get_datetime(p.transaction_date) for p in prompts if p.get("transaction_date")]
         times = [t for t in times if t]
         if times:
             values["custom_payment_date_time_"] = max(times)
@@ -294,6 +376,7 @@ def process_pending_orders(limit: int = 100) -> None:
             limit=limit,
         )
     )
+    orders |= set(orders_with_paid_prompts(limit))
 
     for so_name in sorted(o for o in orders if o):
         frappe.db.savepoint("mpesa_so")
@@ -305,6 +388,50 @@ def process_pending_orders(limit: int = 100) -> None:
             _log_error_once(f"M-Pesa paid order processing failed for {so_name}", so_name, traceback)
             log_match("Error", "Sales Order", on_change=True, reference_doctype="Sales Order", reference_name=so_name,
                       details=traceback[-500:])
+
+
+def orders_with_paid_prompts(limit: int = 100) -> list:
+    """Sales Orders whose Payment Requests have paid STK prompts not booked yet.
+
+    A prompt paid on a draft order waits for the order's release; once the order is submitted
+    (released here, or approved by hand) its prompt is booked on the next run. A draft order is
+    always taken: attempts spent while it was a draft (by a version that tried to book them
+    there) were never real ones. A submitted order whose prompt used up its booking attempts is
+    left to staff (Error Log, Reconcile Payment on the prompt). Looks back
+    ``matching_lookback_days`` (default 45).
+    """
+    from .stk_verify import MAX_BOOKING_ATTEMPTS
+
+    since = add_to_date(now_datetime(), days=-suite_int("matching_lookback_days", 45))
+    rows = frappe.get_all(
+        EXPRESS,
+        filters=_verified_only({"reference_doctype": "Payment Request", "docstatus": 1, "status": "Completed",
+                                "is_reconciled": 0, "transaction_id": ["is", "set"], "creation": [">=", since]}),
+        fields=["reference_name", "booking_attempts"],
+        order_by="creation asc",
+        limit=limit,
+    )
+    if not rows:
+        return []
+    order_of = dict(
+        (r.name, r.reference_name)
+        for r in frappe.get_all(
+            "Payment Request",
+            filters={"name": ["in", list(dict.fromkeys(r.reference_name for r in rows if r.reference_name))],
+                     "reference_doctype": "Sales Order"},
+            fields=["name", "reference_name"],
+            order_by="creation asc",
+        )
+    )
+    orders = []
+    for row in rows:
+        so_name = order_of.get(row.reference_name)
+        if not so_name or so_name in orders:
+            continue
+        if cint(row.booking_attempts) < MAX_BOOKING_ATTEMPTS or cint(
+                frappe.db.get_value("Sales Order", so_name, "docstatus")) == 0:
+            orders.append(so_name)
+    return orders
 
 
 def _log_error_once(title: str, so_name: str, traceback: str) -> None:

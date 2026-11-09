@@ -243,6 +243,11 @@ class MpesaExpressRequest(Document):
 
         if not self.is_reconciled:
             from ....money_in.common import receipt_reversal
+            from ....money_in.stk_verify import repoint_superseded
+
+            # its Payment Request superseded (cancelled) while the customer paid: book on the one
+            # that replaced it, for the same document (also the manager's Reconcile Payment)
+            repoint_superseded(self)
 
             # locking read: waits for a reversal being sent right now (see stk_verify.book)
             reversal = receipt_reversal(self.transaction_id, for_update=True)

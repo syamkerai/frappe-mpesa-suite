@@ -573,6 +573,20 @@ def test_prompt_on_a_request_whose_order_was_billed_books_against_its_invoice(en
     assert env.frappe.invoices_made == [], "a billed order is not billed again"
 
 
+@pytest.mark.parametrize("allowance", [0, 10, 100])
+def test_billed_order_pays_its_invoice_whatever_the_over_billing_allowance(env, allowance):
+    """Astral allows 100% over-billing: ERPNext then still builds an entry on a fully billed order
+    and refuses it ("has already been fully paid") on every attempt (SAL-ORD-2026-07009)."""
+    utils = booking_env(env, per_billed=100, outstanding=50000)
+    env.frappe.db.table("Accounts Settings")["Accounts Settings"]["over_billing_allowance"] = allowance
+    utils.handle_successful_transaction(Express(amount=50000, transaction_id="SJK1ABC2DH"),
+                                        types.SimpleNamespace(auto_create_sales_invoice=1))
+    assert env.frappe.erpnext_entries == []
+    [pe] = env.frappe.entries
+    assert pe.references[0]["reference_name"] == "SINV-9"
+    assert env.frappe.invoices_made == [], "a fully billed order is not billed again"
+
+
 def test_part_paid_on_a_billed_order_leaves_the_request_partly_open(env):
     utils = booking_env(env, per_billed=100, outstanding=50000)
     utils.handle_successful_transaction(Express(amount=20000, transaction_id="SJK1ABC2DG"),

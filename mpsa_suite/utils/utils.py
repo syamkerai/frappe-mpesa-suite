@@ -276,14 +276,18 @@ def _book_payment_request_payment(request_doc, payment_request) -> None:
 
 
 def order_billed_in_full(payment_request) -> bool:
-    """A Payment Request on a Sales Order that is now billed in full: ERPNext's get_payment_entry
-    refuses it ("Can only make payment against unbilled Sales Order"), so its
-    create_payment_entry cannot build the entry, and the order cannot be billed again."""
+    """A Payment Request on a Sales Order that is now billed in full (100%): the money is owed on
+    its invoices, so the receipt pays them (_book_on_billed_order) and the order is not billed again.
+
+    Not 100% plus Accounts Settings' over-billing allowance: with an allowance ERPNext's
+    get_payment_entry still builds an entry against a fully billed order, and then refuses it
+    ("Sales Order ... has already been fully paid"), every attempt (Astral allows 100%).
+    Same rule as money_in.common.is_fully_billed.
+    """
     if payment_request.get("reference_doctype") != "Sales Order":
         return False
     per_billed = frappe.db.get_value("Sales Order", payment_request.reference_name, "per_billed")
-    allowance = flt(frappe.db.get_single_value("Accounts Settings", "over_billing_allowance"))
-    return flt(per_billed, 2) >= 100.0 + allowance
+    return flt(per_billed, 2) >= 99.99
 
 
 def _book_on_billed_order(request_doc, payment_request, paid: float) -> None:

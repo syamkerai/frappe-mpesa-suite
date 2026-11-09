@@ -278,8 +278,10 @@ def test_r8_ran_under_old_name(site, log, expected):
 
 
 def test_r8_registered_patches_are_the_eight_of_release_c_and_round_41s():
-    assert len(_registered_patches()) == 9
-    assert _registered_patches()[-1] == "mpsa_suite.mpsa_suite.patches.claim_payee_name_verdict"
+    # the eight of Release C, round 4.1's claim_payee_name_verdict, then the STK draft-order retry (Nov 2026)
+    assert len(_registered_patches()) == 10
+    assert _registered_patches()[-2] == "mpsa_suite.mpsa_suite.patches.claim_payee_name_verdict"
+    assert _registered_patches()[-1] == "mpsa_suite.mpsa_suite.patches.retry_stk_prompts_refused_on_draft_orders"
     assert all(p.startswith("mpsa_suite.mpsa_suite.patches.") for p in _registered_patches())
 
 

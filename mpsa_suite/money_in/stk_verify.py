@@ -105,8 +105,12 @@ def settle(request_name: str) -> str | None:
     return outcome
 
 
-def book(request_name: str) -> bool:
-    """Book a verified, completed prompt; rolled back and retried by ``sweep`` on failure."""
+def book(request_name: str, commit: bool = True) -> bool:
+    """Book a verified, completed prompt; rolled back and retried by ``sweep`` on failure.
+
+    ``commit=False``: inside a caller's transaction (the prepaid-order flow books a released
+    order's prompts in its own run), which commits or rolls back as a whole.
+    """
     req = frappe.get_doc(EXPRESS, request_name)
     if req.status != "Completed" or not req.transaction_id or req.is_reconciled:
         return True
@@ -116,9 +120,25 @@ def book(request_name: str) -> bool:
         # ends Failed (the money stayed with us) still gets the receipt booked.
         _held_by_reversal(req, reversal)
         return False
+
+    order = draft_order_waiting(req)
+    if order:
+        # ERPNext books no payment on a draft order. Not an attempt: the prepaid-order flow
+        # counts this prompt toward the order, releases the order through its Workflow once it
+        # is paid in full (as the approver user), then books the prompt (this function again,
+        # the order now submitted). A partial payment waits for the rest.
+        from . import sales_order
+
+        sales_order.process_order(order)
+        if commit:
+            frappe.db.commit()
+        return bool(cint(frappe.db.get_value(EXPRESS, req.name, "is_reconciled")))
+
+    repoint_superseded(req)
     attempts = cint(req.get("booking_attempts"))
     frappe.db.set_value(EXPRESS, req.name, "booking_attempts", attempts + 1, update_modified=False)
-    frappe.db.commit()
+    if commit:
+        frappe.db.commit()
 
     # Again, with a locking read, in the transaction that books: a reversal being submitted
     # right now holds its row until Safaricom answers and its transaction commits, unseen by
@@ -128,7 +148,8 @@ def book(request_name: str) -> bool:
     if reversal:
         frappe.db.set_value(EXPRESS, req.name, "booking_attempts", attempts, update_modified=False)
         _held_by_reversal(req, reversal)
-        frappe.db.commit()
+        if commit:
+            frappe.db.commit()
         return False
 
     frappe.db.savepoint("mpesa_stk_booking")
@@ -144,8 +165,57 @@ def book(request_name: str) -> bool:
         frappe.db.rollback(save_point="mpesa_stk_booking")
         frappe.log_error(frappe.get_traceback(), f"M-Pesa STK booking failed for {req.name}"[:140])
         return False
-    frappe.db.commit()
+    if commit:
+        frappe.db.commit()
     return True
+
+
+def draft_order_waiting(req) -> str | None:
+    """The draft Sales Order a paid prompt's Payment Request is for, when the prepaid-order flow
+    (M-Pesa Suite Settings > Sales Order payments) is on; else None."""
+    if req.get("reference_doctype") != "Payment Request" or not enabled("enable_sales_order_payments"):
+        return None
+    pr = frappe.db.get_value("Payment Request", req.get("reference_name"), ["reference_doctype", "reference_name"],
+                             as_dict=True)
+    if not pr or pr.reference_doctype != "Sales Order" or not pr.reference_name:
+        return None
+    return pr.reference_name if cint(frappe.db.get_value("Sales Order", pr.reference_name, "docstatus")) == 0 else None
+
+
+def repoint_superseded(req) -> None:
+    """A prompt whose Payment Request was superseded (cancelled by a re-prompt for the same
+    document) while the customer paid it: book it on the request that replaced it.
+
+    Left on the cancelled request, every booking fails (the prompt's save links a cancelled
+    document) and the money stays in no ledger. Only a submitted M-Pesa request for the same
+    document qualifies (the newest); with none, booking fails and staff settle it by hand.
+    """
+    from .payment_request import is_mpesa
+
+    if getattr(req, "reference_doctype", None) != "Payment Request" or not getattr(req, "reference_name", None):
+        return
+    old = frappe.db.get_value("Payment Request", req.reference_name, ["docstatus", "reference_doctype", "reference_name"],
+                              as_dict=True)
+    if not old or cint(old.docstatus) != 2 or not (old.reference_doctype and old.reference_name):
+        return
+    live = [
+        row.name
+        for row in frappe.get_all(
+            "Payment Request",
+            filters={"reference_doctype": old.reference_doctype, "reference_name": old.reference_name, "docstatus": 1,
+                     "payment_request_type": "Inward", "status": ["in", ["Requested", "Initiated", "Partially Paid"]]},
+            fields=["name", "payment_gateway", "payment_gateway_account"],
+            order_by="creation desc",
+        )
+        if is_mpesa(row)
+    ]
+    if not live:
+        return
+    superseded = req.reference_name
+    frappe.db.set_value(EXPRESS, req.name, "reference_name", live[0], update_modified=False)
+    req.reference_name = live[0]
+    req.add_comment("Info", f"Payment Request {superseded} was superseded while the customer paid this prompt; "
+                            f"booked on {live[0]} for {old.reference_doctype} {old.reference_name}.")
 
 
 def _held_by_reversal(req, reversal) -> None:

@@ -7,6 +7,59 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## STK prompts paid on draft Sales Orders release the order and book (2026-11-09, branch r4-2-phones)
+
+Found at Astral on 9 Nov 2026, the first business day on v16 + the suite. Sales staff send M-Pesa
+prompts from **draft** orders (Payment Request on the order, then STK). Five prompts were paid
+(KES 10,000 / 3,000 / 56,000 / 1,200 / 48,800). None was booked, and no order was approved by the
+system. Staff approved two by hand and invoiced one, but the invoice stayed unpaid. On v15 the old
+"SO M-Pesa Payment Checker" script approved such an order within a minute and booked it. The suite's
+prepaid-order flow did the same only for C2B (paybill) receipts, never for paid STK prompts.
+**`bench migrate` is needed** (one patch).
+
+**1. A paid prompt on a draft order counts toward it, the order is released, then the prompt is booked**
+- `stk_verify.book`: a prompt whose Payment Request is for a draft Sales Order (and Sales Order
+  payments are on) is no longer tried and refused by ERPNext ("Sales Order ... must be submitted"),
+  which used up its three attempts. Instead it goes to `sales_order.process_order`, and waiting is
+  not an attempt.
+- `sales_order.process_order` counts paid, confirmed, unbooked prompts on any of the order's
+  Payment Requests (`paid_prompts_for`), alongside its C2B receipts.
+  - Paid in full: the order's payment details get one line per receipt, and the order is released
+    through its Workflow as the approver user, exactly as for C2B. Then every receipt and prompt is
+    booked (`stk_verify.book(commit=False)`, inside the order's run).
+  - Partial: it waits for the rest (another prompt, or a paybill payment).
+  - Refused (credit limit, SO Rules, a role): nothing is booked, and the release backs off as before.
+  - Invoiced order: the prompt pays the order's invoice.
+  - Closed or cancelled order: logged for staff.
+- `process_pending_orders` also takes orders with paid prompts (`orders_with_paid_prompts`). A draft
+  order is always taken. A submitted order whose prompt has used up its attempts is left to staff.
+- A C2B register for a receipt that a prompt carries (Safaricom sometimes sends both) is no longer
+  counted with the prompt. The prompt books it, and the register cancels itself as a duplicate.
+
+**2. A prompt paid on a superseded Payment Request is booked on the request that replaced it**
+- Live: ACC-PRQ-2026-00541 was cancelled by a re-prompt one second before its prompt's callback
+  said "paid" (KES 56,000). Every booking then failed with "Cannot link cancelled document".
+- `stk_verify.repoint_superseded` moves the prompt to the newest submitted M-Pesa request for the
+  same document and adds a comment. It runs in the sweep and in the manager's Reconcile Payment.
+  With no such request, booking still fails and staff settle it.
+
+**3. A fully invoiced order's prompt pays its invoice whatever the over-billing allowance**
+- `utils.order_billed_in_full` was 100% plus Accounts Settings' over-billing allowance. With
+  Astral's allowance of 100%, a fully invoiced order still got an entry against the order, and
+  ERPNext refused it every time ("has already been fully paid"). It is now 100%, the same rule
+  as `common.is_fully_billed`. A fully billed order is not billed again.
+
+**Patch `retry_stk_prompts_refused_on_draft_orders`:** gives back the attempts of paid, confirmed,
+unbooked prompts on a Sales Order's request whose latest Error Log "M-Pesa STK booking failed for
+<prompt>" is one of the two refusals above. Today's five are picked up on the first run after migrate.
+
+Tests: `tests/unit/test_stk_draft_orders.py` (15), one allowance test in `test_fix2_stk2.py`, and the
+patch list in `test_rename_safeguards.py`. Unit: 3,102 passed. Rehearsed on a v16 copy of Astral
+(7 Nov data, real Workflow, SO Rules and settings, fenced, rolled back), with seven scenarios: full
+payment from Draft and from Secondary Approval Pending, STK plus paybill, superseded request,
+invoiced order, approved by hand, and patch then scheduler on an invoiced order. All approve and book
+as expected. The same scenarios on fe6f835 reproduce the live failure.
+
 ## Round 4.1: fixes from Trident's live test (2026-10-28, branch r4-1-fixes)
 
 Round 4 went live on Trident Plumbers on 2026-10-28: nine payouts, clean books, and the defects below.
