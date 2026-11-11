@@ -17,11 +17,15 @@ FIELD = "show_full_details"
 
 
 def full_details() -> bool:
-    """Show numbers and names in full: on unless M-Pesa Suite Settings says off (a site not migrated
-    yet, or never saved, shows them in full: the setting's default)."""
+    """Show numbers and names in full: on unless M-Pesa Suite Settings says off. The migrate writes
+    the setting's default (1, install.backfill_single_defaults); before that migrate, while the
+    field does not exist yet, they show in full too, without reading it (Frappe would print an error
+    for an unknown field on every number shown)."""
     try:
+        if not frappe.get_meta(SUITE).has_field(FIELD):
+            return True
         value = frappe.db.get_single_value(SUITE, FIELD)
-    except Exception:  # before the migrate that adds the field
+    except Exception:
         return True
     return value in (None, "") or bool(cint(value))
 

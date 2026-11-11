@@ -9,6 +9,7 @@
   "payee_name",
   "mpesa_name",
   "mpesa_name_from",
+  "typed_name",
   "destination",
   "expense_detail",
   "expense_type",
@@ -77,6 +78,15 @@
    "no_copy": 1,
    "depends_on": "eval:doc.mpesa_name",
    "description": "The M-Pesa payout that named this phone, and when it was paid."
+  },
+  {
+   "fieldname": "typed_name",
+   "fieldtype": "Data",
+   "label": "Name Given",
+   "read_only": 1,
+   "no_copy": 1,
+   "depends_on": "eval:doc.typed_name",
+   "description": "The name the claimant gave, which is not the name M-Pesa paid this phone under before: check the number (a wrong number, or one with a new owner). The name check after the payout compares with it."
   },
   {
    "fieldname": "destination",

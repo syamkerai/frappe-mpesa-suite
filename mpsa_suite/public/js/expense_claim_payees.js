@@ -137,11 +137,19 @@ const mpsa_payees = {
 
 	// round 4.3: a phone M-Pesa paid before takes the name M-Pesa paid it under (Payee Name locked);
 	// a new number keeps the typed name. The claim's save sets it again (claim_payees.clean_line).
+	// What the claimant typed stays as Name Given when it is not M-Pesa's name (a wrong number, or one with a
+	// new owner): they are told at once, the save warns again and the name check after the payout uses it.
 	mpesa_name(cdt, cdn) {
 		const row = locals[cdt][cdn];
-		const clear = { mpesa_name: null, mpesa_name_from: null };
+		// the name filled in for the line's earlier number goes with it (what was typed comes back)
+		const clear = (r) => ({
+			mpesa_name: null,
+			mpesa_name_from: null,
+			typed_name: null,
+			...(r.mpesa_name && r.payee_name === r.mpesa_name ? { payee_name: r.typed_name || "" } : {}),
+		});
 		if (row.payee_type !== MPSA_PAYEE_TYPE.phone || !row.phone) {
-			if (row.mpesa_name) frappe.model.set_value(cdt, cdn, clear);
+			if (row.mpesa_name) frappe.model.set_value(cdt, cdn, clear(row));
 			return;
 		}
 		const phone = row.phone;
@@ -150,10 +158,30 @@ const mpsa_payees = {
 			.then((r) => {
 				const now = locals[cdt] && locals[cdt][cdn];
 				if (!now || now.phone !== phone) return; // changed again meanwhile
-				if (r && r.name) {
-					frappe.model.set_value(cdt, cdn, { payee_name: r.name, mpesa_name: r.name, mpesa_name_from: r.from });
-				} else if (now.mpesa_name) {
-					frappe.model.set_value(cdt, cdn, clear);
+				if (!(r && r.name)) {
+					if (now.mpesa_name) frappe.model.set_value(cdt, cdn, clear(now));
+					return;
+				}
+				const typed = now.payee_name && now.payee_name !== now.mpesa_name ? now.payee_name : now.typed_name || "";
+				const differs = typed && typed.trim().toUpperCase() !== r.name.trim().toUpperCase();
+				frappe.model.set_value(cdt, cdn, {
+					payee_name: r.name,
+					mpesa_name: r.name,
+					mpesa_name_from: r.from,
+					typed_name: differs ? typed : null,
+				});
+				if (differs) {
+					frappe.show_alert(
+						{
+							message: __("M-Pesa paid {0} as {1} before, not {2}: check the number.", [
+								frappe.utils.escape_html(phone),
+								frappe.utils.escape_html(r.name),
+								frappe.utils.escape_html(typed),
+							]),
+							indicator: "orange",
+						},
+						10
+					);
 				}
 			})
 			.catch(() => null);
@@ -540,6 +568,8 @@ const mpsa_payees = {
 						payee_name: r.payee_name,
 						mpesa_name: r.mpesa_name || null,
 						mpesa_name_from: r.mpesa_name_from || null,
+						// what was pasted, when it is not M-Pesa's name (the save keeps it only then)
+						typed_name: (r.mpesa_name && r.typed_name && r.typed_name !== r.mpesa_name && r.typed_name) || null,
 						phone: r.phone,
 						destination: r.phone,
 						amount: r.amount,

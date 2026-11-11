@@ -902,7 +902,6 @@ class TestB2BDocuments(IntegrationTestCase):
         from mpsa_suite.mpsa_suite.doctype.b2c_payment_disbursement import (
             b2c_payment_disbursement as disb,
         )
-        from mpsa_suite.utils.phone import mask
 
         pi = self._invoice(5000)
         doc = self._b2c_disbursement(pi.name, 1500)
@@ -915,7 +914,7 @@ class TestB2BDocuments(IntegrationTestCase):
         self.assertTrue(summary["token"])
         self.assertEqual(summary["problems"], [])
         self.assertEqual([(r["receiver"], r["destination"], r["amount"], r["document"]) for r in summary["rows"]],
-                         [(SUPPLIER, f"M-Pesa phone {mask(B2C_PHONE)}", 1500.0, f"{PI} {pi.name}")])
+                         [(SUPPLIER, f"M-Pesa phone {B2C_PHONE}", 1500.0, f"{PI} {pi.name}")])
         self.assertEqual(summary["total"], 1500.0)
 
         with patch("frappe.enqueue") as enqueue:
@@ -942,7 +941,6 @@ class TestB2BDocuments(IntegrationTestCase):
         from mpsa_suite.mpsa_suite.doctype.b2c_disbursement_request import (
             b2c_disbursement_request as req_module,
         )
-        from mpsa_suite.utils.phone import mask
 
         pi = self._invoice(5000)
         doc = self._b2c_disbursement(pi.name, 1500)
@@ -960,7 +958,7 @@ class TestB2BDocuments(IntegrationTestCase):
                 frappe.set_user("Administrator")
             self.assertTrue(summary["token"])
             self.assertEqual([(r["receiver"], r["destination"], r["amount"]) for r in summary["rows"]],
-                             [(SUPPLIER, f"M-Pesa phone {mask(B2C_PHONE)}", 1500.0)])
+                             [(SUPPLIER, f"M-Pesa phone {B2C_PHONE}", 1500.0)])
             sent.assert_not_called()
             t.send_as(self.payer, req)
         self.assertEqual(frappe.db.get_value(B2C_REQ, req.name, "docstatus"), 1)

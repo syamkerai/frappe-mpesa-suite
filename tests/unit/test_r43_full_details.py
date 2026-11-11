@@ -10,7 +10,7 @@ from pathlib import Path
 
 import fake_frappe
 import pytest
-from test_claim_payees import CLAIM, LINE, PHONE, REQ, TILL, claim, payee, validate
+from test_claim_payees import CLAIM, LINE, PHONE, REQ, TILL, claim, payee, settings, validate
 from test_claim_payees import env as claims_env  # noqa: F401 (the fixture)
 from test_r42_phones import Employee
 from test_send_confirm import B2C, disbursement, prepared
@@ -22,9 +22,10 @@ SUITE = "M-Pesa Suite Settings"
 AT = datetime.datetime(2026, 10, 29, 20, 3)
 
 
-def paid(env, name, phone, received, minutes=0, status="Paid"):
+def paid(env, name, phone, received, minutes=0, status="Paid", **values):
     env.frappe.db.table(REQ)[name] = {"name": name, "docstatus": 1, "status": status, "phone_number": phone,
                                       "receiver_public_name": received, "amount": 1000,
+                                      "reference_doctype": CLAIM, "party_type": "Employee", **values,
                                       "transaction_completed_datetime": AT + datetime.timedelta(minutes=minutes),
                                       "creation": AT + datetime.timedelta(minutes=minutes)}
 
@@ -206,3 +207,88 @@ def test_the_payee_name_is_locked_once_mpesa_named_the_phone():
     assert "mpsa_payees.mpesa_name(cdt, cdn);" in script and f"`${{MPSA_PAYEES_API}}.mpesa_name`" in script
     assert "mpesa_name: r.mpesa_name || null" in script  # the paste dialog adds the name's source too
     assert LINE == "M-Pesa Claim Payee"
+
+
+# ---------------------------------------------------------------- review of 4fc06a8
+def test_a_staff_members_or_salary_payees_name_is_never_looked_up(claims_env):
+    cp = claims_env.cp
+    paid(claims_env, "B2C-7", "254722000111", "254722000111 - EMPLOYEE ONE")  # EMP-1's Cell Number
+    paid(claims_env, "B2C-8", "254711000555", "254711000555 - SALARY PAYEE", reference_doctype="Salary Slip")
+    paid(claims_env, "B2C-9", "254711000556", "254711000556 - PAID FOR NOTHING", reference_doctype=None)
+    assert cp.mpesa_name("0722 000 111") == {}  # an employee's phone: refused as a payee, whose it is not said
+    assert cp.mpesa_names(["0711000555", "0711000556"]) == {}  # a salary's payouts are never read
+    answer = cp.parse_payees(text="Them, 0722000111, 100", claim=claim(claims_env, []).name)
+    assert answer["rows"][0].get("mpesa_name") is None and answer["rows"][0]["payee_name"] == "Them"
+
+
+def test_nothing_is_looked_up_while_claim_payees_are_switched_off(claims_env):
+    cp = claims_env.cp
+    paid(claims_env, "B2C-2", "254711000333", "254711000333 - JANE WANJIKU NJERI")
+    settings(claims_env, allow_claim_payees=0)
+    assert cp.mpesa_name("0711 000 333") == {}
+
+
+def test_a_name_given_that_is_not_mpesas_is_kept_warned_and_checked_after_the_payout(claims_env):
+    cp = claims_env.cp
+    paid(claims_env, "B2C-2", "254711000334", "254711000334 - PETER OTIENO")
+    line, warnings = payee(payee_type=PHONE, phone="0711 000 334", payee_name="Jane Wanjiku"), []
+    cp.clean_line(line, set(), warnings)  # the claimant meant Jane but typed Peter's number
+    assert (line.payee_name, line.mpesa_name, line.typed_name) == ("PETER OTIENO", "PETER OTIENO", "Jane Wanjiku")
+    assert warnings == ["Row #1: M-Pesa paid 0711 000 334 as PETER OTIENO before, not 'Jane Wanjiku': check the "
+                        "number with the claimant."]
+    cp.clean_line(line, set(), [])  # saved again: what was given is kept
+    assert line.typed_name == "Jane Wanjiku"
+    assert cp.name_check(line, "254711000334 - PETER OTIENO") == (
+        False, "M-Pesa paid '254711000334 - PETER OTIENO', but the claim gives 'Jane Wanjiku'.")
+    same = payee(payee_type=PHONE, phone="0711 000 334", payee_name="Peter Otieno")
+    cp.clean_line(same, set(), [])
+    assert same.typed_name is None and cp.name_check(same, "254711000334 - PETER OTIENO")[0] is True
+    # the form filled M-Pesa's name and sent what was typed as Name Given
+    filled = payee(payee_type=PHONE, phone="0711 000 334", payee_name="PETER OTIENO", typed_name="Jane W")
+    cp.clean_line(filled, set(), [])
+    assert filled.typed_name == "Jane W"
+
+
+def test_a_name_filled_in_for_an_earlier_number_goes_with_it(claims_env):
+    cp = claims_env.cp
+    paid(claims_env, "B2C-2", "254711000333", "254711000333 - JANE WANJIKU NJERI")
+    line = payee(payee_type=PHONE, phone="0711 000 333", payee_name="")
+    cp.clean_line(line, set(), [])
+    line.phone = "0711 000 444"  # corrected to a number M-Pesa never paid: the filled-in name is not its
+    with pytest.raises(claims_env.frappe.ValidationError, match="enter the Payee Name"):
+        cp.clean_line(line, set(), [])
+    given = payee(payee_type=PHONE, phone="0711 000 333", payee_name="Jane Typed")
+    cp.clean_line(given, set(), [])
+    given.phone = "0711 000 444"  # what was typed comes back for the new number
+    cp.clean_line(given, set(), [])
+    assert (given.payee_name, given.mpesa_name, given.typed_name) == ("Jane Typed", None, None)
+    till = payee(payee_type=PHONE, phone="0711 000 333", payee_name="")
+    cp.clean_line(till, set(), [])
+    till.update(payee_type=TILL, shortcode="835811", phone=None)
+    with pytest.raises(claims_env.frappe.ValidationError, match="enter the Payee Name"):
+        cp.clean_line(till, set(), [])
+
+
+def test_a_site_before_its_migrate_shows_numbers_in_full_without_reading_the_setting(claims_env, monkeypatch):
+    privacy = importlib.import_module("mpsa_suite.utils.privacy")
+    import types
+
+    read = []
+    monkeypatch.setattr(claims_env.frappe, "get_meta", lambda doctype: types.SimpleNamespace(
+        has_field=lambda field: False))
+    monkeypatch.setattr(claims_env.frappe.db, "get_single_value", lambda *a, **kw: read.append(a))
+    assert privacy.full_details() is True and read == []
+
+
+def test_name_given_is_a_read_only_field_and_the_payout_phone_is_indexed():
+    payee_doc = json.loads((ROOT / "mpsa_suite" / "doctype" / "m_pesa_claim_payee" / "m_pesa_claim_payee.json")
+                           .read_text(encoding="utf-8"))
+    (given,) = [f for f in payee_doc["fields"] if f["fieldname"] == "typed_name"]
+    assert (given["label"], given["read_only"]) == ("Name Given", 1)
+    request = json.loads((ROOT / "mpsa_suite" / "doctype" / "b2c_disbursement_request" /
+                          "b2c_disbursement_request.json").read_text(encoding="utf-8"))
+    (phone,) = [f for f in request["fields"] if f["fieldname"] == "phone_number"]
+    assert phone["search_index"] == 1
+    script = (ROOT / "public" / "js" / "expense_claim_payees.js").read_text(encoding="utf-8")
+    assert "typed_name: differs ? typed : null" in script and "check the number" in script
+    assert "payee_name: r.typed_name || \"\"" in script  # a filled-in name goes with its number

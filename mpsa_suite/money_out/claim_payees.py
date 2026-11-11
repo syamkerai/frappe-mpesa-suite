@@ -110,7 +110,7 @@ BLOCKED, CLEARED = "Blocked", "Cleared"
 PRIVATE_FIELDS = ("staff_involved",)
 LINE_FIELDS = ("name", "idx", "parent", "parenttype", "payee_type", "payee_name", "destination", "expense_detail",
                "expense_type", "bank_paybill", "shortcode", "account_number", "phone", "amount",
-               "destination_key", *RESULT_FIELDS)
+               "destination_key", "typed_name", *RESULT_FIELDS)
 # Pasted or uploaded casual payees: at most this many rows at a time
 PASTE_LIMIT = 1000
 # The number M-Pesa puts before a name: "522522 - KCB Paybill AC", "2547****0111 - JANE" (also after
@@ -299,11 +299,17 @@ def clean_line(row, own=None, warnings=None, names=None) -> None:
     digits (a paybill with its account number), a bank account at an enabled M-Pesa Bank Paybill
     (its paybill copied from the bank, never typed), and never one of this company's own numbers.
     A phone M-Pesa paid before takes the name M-Pesa paid it under, never a typed one (round 4.3,
-    mpesa_names; ``names``: those of the claim's phones, read once)."""
+    mpesa_names; ``names``: those of the claim's phones, read once); a name the claimant gave that is
+    not M-Pesa's is kept as Name Given and warned about (a wrong number, or one with a new owner), and
+    the name check after the payout compares with it. A name filled in for the line's earlier number
+    is dropped."""
     row.payee_name = cstr(row.get("payee_name")).strip()
-    row.mpesa_name = row.mpesa_name_from = None
+    given, stale = cstr(row.get("typed_name")).strip(), cstr(row.get("mpesa_name")).strip()
+    row.mpesa_name = row.mpesa_name_from = row.typed_name = None
     if row.get("payee_type") not in TYPES:
         frappe.throw(f"Row #{row.idx}: Pay To must be {', '.join(TYPES[:-1])} or {TYPES[-1]}.")
+    if row.payee_type != PHONE and stale and row.payee_name == stale:
+        row.payee_name = given  # the name M-Pesa gave the phone the line had before, not this destination's
     if row.payee_type == PHONE:
         # the B2C row's rule (utils.phone.payable_msisdn): a claim never approves a number its payout refuses
         msisdn = payable_msisdn(row.get("phone"))
@@ -314,8 +320,17 @@ def clean_line(row, own=None, warnings=None, names=None) -> None:
         row.shortcode = row.account_number = row.bank_paybill = None
         known = (names if names is not None else mpesa_names([msisdn])).get(msisdn)
         if known:
+            # what the claimant gave is kept when it is not M-Pesa's name: a wrong number, or one with a new owner
+            if row.payee_name and row.payee_name not in (known.name, stale):
+                given = row.payee_name  # typed (by hand or the API), not a name M-Pesa filled in
+            row.typed_name = given if given and not pa.names_match(given, known.name) else None
             row.payee_name = row.mpesa_name = known.name
             row.mpesa_name_from = name_from(known)
+            if row.typed_name and warnings is not None:
+                warnings.append(f"Row #{row.idx}: M-Pesa paid {describe(row)} as {known.name} before, not "
+                                f"{row.typed_name!r}: check the number with the claimant.")
+        elif stale and row.payee_name == stale:
+            row.payee_name = given  # the name filled in for the line's earlier number, not this one
         if not is_safaricom(msisdn) and warnings is not None:
             # not refused: a number moved from another network keeps its old prefix
             warnings.append(f"Row #{row.idx}: {to_local(msisdn)} does not start like a Safaricom number, and B2C "
@@ -948,9 +963,11 @@ def name_check(line, received, bank_name=None) -> tuple:
             return None, (f"Not verified: M-Pesa paid {shown!r}, the bank's own name. Who holds the account is not "
                           "shown.")
         return False, f"M-Pesa paid {shown!r}, but the bank's name is {bank_name!r}."
-    if pa.names_match(line.get("payee_name"), _without_number(received)):
+    # round 4.3: the name the claimant gave, when M-Pesa's earlier name for the number replaced it
+    given = cstr(line.get("typed_name")).strip() or line.get("payee_name")
+    if pa.names_match(given, _without_number(received)):
         return True, f"M-Pesa paid {shown!r}."
-    return False, f"M-Pesa paid {shown!r}, but the claim gives {line.get('payee_name')!r}."
+    return False, f"M-Pesa paid {shown!r}, but the claim gives {given!r}."
 
 
 def _without_number(name) -> str:
@@ -974,9 +991,9 @@ def masked_name(received) -> str:
 
 def mpesa_names(numbers) -> dict:
     """{2547...: _dict(name, payout, paid_on)}: the name M-Pesa last paid each phone under (a Paid B2C
-    payout's ReceiverPartyPublicName without its number; one naming another number is skipped), the
-    payout and when (round 4.3). A phone M-Pesa never paid is not in it: its line keeps the typed
-    name."""
+    payout's ReceiverPartyPublicName without its number; one naming another number is skipped, and a
+    salary's payout is never read), the payout and when (round 4.3). A phone M-Pesa never paid is
+    not in it: its line keeps the typed name."""
     wanted = {m for m in (normalize_msisdn(n) for n in numbers or []) if m}
     if not wanted:
         return {}
@@ -984,8 +1001,11 @@ def mpesa_names(numbers) -> dict:
     rows = frappe.get_all(B2C_REQUEST, filters={"phone_number": ["in", forms], "status": "Paid",
                                                 "receiver_public_name": ["is", "set"]},
                           fields=["name", "phone_number", "receiver_public_name", "transaction_completed_datetime",
-                                  "creation"],
+                                  "creation", "reference_doctype", "party_type"],
                           order_by="transaction_completed_datetime desc, creation desc")
+    # never a salary's payout (salary_access: a Salary Slip, or an employee paid for no claim or advance)
+    rows = [r for r in rows if r.get("reference_doctype") != "Salary Slip" and not (
+        r.get("party_type") == "Employee" and r.get("reference_doctype") not in ("Expense Claim", "Employee Advance"))]
     rows.sort(key=lambda r: cstr(r.transaction_completed_datetime or r.creation), reverse=True)
     found = {}
     for r in rows:
@@ -1015,8 +1035,17 @@ def mpesa_name(phone: str | None = None) -> dict:
     if not (frappe.has_permission(CLAIM, "create") or frappe.has_permission(CLAIM, "write")):
         frappe.throw("You may not create or change Expense Claims.", frappe.PermissionError)
     msisdn = payable_msisdn(phone)
-    known = mpesa_names([msisdn]).get(msisdn) if msisdn else None
+    if not msisdn or not settings().allow or msisdn in staff_phones():
+        return {}  # an employee's or user's phone is refused as a payee: whose it is is not said
+    known = mpesa_names([msisdn]).get(msisdn)
     return {"phone": msisdn, "name": known.name, "from": name_from(known)} if known else {}
+
+
+def staff_phones() -> set:
+    """The phones (2547...) of every employee and site user (employee_destinations): never named by
+    the name lookups, as a payee line to one is refused without saying whose it is."""
+    found = employee_destinations()
+    return {key[4:] for key in (*found.destinations, *(found.get("users") or {})) if key.startswith("B2C:")}
 
 
 def _bank_name(line) -> str | None:
@@ -2223,7 +2252,9 @@ def parse_payees(text: str | None = None, file_url: str | None = None, claim: st
     if isinstance(existing, str):
         existing = frappe.parse_json(existing)
     # round 4.3: a phone M-Pesa paid before takes the name M-Pesa paid it under, never the pasted one
-    names = mpesa_names(payable_msisdn(r.phone) for r in rows)
+    staff = staff_phones() if settings().allow else set()
+    names = mpesa_names(m for m in (payable_msisdn(r.phone) for r in rows) if m and m not in staff) if (
+        settings().allow) else {}
     known = [names.get(payable_msisdn(r.phone)) for r in rows]
     typed = [cstr(r.payee_name).strip() for r in rows]
     for r, k in zip(rows, known):
