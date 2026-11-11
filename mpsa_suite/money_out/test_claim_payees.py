@@ -714,10 +714,10 @@ class TestClaimPayees(IntegrationTestCase):
         (request,) = self._send_b2c(made["b2c"], {"254711000921": ("Paid", "254711000921 - _T PRINT WANJIRU")})
         phone_receipt = frappe.db.get_value(REQ, request, "transaction_id")
         html = t.renders(CLAIM, claim.name, "Expense Claim Payment", "Merchants and Payees", till_receipt,
-                         phone_receipt, "2547****0921", "To the claimant", "6,500.00")
-        self.assertNotIn("254711000921", html)  # phones masked as the send summary shows them
+                         phone_receipt, "254711000921", "To the claimant", "6,500.00")
+        self.assertNotIn("2547****0921", html)  # round 4.3: numbers in full (M-Pesa Suite Settings, the default)
         t.renders(B2B, b2b_name, f"{till_receipt} Confirmed. KES 2,000.00 paid to _T PRINT SHELL 835866", "_T Print Shell")
-        t.renders(DISB, made["b2c"], f"{phone_receipt} Confirmed. KES 1,500.00 sent to _T PRINT WANJIRU 2547****0921")
+        t.renders(DISB, made["b2c"], f"{phone_receipt} Confirmed. KES 1,500.00 sent to _T PRINT WANJIRU 254711000921")
         t.renders(REQ, request, phone_receipt, "M-Pesa Receipt", "Prepared By")
         entry = frappe.db.get_value(PE, {"reference_no": phone_receipt, "docstatus": 1}, "name")
         t.renders(PE, entry, f"{phone_receipt} Confirmed.")

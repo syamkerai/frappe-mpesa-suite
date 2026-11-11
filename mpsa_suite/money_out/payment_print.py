@@ -7,7 +7,8 @@ The print formats (mpsa_suite/mpsa_suite/print_format/m_pesa_80mm_*) read everyt
 two Jinja methods here (hooks.py ``jinja``), never frappe.get_all in a template:
 - the reader's read permission on the document is checked first, and a salary's amounts are shown
   only to who may see salaries (money_out.salary_access);
-- a phone is masked as the send summary shows it (2547****0111), a long account number too;
+- a phone and an account number show as the send summary shows them: in full, or 2547****0111
+  and ****6789 when M-Pesa Suite Settings masks numbers (utils.privacy, round 4.3);
 - the name M-Pesa paid is split on its first " - " only (the number before it, the name after);
 - a Payment Entry carrying a payout's receipt is that payout's, listed once;
 - a failed payout that a later M-Pesa payout of the same thing paid (a retry) is left off a
@@ -22,7 +23,8 @@ import json
 import frappe
 from frappe.utils import cint, cstr, flt, get_datetime, now_datetime
 
-from ..utils.phone import mask, normalize_msisdn
+from ..utils import privacy
+from ..utils.phone import normalize_msisdn
 from . import owed
 
 B2B = owed.B2B
@@ -57,23 +59,23 @@ def split_receiver(value) -> tuple:
 
 
 def masked(number) -> str:
-    """A phone masked as the send summary shows it (2547****0111, a number M-Pesa masked stays as it
-    is); an account number longer than six characters as ****6789; a till or paybill as it is."""
+    """A phone as the send summary shows it (utils.privacy: 254722000111, or 2547****0111 when numbers
+    are masked; a number M-Pesa masked stays as it is); an account number longer than six characters
+    in full or as ****6789; a till or paybill as it is."""
     number = cstr(number).strip()
     if not number:
         return ""
     if "*" in number:
         return number
     if number.lstrip("+").isdigit() and normalize_msisdn(number):
-        return mask(number)
-    return f"****{number[-4:]}" if len(number) > 6 else number
+        return privacy.phone(number)
+    return privacy.account(number)
 
 
 def masked_account(number) -> str:
-    """A paybill's or bank's account number as ****6789 (one that looks like a phone too: it is an
-    account here); a short one (six characters or fewer) as it is."""
-    number = cstr(number).strip()
-    return f"****{number[-4:]}" if len(number) > 6 else number
+    """A paybill's or bank's account number (one that looks like a phone too: it is an account here)
+    in full, or as ****6789 when numbers are masked; a short one (six characters or fewer) as it is."""
+    return privacy.account(number)
 
 
 def sms(receipt, amount, name, number, when, sent: bool) -> str:

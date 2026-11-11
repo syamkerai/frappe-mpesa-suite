@@ -948,7 +948,7 @@ def test_maker_checker_watches_the_approved_account_of_a_b2c_row(env):
 
 
 # ---------------------------------------------------------------- the buttons, the headline and the list
-def test_the_headline_and_what_the_buttons_offer(env):
+def test_the_headline_and_what_the_buttons_offer(env, masked_numbers):
     env.frappe.session.user, env.frappe.user_roles = PREPARER, {"Accounts User"}
     env.b2c.append({"dt": EC, "dn": "HR-EXP-1", "parent": "MPESA-B2C-X", "allocated_amount": 1000,
                     "request_status": "Initiated"})

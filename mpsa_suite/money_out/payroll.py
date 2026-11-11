@@ -40,6 +40,7 @@ from frappe.utils import cint, cstr, flt, getdate, nowdate
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
 from ..permissions import PREPARE_ROLES, require
+from ..utils import privacy
 from ..utils.phone import mask
 from . import owed, party_accounts, salary_access
 
@@ -752,7 +753,10 @@ def _readable_accounts(employee) -> set:
 
 
 def _masked(destination) -> str:
-    """'247247 / ******6789', '2547****0111': an account's number for who may not read the account."""
+    """An account's number for who may not read the account: as it is when M-Pesa Suite Settings shows
+    numbers in full (utils.privacy), else '247247 / ******6789', '2547****0111'."""
+    if privacy.full_details():
+        return cstr(destination)
     shortcode, _, account = cstr(destination).partition(" / ")
     if account:
         return f"{shortcode} / {'*' * max(len(account) - 4, 2)}{account[-4:]}"

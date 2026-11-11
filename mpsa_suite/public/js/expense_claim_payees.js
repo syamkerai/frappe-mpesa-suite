@@ -68,6 +68,7 @@ frappe.ui.form.on("M-Pesa Claim Payee", {
 
 	phone(frm, cdt, cdn) {
 		mpsa_payees.show_destination(cdt, cdn);
+		mpsa_payees.mpesa_name(cdt, cdn);
 	},
 
 	expense_detail(frm, cdt, cdn) {
@@ -132,6 +133,30 @@ const mpsa_payees = {
 		else if (row.payee_type === MPSA_PAYEE_TYPE.till) shown = row.shortcode || "";
 		else shown = [row.shortcode, row.account_number].filter(Boolean).join(" / ");
 		frappe.model.set_value(cdt, cdn, "destination", shown);
+	},
+
+	// round 4.3: a phone M-Pesa paid before takes the name M-Pesa paid it under (Payee Name locked);
+	// a new number keeps the typed name. The claim's save sets it again (claim_payees.clean_line).
+	mpesa_name(cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const clear = { mpesa_name: null, mpesa_name_from: null };
+		if (row.payee_type !== MPSA_PAYEE_TYPE.phone || !row.phone) {
+			if (row.mpesa_name) frappe.model.set_value(cdt, cdn, clear);
+			return;
+		}
+		const phone = row.phone;
+		frappe
+			.xcall(`${MPSA_PAYEES_API}.mpesa_name`, { phone })
+			.then((r) => {
+				const now = locals[cdt] && locals[cdt][cdn];
+				if (!now || now.phone !== phone) return; // changed again meanwhile
+				if (r && r.name) {
+					frappe.model.set_value(cdt, cdn, { payee_name: r.name, mpesa_name: r.name, mpesa_name_from: r.from });
+				} else if (now.mpesa_name) {
+					frappe.model.set_value(cdt, cdn, clear);
+				}
+			})
+			.catch(() => null);
 	},
 
 	summary(frm) {
@@ -485,7 +510,13 @@ const mpsa_payees = {
 		const show = (r) => {
 			const rows = (r.rows || []).map(
 				(x) =>
-					`<tr${x.errors.length ? ' style="color: var(--red-600)"' : ""}><td>${x.row}</td><td>${e(x.payee_name)}</td>` +
+					`<tr${x.errors.length ? ' style="color: var(--red-600)"' : ""}><td>${x.row}</td><td>${e(x.payee_name)}` +
+					(x.mpesa_name
+						? `<div class="text-muted small">${e(__("Name on M-Pesa"))}` +
+						  (x.typed_name && x.typed_name !== x.mpesa_name ? ` (${e(__("typed: {0}", [x.typed_name]))})` : "") +
+						  "</div>"
+						: "") +
+					`</td>` +
 					`<td>${e(x.phone)}</td><td>${x.amount === null ? "" : format_currency(x.amount, "KES", 0)}</td>` +
 					`<td>${e(x.errors.join("; "))}</td></tr>`
 			);
@@ -507,6 +538,8 @@ const mpsa_payees = {
 					frm.add_child("mpesa_payees", {
 						payee_type: MPSA_PAYEE_TYPE.phone,
 						payee_name: r.payee_name,
+						mpesa_name: r.mpesa_name || null,
+						mpesa_name_from: r.mpesa_name_from || null,
 						phone: r.phone,
 						destination: r.phone,
 						amount: r.amount,

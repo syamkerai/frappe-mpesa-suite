@@ -27,6 +27,8 @@
   "employee_account_hold_hours",
   "column_break_supplier_payments",
   "allow_one_off_b2b",
+  "privacy_section",
+  "show_full_details",
   "notifications_section",
   "notify_role",
   "column_break_not",
@@ -243,6 +245,18 @@
    "label": "Allow B2B to Numbers Not Saved on a Supplier",
    "default": "0",
    "description": "Off: every B2B payment goes to an approved Supplier M-Pesa Account. On: M-Pesa / Accounts Managers may type a one-off paybill or till."
+  },
+  {
+   "fieldname": "privacy_section",
+   "fieldtype": "Section Break",
+   "label": "Numbers and Names"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_full_details",
+   "fieldtype": "Check",
+   "label": "Show Numbers and Names in Full",
+   "description": "On: phone numbers, account numbers and the names M-Pesa paid show in full (254712345678, \"254712345678 - JANE DOE\") on forms, the Send via M-Pesa dialog, reports, alerts, comments and the 80 mm prints. Off: 2547****5678 and ****6789. The external Payments API always masks them."
   },
   {
    "fieldname": "notifications_section",
@@ -707,7 +721,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-28 18:00:00.000000",
+ "modified": "2026-11-11 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

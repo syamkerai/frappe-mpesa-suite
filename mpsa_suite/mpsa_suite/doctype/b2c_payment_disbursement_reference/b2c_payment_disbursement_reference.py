@@ -8,7 +8,8 @@ from frappe.model.document import Document
 from frappe.utils import flt
 
 from ....daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
-from ....utils.phone import FORMATS, normalize_msisdn, payable_msisdn, shown
+from ....utils.phone import FORMATS, normalize_msisdn, payable_msisdn
+from ....utils.privacy import shown
 
 
 class B2CPaymentDisbursementReference(Document):

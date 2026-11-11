@@ -403,7 +403,7 @@ class TestSalarySlipPayouts(pp._Base):
             status = payroll.salary_slip_status(slip)
             self.assertTrue(status["can_prepare"])
             self.assertEqual([(a["destination"], a["expected_name"]) for a in status["accounts"]],
-                             [(PHONE[:4] + "****" + PHONE[-4:], None)])
+                             [(PHONE, None)])  # round 4.3: numbers in full (the default)
             self.assertRaisesRegex(frappe.PermissionError, f"you may not read Employee M-Pesa Account {bank}",
                                    payroll.from_salary_slip, slip, payee_account=bank, b2b_settings=SETTINGS)
             answer = payroll.from_salary_slip(slip, b2c_settings=SETTINGS)

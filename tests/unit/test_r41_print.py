@@ -33,7 +33,7 @@ def test_the_name_mpesa_paid_is_split_on_its_first_spaced_hyphen(pp, value, part
     ("254722000111", "2547****0111"), ("0722000111", "2547****0111"), ("2547****0111", "2547****0111"),
     ("835811", "835811"), ("1234567890", "****7890"), ("PK-77", "PK-77"), ("PARK-0123456789", "****6789"), (None, ""),
 ])
-def test_numbers_are_masked_as_the_send_summary_shows_them(pp, value, shown):
+def test_numbers_are_masked_as_the_send_summary_shows_them(pp, value, shown, masked_numbers):
     assert pp.masked(value) == shown
 
 
@@ -51,7 +51,7 @@ def test_an_entry_carrying_a_payouts_receipt_is_printed_once(pp):
     assert [e.name for e in pp.without_covered(entries, ["UJS1ABC", ""])] == ["PE-2", "PE-3"]
 
 
-def test_a_claims_payments_list_its_payouts_and_other_entries_once(env, pp):
+def test_a_claims_payments_list_its_payouts_and_other_entries_once(env, pp, masked_numbers):
     db = env.frappe.db
     db.table(REQ).update({
         "REQ-1": {"name": "REQ-1", "docstatus": 1, "status": "Paid", "transaction_id": "UJS1", "amount": 2000,
@@ -156,7 +156,7 @@ def batch(env, rows, **kw):
                                        "references": [_dict(r) for r in rows], **kw}
 
 
-def test_a_batch_of_several_parties_is_proved_one_paid_row_to_its_own_party(env, pp):
+def test_a_batch_of_several_parties_is_proved_one_paid_row_to_its_own_party(env, pp, masked_numbers):
     """R1/R2: never the whole batch to everyone; each party gets their own payout's proof only."""
     db = env.frappe.db
     env.meta_fields["Employee"] = {"cell_number", "bank_ac_no", "prefered_email"}
@@ -216,7 +216,7 @@ def test_the_proofs_total_is_what_was_paid(env, pp, monkeypatch):
     assert pp.mpsa_payout_proof(doc).total == 1000
 
 
-def test_a_claims_payee_account_numbers_are_masked_on_its_advice(env, pp):
+def test_a_claims_payee_account_numbers_are_masked_on_its_advice(env, pp, masked_numbers):
     """R13: a bank or paybill account number as ****6789, as the payout rows show it."""
     cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
     line = _dict(payee_type=cp.BANK, shortcode="522522", account_number="0123456789")

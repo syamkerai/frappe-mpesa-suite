@@ -15,7 +15,8 @@ import frappe
 from frappe.utils import cstr
 
 from ..permissions import ADMIN_ROLES
-from ..utils.phone import FORMATS, digits, payable_msisdn, repaired_msisdn, shown
+from ..utils.phone import FORMATS, digits, payable_msisdn, repaired_msisdn
+from ..utils.privacy import shown
 from . import party_accounts as pa
 
 ACCOUNT_DOCTYPE = pa.EMPLOYEE_ACCOUNT

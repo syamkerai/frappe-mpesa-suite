@@ -46,7 +46,7 @@ def staff(env, monkeypatch):
 
 
 # ---------------------------------------------------------------- (a) a user's phone is staff's
-def test_a_users_phone_is_refused_as_a_payee_and_your_own_is_said_so(staff):
+def test_a_users_phone_is_refused_as_a_payee_and_your_own_is_said_so(staff, masked_numbers):
     found = staff.cp.employee_destinations()
     assert found.users == {"B2C:254722999001": PAYER, "B2C:254722999002": OTHER}  # no website user
     line = payee(payee_type=PHONE, phone="0722 999 001")
@@ -187,7 +187,7 @@ def test_names_are_matched_with_at_least_two_words_for_staff(env):
 
 
 # ---------------------------------------------------------------- masked phones
-def test_a_phone_is_masked_in_the_name_check_and_its_alarm(env):
+def test_a_phone_is_masked_in_the_name_check_and_its_alarm(env, masked_numbers):
     line = payee(payee_type=PHONE)
     claim(env, [line])
     verdict, note = env.cp.name_check(line, "254711000999 - JOHN DOE")
@@ -198,7 +198,7 @@ def test_a_phone_is_masked_in_the_name_check_and_its_alarm(env):
     assert "254711000999" not in str(env.frappe.errors[-1]) and "254711000999" not in env.alerts[-1][1]
 
 
-def test_a_wrong_011_number_that_masks_like_the_lines_says_the_hidden_digits_differ(env):
+def test_a_wrong_011_number_that_masks_like_the_lines_says_the_hidden_digits_differ(env, masked_numbers):
     line = payee(payee_type=PHONE, phone="254111444514")
     claim(env, [line])
     verdict, note = env.cp.name_check(line, "254110444514 - JOHN DOE")

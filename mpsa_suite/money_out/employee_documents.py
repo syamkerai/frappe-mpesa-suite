@@ -36,7 +36,9 @@ from frappe.utils import cint, cstr, flt, nowdate
 
 from ..daraja.guard import B2C_MAX_AMOUNT, B2C_MIN_AMOUNT
 from ..money_in import common as money_in_common
-from ..utils.phone import FORMATS, normalize_msisdn, payable_msisdn, shown
+from ..utils import privacy
+from ..utils.phone import FORMATS, normalize_msisdn, payable_msisdn
+from ..utils.privacy import shown
 from ..permissions import PREPARE_ROLES, require
 from . import employee_accounts, owed, party_accounts
 
@@ -679,17 +681,21 @@ def draft_payouts(dt: str, dn: str) -> list:
 
 
 def _masked_phone(phone) -> str:
+    """A phone in the pay dialog: in full, or 2547****0111 when M-Pesa Suite Settings masks numbers."""
     phone = cstr(phone).strip()
+    if privacy.full_details():
+        return phone
     return f"{phone[:4]}****{phone[-4:]}" if len(phone) > 8 else phone
 
 
 def _masked(number) -> str:
-    number = cstr(number).strip()
-    return f"****{number[-4:]}" if len(number) > 4 else number
+    """An account number in the pay dialog: in full, or ****6789 (utils.privacy)."""
+    return privacy.account(number, longer_than=4)
 
 
 def _account_label(acc) -> str:
-    """'Till (Buy Goods) 835811', 'Paybill 888880, account ****AC-1 (default)': what the dialog shows."""
+    """'Till (Buy Goods) 835811', 'Paybill 888880, account ACME-AC-1 (default)' (account ****AC-1 when
+    numbers are masked): what the dialog shows."""
     label = f"{acc.account_type} {cstr(acc.shortcode).strip()}"
     if acc.get("bank"):
         label += f" ({acc.bank})"

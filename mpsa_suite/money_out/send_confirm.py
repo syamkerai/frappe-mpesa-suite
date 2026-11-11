@@ -37,7 +37,7 @@ from frappe.utils import cint, cstr, flt
 
 from ..compat import get_cache, in_test
 from ..permissions import ADMIN_ROLES, PAYOUT_ROLES, require, require_named_user
-from ..utils.phone import mask
+from ..utils.privacy import phone as shown_phone
 
 B2B = "Mpesa B2B Payment Request"
 B2C = "B2C Payment Disbursement"
@@ -361,7 +361,7 @@ def _b2c_rows(doc) -> list:
         party_type = row.get("party_type") or doc.get("party_type")
         document = f"{_(row.reference_doctype)} {row.reference_name}" if row.get("reference_name") else None
         amount = row.get("allocated_amount")
-        phone = _("M-Pesa phone {0}").format(mask(row.get("partyb")))
+        phone = _("M-Pesa phone {0}").format(shown_phone(row.get("partyb")))
         line = payees.get(cstr(row.get("claim_payee")).strip())
         if line:  # a casual payee of a claim: the row's party is the claimant, who is not who is paid
             out.append(_payee_row(line, phone, amount, _b2c_charge(amount)))
@@ -374,7 +374,7 @@ def _b2c_rows(doc) -> list:
 def _b2c_request_rows(doc) -> list:
     document = f"{_(doc.reference_doctype)} {doc.reference_name}" if doc.get("reference_name") else None
     return [_row(_party_name(doc.get("party_type"), doc.get("party")) or _("Not named"),
-                 _("M-Pesa phone {0}").format(mask(doc.get("phone_number"))), doc.get("amount"),
+                 _("M-Pesa phone {0}").format(shown_phone(doc.get("phone_number"))), doc.get("amount"),
                  _b2c_charge(doc.get("amount")), document, doc.get("party"))]
 
 
@@ -392,7 +392,7 @@ def _account_rows(doc) -> list:
     p = pa.profile(doc)
     party = doc.get(p.party_field)
     if doc.get("account_type") == pa.PHONE:
-        destination = _("M-Pesa phone {0}").format(mask(doc.get("phone")))
+        destination = _("M-Pesa phone {0}").format(shown_phone(doc.get("phone")))
     elif doc.get("account_type") == pa.TILL:
         destination = _("Till {0}").format(doc.get("shortcode"))
     else:

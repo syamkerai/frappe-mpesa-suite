@@ -178,7 +178,7 @@ def test_an_employee_bank_account_without_its_paybill_row_names_the_erpnext_bank
         "Jane Wanjiru", "KCB Bank (bank paybill 522522), account 1234567890", "Jane Wanjiru")
 
 
-def test_b2c_rows_show_each_masked_phone_amount_charge_and_the_total(env, monkeypatch):
+def test_b2c_rows_show_each_masked_phone_amount_charge_and_the_total(env, monkeypatch, masked_numbers):
     monkeypatch.setattr(env.sc, "_b2c_charge", lambda amount: 15.0 if amount > 1000 else 7.0)
     disbursement(env)
     r = prepared(env, B2C, "B2C-1")
@@ -409,7 +409,7 @@ def test_an_account_the_approver_cannot_approve_gets_no_token(env, values, messa
     assert r["token"] is None and message in " ".join(r["problems"])
 
 
-def test_an_employee_cannot_approve_their_own_account(env):
+def test_an_employee_cannot_approve_their_own_account(env, masked_numbers):
     env.frappe.db.table(EMPLOYEE_ACCOUNT)["EMA-1"] = dict(
         name="EMA-1", docstatus=0, owner=CLERK, entered_by=CLERK, modified_by=CLERK, modified=MODIFIED,
         employee="EMP-1", account_type="Phone (B2C)", phone="254712345678", expected_name="JANE WANJIRU",
@@ -481,7 +481,7 @@ def test_a_payee_that_is_a_suppliers_approved_account_shows_its_name(env, monkey
     assert row["expected_name"] == "ACME HARDWARE"
 
 
-def test_casual_payees_in_one_batch_are_each_named(env):
+def test_casual_payees_in_one_batch_are_each_named(env, masked_numbers):
     claim_payees(env, dict(payee_type="Phone (B2C)", payee_name="Peter Otieno", phone="254711000111", amount=800),
                  dict(payee_type="Phone (B2C)", payee_name="Mary Akinyi", phone="254711000222", amount=700))
     rows = [fake_frappe._dict(name=f"R{i}", party_type="Employee", party="EMP-1", partyb=phone, allocated_amount=amount,

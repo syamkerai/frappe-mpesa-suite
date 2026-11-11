@@ -418,7 +418,7 @@ def test_the_selection_is_read_in_grouped_queries(site, monkeypatch):
     assert len(bank_reads) == 1
 
 
-def test_who_may_not_read_employee_accounts_pays_the_default_only(site):
+def test_who_may_not_read_employee_accounts_pays_the_default_only(site, masked_numbers):
     account(site, "MEA-8", "EMP-1", site.pa.BANK, default=0, shortcode="522522", account_number="1100223344")
     full = site.payroll.salary_slip_status("SAL-1")
     assert [(a["name"], a["destination"]) for a in full["accounts"]] == [("MEA-1", "247247 / 0123456789"),

@@ -613,7 +613,8 @@ def sanitize_mobile_number(number: str) -> str:
     """2547XXXXXXXX / 2541XXXXXXXX via utils.phone (also '+254 0712...', '00254 712...' and
     '0254712...': utils.phone.repaired_msisdn); any other number is refused, never guessed from its
     last 9 digits, which can be another subscriber's."""
-    from ...utils.phone import FORMATS, digits, repaired_msisdn, shown
+    from ...utils.phone import FORMATS, digits, repaired_msisdn
+    from ...utils.privacy import shown
 
     msisdn = repaired_msisdn(number)
     num = digits(number)

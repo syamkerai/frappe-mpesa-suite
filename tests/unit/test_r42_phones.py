@@ -87,7 +87,7 @@ def ea(claims_env):
 
 @pytest.mark.parametrize("typed", ["25416055453", "0727 123 4567", "072712345", "+254 7271234567", "716055453 1",
                                    "0121 234 567", "0152000280", "0144 123 456", "+254 152 000 280"])
-def test_a_mistyped_kenyan_cell_number_is_refused_when_it_is_typed(claims_env, ea, typed):
+def test_a_mistyped_kenyan_cell_number_is_refused_when_it_is_typed(claims_env, ea, typed, masked_numbers):
     with pytest.raises(claims_env.frappe.ValidationError, match="is not a Kenyan mobile number") as caught:
         ea.check_cell_number(Employee(typed, before="0716 055 453"))
     assert "".join(c for c in typed if c.isdigit()) not in str(caught.value)  # the number itself is not shown
@@ -138,7 +138,7 @@ def test_pay_employee_by_phone_pays_a_cell_number_in_254_form(env):
     assert env.ed.b2c_phone("EMP-3") == ("254118444514", None)
 
 
-def test_pay_employee_by_phone_refuses_a_cell_number_b2c_cannot_pay_before_any_payout(env):
+def test_pay_employee_by_phone_refuses_a_cell_number_b2c_cannot_pay_before_any_payout(env, masked_numbers):
     env.frappe.session.user, env.frappe.user_roles = PREPARER, {"HR Manager"}
     env.frappe.db.table("Employee")["EMP-3"]["cell_number"] = "25416055453"
     claim(env, "HR-EXP-3", employee="EMP-3")
@@ -154,7 +154,7 @@ def test_pay_employee_by_phone_refuses_a_cell_number_b2c_cannot_pay_before_any_p
         "The approved phone on MEA-7 (2541****5678) is not a number M-Pesa can pay")
 
 
-def test_the_form_says_why_a_cell_number_cannot_be_paid(env):
+def test_the_form_says_why_a_cell_number_cannot_be_paid(env, masked_numbers):
     env.frappe.session.user, env.frappe.user_roles = PREPARER, {"HR Manager"}
     env.frappe.db.table("Employee")["EMP-3"]["cell_number"] = "25416055453"
     claim(env, "HR-EXP-3", employee="EMP-3")

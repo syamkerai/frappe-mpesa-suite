@@ -1,6 +1,6 @@
 {#- Payment advice, 80 mm: a Purchase Invoice, Purchase Order, Expense Claim, Employee Advance or Salary
     Slip and every payment made against it. All data from money_out.payment_print.mpsa_payment_advice
-    (permission-checked; phones masked; totals from the entries booked). -#}
+    (permission-checked; numbers in full or masked per M-Pesa Suite Settings; totals from the entries booked). -#}
 {%- set p = mpsa_payment_advice(doc) -%}
 {%- macro kes(value) -%}{{ p.currency }} {{ "{:,.2f}".format(value or 0) }}{%- endmacro -%}
 {% include "templates/print/mpsa_80mm_style.html" %}

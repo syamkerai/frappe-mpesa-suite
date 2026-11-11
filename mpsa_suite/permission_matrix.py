@@ -334,6 +334,8 @@ ENDPOINTS = {
     "mpsa_suite.money_out.claim_payees.pay_claims": ("PREPARE_ROLES + read each Expense Claim", ("roles:PREPARE_ROLES", "perm")),
     "mpsa_suite.money_out.claim_payees.claim_state": ("Read the Expense Claim", ("perm",)),
     "mpsa_suite.money_out.claim_payees.parse_payees": ("Write the Expense Claim (create one, before its first save)", ("perm",)),
+    # round 4.3: the name M-Pesa paid a payee's phone under before (M-Pesa shows it to any sender)
+    "mpsa_suite.money_out.claim_payees.mpesa_name": ("Create or write Expense Claims", ("perm",)),
     "mpsa_suite.money_out.claim_payees.repair_reimbursed": ("ADMIN_ROLES + read the Expense Claim", ("roles:ADMIN_ROLES", "perm")),
     "mpsa_suite.money_out.claim_payees.settle_line": (
         "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
