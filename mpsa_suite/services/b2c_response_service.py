@@ -58,14 +58,22 @@ def update_b2c_reference_status(b2c_request_name: str, enqueue_next: bool = Fals
             # through it. A cancelled request's late result never takes the row over.
             update["b2c_disbursement_request"] = req.name
 
-        frappe.db.set_value("B2C Payment Disbursement Reference", ref_name, update)
-        if (line or account) and req.status == "Paid" and not was_paid and req.docstatus == 1:
-            _check_receiver_name(req, line, account)  # once, when the row first shows Paid
         from mpsa_suite.money_out import partyless
 
-        # a row that pays a person no party names: its document's row follows it, before it is booked
-        # (a sheet books its paid rows once none is on its way)
-        partyless.on_result(ref_name, req)
+        # A row no party names (a bulk payout sheet's row, a top-up): its paying document's lock
+        # first, then the row. The document's own actions (Pay, Settle, its booking) hold that lock
+        # and then read its rows with locking reads, so writing the row first and waiting for the
+        # lock after (in on_result) was a lock-order inversion MariaDB cannot see: both sides waited
+        # until one timed out (partyless.result_lock). Held until the commit below; on_result
+        # re-enters it. A lock still taken after its wait fails the job: the 15-minute sweep
+        # (update_b2c_disbursement_statuses) runs it again, the row being unchanged.
+        with partyless.result_lock(ref_name):
+            frappe.db.set_value("B2C Payment Disbursement Reference", ref_name, update)
+            if (line or account) and req.status == "Paid" and not was_paid and req.docstatus == 1:
+                _check_receiver_name(req, line, account)  # once, when the row first shows Paid
+            # a row that pays a person no party names: its document's row follows it, before it is
+            # booked (a sheet books its paid rows once none is on its way)
+            partyless.on_result(ref_name, req)
         from mpsa_suite.services.b2c_batch_status import sync_status_later
 
         sync_status_later(req.b2c_payment_disbursement)  # the batch's status follows its rows

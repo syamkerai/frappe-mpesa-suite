@@ -778,17 +778,23 @@ def test_a_payout_in_doubt_is_never_sent_again(env):
         other.insert()
 
 
-def test_a_retry_of_the_request_itself_checks_the_row(env, monkeypatch):
+def test_a_retry_of_the_request_itself_is_refused_the_sheets_retry_failed_makes_a_new_payout(env, monkeypatch):
+    # round 4.5 review: a request sent again gets a new OriginatorConversationID, and its first attempt's late
+    # Result could no longer be matched; the sheet's Retry Failed makes a new request instead
     sheet(env)
     pay(env)
     requests = answer(env, send(env), paid_names())
     failed = requests["254711000334"]
     request = env.frappe.get_doc(REQ, failed)
     with as_user(env, PAYER, "M-Pesa Payer"):
-        env.partyless.check_retry(request)  # the row is still owed: retried
-        env.frappe.db.table(SROW)["MBP-1-R4"]["phone"] = "254711000999"  # corrected since: never to the old number
-        with raises("the phone is not row #4's of MBP-1"):
+        with raises(f"{failed} pays a row of M-Pesa Bulk Payout MBP-1: retry it with Retry Failed on MBP-1, which "
+                    "makes a new payout"):
             env.partyless.check_retry(request)
+    made = pay(env, "retry_failed")
+    assert [r.reference_row for r in env.batches[-1].references] == ["MBP-1-R4"] and made.rows == 1
+    env.frappe.db.table(SROW)["MBP-1-R4"]["phone"] = "254711000999"  # corrected since: never to the old number
+    with raises("the phone is not row #4's of MBP-1"):
+        env.batches[-1].validate()
 
 
 def test_check_with_mpesa_now_asks_about_the_waiting_payouts(env, monkeypatch):
@@ -820,7 +826,7 @@ def test_mark_as_not_paid_after_the_status_query_found_nothing(env):
     requests = answer(env, send(env), {"254722000111": ("Unknown",)})
     request = requests["254722000111"]
     with as_user(env, APPROVER, "M-Pesa Manager"):
-        with raises("Nobody asked M-Pesa about"):
+        with raises("M-Pesa has not answered a Transaction Status query about"):
             env.bulk.mark_not_paid("MBP-1", "MBP-1-R2", "statement shows nothing")
         env.frappe.db.table("Mpesa B2C Status Query")["MBSQ-1"] = {"name": "MBSQ-1", "b2c_request": request,
                                                                    "status": "Result Received", "creation": NOW}

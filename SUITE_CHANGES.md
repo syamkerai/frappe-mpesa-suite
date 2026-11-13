@@ -56,8 +56,30 @@ the rows' accounting dimension fields); then clear the cache.
   `party_accounts.alert` takes `link` (Notification Log's Link: the bell and the email open it).
 - M-Pesa workspace and sidebar: Bulk Payout. Permissions: preparers (Accounts User, HR User, HR Manager)
   create and change drafts; M-Pesa Manager and Accounts Manager submit, cancel and amend; M-Pesa Payer reads.
+- **Review fixes** (each could pay twice or book wrongly):
+  - A payout whose fate is unknown (Initiated, Status Unknown, Not Initiated with its send begun) holds its row
+    however its batch or request was cancelled (`partyless._others`); the sheet's row check reads the row's
+    status from its payouts, and a `<row>/test` is held by its row's main payouts too (`related_rows`).
+    Such a party-less request, or a Paid one, cannot be cancelled (`partyless.cancel_problem`). The B2C row's
+    Paying Row and Expense Claim Payee are no_copy (a Duplicate names no paying row).
+  - A journal cancelled and amended still books its payouts (`live_journal` follows `amended_from`); a payout
+    whose receipt a voucher carries (Create Voucher) counts as booked by it and is never swept in. Only a
+    journal cancelled with no amend is booked again.
+  - A sheet's failed payout is retried only by the sheet's Retry Failed (a new request): the request's Retry
+    Payment and the batch's Retry Failed Transactions are refused (`retry_problem`), so the first attempt
+    keeps its OriginatorConversationID. Mark as Not Paid checks self-pay, refuses an acknowledged (Initiated)
+    payout, and needs a status query M-Pesa answered.
+  - Lock order: a party-less result takes its document's lock before it writes its row
+    (`partyless.result_lock`); `book_waiting` locks first, and the unbooked sweep commits its stamp first.
+  - The new-number test pays max(KES 10, Minimum B2C Payout), only when the rest is payable too; the save
+    checks the shortcode's Transaction Limit and the minimum (`payout_limit_problem`).
+  - The rows' accounting dimensions are checked at save and submit as ERPNext checks the journal (mandatory for
+    P&L, filled from the company default when set; the value's company; Accounting Dimension Filters); a
+    dimension mandatory for Balance Sheet needs a company default, which the credit line carries.
+  - The retry's self-pay check knows M-Pesa's name for the phone (`describe()` gives `mpesa_name`).
 
-Tests: `tests/unit/test_r45_bulk_payout.py`; bench `mpsa_suite/money_out/test_bulk_payout.py` (v15 and v16).
+Tests: `tests/unit/test_r45_bulk_payout.py`, `tests/unit/test_r45_review_bulk.py`; bench
+`mpsa_suite/money_out/test_bulk_payout.py` (v15 and v16).
 
 ## Paying supplier tills: the Petty Cash Phone and strict Pay via Staff (2026-11-13, branch r4-5-tills)
 

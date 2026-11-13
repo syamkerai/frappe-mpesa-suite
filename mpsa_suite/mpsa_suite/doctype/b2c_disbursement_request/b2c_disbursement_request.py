@@ -75,7 +75,20 @@ class B2CDisbursementRequest(Document):
         manager who checked the statement (or a Transaction Status check), and keeps its status
         (one whose send began and never answered becomes Status Unknown); a Paid one is the
         record of that salary and is not cancelled. Its line then waits for a manager, never
-        planned again by anyone else (money_out.schedule)."""
+        planned again by anyone else (money_out.schedule).
+
+        A payout of a row no party names (a bulk payout sheet's row, a top-up: money_out.partyless)
+        that M-Pesa may have paid, or did, is not cancelled at all (partyless.cancel_problem): its
+        paying row is held by it until M-Pesa or a Transaction Status query settles it, and a
+        cancelled request is never asked about. A Failed one, or one never sent, is cancelled."""
+        from ....money_out import partyless
+
+        if partyless.handler_for(getattr(self, "reference_doctype", None)):
+            self._server_fields_from_db()
+            problem = partyless.cancel_problem(self)
+            if problem:
+                frappe.throw(problem, title="M-Pesa may have paid it")
+            return
         if not self.schedule_line():
             return
         self._server_fields_from_db()
@@ -105,7 +118,15 @@ class B2CDisbursementRequest(Document):
 
     def on_trash(self):
         """A scheduled payout that may have reached M-Pesa is the only record of that money: its
-        line waits on it (a manager checks the statement), and a late Result needs it to match."""
+        line waits on it (a manager checks the statement), and a late Result needs it to match. So is
+        a party-less one (partyless.cancel_problem): deleted, its paying row would be paid again."""
+        from ....money_out import partyless
+
+        if partyless.handler_for(getattr(self, "reference_doctype", None)):
+            problem = partyless.cancel_problem(self, "deleted")
+            if problem:
+                frappe.throw(problem, title="M-Pesa may have paid it")
+            return
         if not self.schedule_line():
             return
         from ....money_out.schedule import b2c_never_sent
@@ -119,7 +140,11 @@ class B2CDisbursementRequest(Document):
 
     @frappe.whitelist()
     def retry_failed_payment(self) -> None:
-        """Retry only payments Safaricom reported as failed."""
+        """Retry only payments Safaricom reported as failed. The retry sends this request again with
+        a new OriginatorConversationID. A payout of a row no party names whose document retries it
+        with a new payout of its own (a bulk payout sheet's Retry Failed: partyless.retry_problem)
+        is refused, in validate_still_owed, before anything is changed: the first attempt keeps its
+        IDs, so a late Result for it is still matched."""
         require_named_user()
         require(PAYOUT_ROLES)
         # The document lock before the row lock: a disbursement submit takes the document

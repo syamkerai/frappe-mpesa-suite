@@ -30,6 +30,14 @@ What a party-less payout is
   is paid or on its way (any status but Failed), at the send under the paying document's lock,
   and again at a retry; the sender is not paid (money_out.self_pay). A B2C Disbursement Request
   made by hand never pays such a row.
+- A payout whose fate is unknown (Initiated: M-Pesa took it and its Result has not come; Status
+  Unknown, or Not Initiated with its send begun: the send got no answer) holds its paying row
+  however its disbursement or request was cancelled since, until M-Pesa or a Transaction Status
+  query settles it as Paid or Failed. Such a request, and a Paid one, is never cancelled
+  (``cancel_problem``): it is the record of that money, and a cancelled request is never asked
+  about again.
+- The result job takes the paying document's lock before it writes the row (``result_lock``):
+  every path that reads the document's B2C rows with a locking read holds that lock first.
 
 The handler (``h`` below; ``row`` is the B2C Payment Disbursement Reference: the child document in
 ``check_row``, ``book`` and ``booked``, a frappe._dict read from the database in ``on_result`` and
@@ -64,12 +72,18 @@ The handler (``h`` below; ``row`` is the B2C Payment Disbursement Reference: the
 - ``h.describe(row)`` (optional): what the Send via M-Pesa summary shows for the row, a dict:
   ``receiver`` (who is paid), ``party`` (a second line, in brackets: the project, the purpose),
   ``document`` (e.g. "M-Pesa Bulk Payout MBP-26-11-0001, row #3"), ``expected_name`` (shown as
-  the name on the approved account: leave it out unless the row has one). Prints use
-  ``receiver`` for a row M-Pesa paid under no name.
+  the name on the approved account: leave it out unless the row has one), ``mpesa_name`` (the
+  name M-Pesa paid the phone under before, for the self-pay checks only; leave it out when there
+  is none). Prints use ``receiver`` for a row M-Pesa paid under no name.
 - ``h.self_pay_rows(parent)`` (optional): the people the parent pays, for the self-pay check at
   the send: dicts of ``phone``, ``payee_name``, ``mpesa_name`` (the name M-Pesa paid the phone
-  under before) and ``label``. Default: each row's phone, its ``describe`` receiver and expected
-  name.
+  under before) and ``label``. Default: each row's phone, its ``describe`` receiver and M-Pesa
+  name (else its expected name).
+- ``h.related_rows(paying_row)`` (optional): the other paying rows whose payouts, paid or on their
+  way, also hold this one (a sheet's KES 10 test is held by its row's own payouts). Default: none.
+- ``h.retry_problem(row, request)`` (optional): why a failed payout of the row is never sent again
+  from its request or its disbursement (Retry Payment, Retry Failed Transactions): the document
+  retries it with a new payout of its own. Default: None (it may be, after ``check_retry``).
 - ``h.check_retry(row, request)`` (optional): a failed payout is sent again (Retry on the request
   or its disbursement), after the suite checked that no other payout of the paying row is paid or
   on its way and that the person retrying is not paid. Default: ``h.check_row(row, parent)``.
@@ -79,6 +93,7 @@ The handler (``h`` below; ``row`` is the B2C Payment Disbursement Reference: the
   not stop the send (a short Utility balance): a list of sentences. Default: none.
 """
 
+import contextlib
 import importlib
 
 import frappe
@@ -95,6 +110,9 @@ ROW_FIELDS = ("name", "idx", "parent", "parenttype", "reference_doctype", "refer
               "party_type", "party", "partyb", "allocated_amount", "payment_status", "reference_no", "reference_date",
               "b2c_disbursement_request")
 SAVEPOINT = "mpesa_partyless_result"
+# A payout whose fate is unknown: M-Pesa took it and its Result has not come (Initiated), or its send
+# got no answer (Status Unknown; Not Initiated with its send begun)
+UNKNOWN = ("Initiated", "Status Unknown")
 
 # in-process registrations (register): {doctype: handler}; hooks are read on every call
 _REGISTERED = {}
@@ -147,6 +165,12 @@ class Handler:
 
     def self_pay_rows(self, parent):
         return None  # the registry's default (module docstring)
+
+    def related_rows(self, paying_row) -> list:
+        return []
+
+    def retry_problem(self, row, request) -> str | None:
+        return None
 
     def check_retry(self, row, request) -> None:
         parent = frappe.get_doc(DISB, row.parent)
@@ -314,30 +338,51 @@ def _key(row) -> tuple:
             cstr(_value(row, "reference_row")).strip())
 
 
+def _keys(row) -> tuple:
+    """The paying rows whose payouts hold this row's: its own, and its handler's ``related_rows``."""
+    doctype, _name, paying = _key(row)
+    handler = handler_for(doctype)
+    related = _call(handler, "related_rows", paying, default=None) if handler else None
+    return tuple(dict.fromkeys([paying, *(cstr(k).strip() for k in related or () if cstr(k).strip())]))
+
+
 def _others(row, exclude_parent=None, exclude_row=None, for_update: bool = False) -> list:
-    """Other payouts of the row's paying row that are paid or on their way: rows of a submitted
-    disbursement, or with a submitted or Paid payout, whose payout did not fail. A draft is not one
-    (whichever is sent first takes the row); a Paid payout counts however it was cancelled since:
-    the money left. ``for_update``: a locking read (what is committed now)."""
-    doctype, name, paying = _key(row)
+    """Other payouts of the row's paying row (and of its ``related_rows``) that are paid or on
+    their way: rows of a submitted disbursement, or with a submitted or Paid payout, whose payout
+    did not fail. A draft is not one (whichever is sent first takes the row). A Paid payout counts
+    however it was cancelled since: the money left. So does one whose fate is unknown (UNKNOWN, or
+    Not Initiated with its send begun), however its disbursement and request were cancelled since:
+    the money may have left, and only M-Pesa's Result or a Transaction Status query (Paid or
+    Failed) settles it. ``for_update``: a locking read (what is committed now)."""
+    doctype, name, _paying = _key(row)
     locking = "FOR UPDATE" if for_update and frappe.db.db_type == "mariadb" else ""
     return frappe.db.sql(
         f"""
-        SELECT ref.name, ref.idx, ref.parent, ref.payment_status, req.name AS request, req.status AS request_status
+        SELECT ref.name, ref.idx, ref.parent, ref.reference_row, ref.payment_status, req.name AS request,
+               req.status AS request_status
         FROM `tab{ROW}` ref
         JOIN `tab{DISB}` d ON d.name = ref.parent
         LEFT JOIN `tab{REQUEST}` req ON req.name = ref.b2c_disbursement_request
         WHERE ref.reference_name = %(name)s AND ref.reference_doctype = %(doctype)s
-          AND ref.reference_row = %(paying)s
+          AND ref.reference_row IN %(paying)s
           AND ref.parent != %(parent)s AND ref.name != %(row)s
-          AND (d.docstatus = 1 OR req.docstatus = 1 OR COALESCE(req.status, '') = 'Paid')
+          AND (d.docstatus = 1 OR req.docstatus = 1
+               OR COALESCE(req.status, '') IN ('Paid', 'Initiated', 'Status Unknown')
+               OR (COALESCE(req.status, '') IN ('', 'Not Initiated') AND req.send_started_on IS NOT NULL))
           AND COALESCE(req.status, ref.payment_status, '') != 'Failed'
         {locking}
         """,
-        {"name": name, "doctype": doctype, "paying": paying, "parent": exclude_parent or "",
+        {"name": name, "doctype": doctype, "paying": _keys(row), "parent": exclude_parent or "",
          "row": exclude_row or ""},
         as_dict=True,
     )
+
+
+def fate_unknown(request) -> bool:
+    """Whether M-Pesa may have paid the payout and has not said (UNKNOWN, or Not Initiated with
+    its send begun): only its Result or a Transaction Status query settles it."""
+    status = cstr(_value(request, "status")).strip() or "Not Initiated"
+    return status in UNKNOWN or (status == "Not Initiated" and bool(_value(request, "send_started_on")))
 
 
 def _status(other) -> str:
@@ -349,7 +394,10 @@ def _paid_elsewhere(row, exclude_parent=None, exclude_row=None, for_update: bool
     others = _others(row, exclude_parent, exclude_row, for_update)
     if not others:
         return None
-    listed = ", ".join(f"{o.parent} row #{o.idx} ({_status(o)})" for o in others[:3])
+    paying = _key(row)[2]
+    listed = ", ".join(f"{o.parent} row #{o.idx}"
+                       + (f" (paying row {o.reference_row})" if cstr(o.reference_row).strip() != paying else "")
+                       + f" ({_status(o)})" for o in others[:3])
     paid = any(_status(o) == "Paid" for o in others)
     return (f"Row #{_value(row, 'idx')} pays {_paying(row)}, which is {'paid' if paid else 'being paid'} by "
             f"{listed}: a row is never paid twice.")
@@ -416,7 +464,8 @@ def self_pay_rows(parent) -> list:
     for row in rows:
         found = describe(row)
         out.append({"phone": _value(row, "partyb"), "payee_name": found.get("receiver"),
-                    "mpesa_name": found.get("expected_name"), "label": f"Row #{_value(row, 'idx')}"})
+                    "mpesa_name": found.get("mpesa_name") or found.get("expected_name"),
+                    "label": f"Row #{_value(row, 'idx')}"})
     return out
 
 
@@ -453,6 +502,28 @@ def check_not_own(parent) -> None:
 
 
 # ---------------------------------------------------------------- the result and booking
+def result_lock(ref_name: str | None):
+    """The paying document's lock (owed.doc_lock, held until the transaction ends), for a result
+    job to take before it writes a party-less row (b2c_response_service.update_b2c_reference_status);
+    a no-op for any other row, and on a site with no handler.
+
+    Why first: the document's own actions (a sheet's Pay, Settle, Mark as Not Paid, its booking)
+    take this lock and then read the document's B2C rows with a locking read. A result job that
+    wrote its row (holding the row's lock) and only then waited for this lock (in ``h.on_result``)
+    would wait on them while they wait on its row; MariaDB sees no deadlock between a named lock
+    and a row lock, so both sat until one timed out (60 s for the lock, 50 s for the row), and a
+    sheet's results arriving together stalled each other. Taken first, every path takes the lock
+    before any of the rows, and the result jobs of one document simply queue."""
+    if not ref_name or not handlers():
+        return contextlib.nullcontext()
+    found = frappe.db.get_value(ROW, ref_name, ["reference_doctype", "reference_name"], as_dict=True)
+    if not found or not handler_for(found.reference_doctype) or not cstr(found.reference_name).strip():
+        return contextlib.nullcontext()
+    from . import owed
+
+    return owed.doc_lock(found.reference_doctype, found.reference_name, timeout=owed.BOOKING_WAIT)
+
+
 def on_result(ref_name: str | None, request) -> None:
     """After a payout's result is recorded on its row (b2c_response_service): the paying
     document follows it (``h.on_result``). Under a savepoint: an error rolls back only the
@@ -524,15 +595,52 @@ def check_retry(request) -> None:
     found = describe(row)
     from .self_pay import self_pay_problem as own_problem
 
+    # the name M-Pesa paid the phone under before too: a person is known to M-Pesa by it
     problem = own_problem(frappe.session.user, [{
         "phone": _value(request, "phone_number") or row.partyb, "payee_name": found.get("receiver"),
-        "mpesa_name": found.get("expected_name"), "label": cstr(_value(request, "name"))}], "resend")
+        "mpesa_name": found.get("mpesa_name") or found.get("expected_name"),
+        "label": cstr(_value(request, "name"))}], "resend")
     if problem:
         frappe.throw(problem, frappe.PermissionError)
+    problem = _call(handler, "retry_problem", row, request)
+    if problem:
+        frappe.throw(problem, title="Retry it on its document")
     if callable(getattr(handler, "check_retry", None)):
         handler.check_retry(row, request)
     else:  # a handler that is no Handler subclass: the default
         Handler.check_retry(handler, row, request)
+
+
+def retry_problem(row) -> str | None:
+    """Why a failed payout of the party-less row (a B2C Payment Disbursement Reference) is never
+    sent again from its disbursement (Retry Failed Transactions): its handler's ``retry_problem``;
+    None for any other row."""
+    handler = handler_for(_value(row, "reference_doctype"))
+    if not handler:
+        return None
+    request = cstr(_value(row, "b2c_disbursement_request")).strip()
+    found = frappe.db.get_value(REQUEST, request, ["name", "status"], as_dict=True) if request else None
+    return _call(handler, "retry_problem", row, found or frappe._dict(name=request or None))
+
+
+def cancel_problem(request, action: str = "cancelled") -> str | None:
+    """Why a party-less payout (B2C Disbursement Request.before_cancel, its fields as the database
+    holds them; on_trash with ``action`` "deleted") is not cancelled, or None. As a payment
+    schedule's payouts: one M-Pesa may have paid (``fate_unknown``) or did pay (Paid) is the record
+    of that money. Its paying row's guards read it, a late Result needs it, and a cancelled request
+    is never asked about again (a Transaction Status query is for submitted requests): cancelled,
+    its fate would never be settled. Failed, or never sent: cancelled as any payout."""
+    status = cstr(_value(request, "status")).strip() or "Not Initiated"
+    name = _value(request, "name")
+    paying = f"{_value(request, 'reference_doctype')} {_value(request, 'reference_name')}"
+    if status == "Paid":
+        return f"{name} paid a row of {paying} (Paid): it is the record of that payment and cannot be {action}."
+    if fate_unknown(request):
+        return (f"{name} pays a row of {paying}, and M-Pesa may have paid it ({status}: its Result has not "
+                f"come, or its send got no answer). It is not {action} until M-Pesa says: a Transaction Status "
+                "query (Check Status with M-Pesa, or the 15-minute sweep) settles it as Paid or Failed; a Failed "
+                f"payout may then be {action}.")
+    return None
 
 
 # ---------------------------------------------------------------- the statement (money_out.statement)

@@ -415,3 +415,103 @@ class TestBulkPayout(IntegrationTestCase):
             frappe.get_doc(SHEET, other.name).cancel()
         self.assertEqual(frappe.db.get_value(SHEET, other.name, ["docstatus", "status"]), (2, "Cancelled"))
         self.assertEqual(frappe.db.get_value(SROW, {"parent": other.name}, "status"), "Cancelled")
+
+    # ------------------------------------------------------------ the round 4.5 review (unit: test_r45_review_bulk)
+    def test_a_payout_in_doubt_holds_its_row_is_never_cancelled_and_a_duplicate_names_no_row(self):
+        doc = self._approved()
+        batch = self._pay(doc.name)
+        requests = self._send(batch)
+        request = requests["254722000781"]
+        frappe.db.set_value(REQ, request, {"status": "Status Unknown", "conversation_id": None})
+        # Cancel All on the batch reaches the request: refused while M-Pesa may have paid it
+        self.assertRaisesRegex(frappe.ValidationError, "M-Pesa may have paid it",
+                               frappe.get_doc(REQ, request).cancel)
+        self.assertEqual(frappe.db.get_value(REQ, request, ["docstatus", "status"]), (1, "Status Unknown"))
+        # one cancelled before this guard (as the review found it): its row is still held
+        frappe.db.set_value(REQ, request, "docstatus", 2)
+        frappe.db.set_value(DISB, batch, "docstatus", 2)
+        self.assertEqual(bulk_payout.sync_rows(doc.name)[1].status, "In Flight")
+        with _as(PREPARER):
+            self.assertRaisesRegex(frappe.ValidationError, "No row has failed", bulk_payout.retry_failed, doc.name,
+                                   SETTINGS)
+        # Duplicate: the rows' paying row is no_copy, so the copy names none and is refused
+        duplicate = frappe.copy_doc(frappe.get_doc(DISB, batch), ignore_no_copy=False)
+        duplicate.docstatus = 0  # copy_doc keeps it under tests
+        self.assertEqual({r.reference_row or None for r in duplicate.references}, {None})
+        self.assertRaisesRegex(frappe.ValidationError, "it must name the document and its row it pays",
+                               duplicate.insert, ignore_permissions=True)
+        # a batch made by hand for the row: refused while its payout may have paid it
+        manual = frappe.copy_doc(frappe.get_doc(DISB, batch))
+        manual.docstatus = 0
+        manual.references = [r for r in manual.references if r.partyb == "254722000781"]
+        for i, r in enumerate(manual.references, 1):
+            r.idx, r.b2c_disbursement_request, r.payment_status = i, None, None
+        manual.paid_amount = 2000
+        self.assertRaisesRegex(frappe.ValidationError, "being paid by", manual.insert, ignore_permissions=True)
+
+    def test_a_journal_cancelled_and_amended_is_not_booked_again_by_a_later_payout(self):
+        frappe.db.set_single_value("M-Pesa Suite Settings", "reconcile_payout_lines", 0)  # no line takes the journal
+        frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
+        doc = self._approved()
+        _batch, requests, _receipts = self._paid_all_but_the_last(doc.name)
+        ((journal, _lines),) = self._journals(doc.name).items()
+        # staff correct it the ERPNext way: Cancel, then Amend and submit the copy
+        original = frappe.get_doc(JE, journal)
+        original.cancel()
+        amended = frappe.copy_doc(original)
+        amended.amended_from = original.name
+        amended.docstatus = 0  # copy_doc keeps it under tests
+        amended.insert()
+        amended.submit()
+        self.assertEqual(bulk_payout.live_journal(journal), (amended.name, 1))
+        self.assertIsNone(bulk_payout.book_sheet(doc.name))  # its payouts are booked by the amended copy
+        # the failed row retried and paid: a small journal of its own, the 4,300 never booked again
+        retry = self._pay(doc.name, "retry_failed")
+        again = self._send(retry)
+        self._result(again["254711000774"], "_T JOHN KAMAU")
+        journals = self._journals(doc.name)
+        self.assertEqual(len(journals), 2)
+        self.assertIn(amended.name, journals)
+        late = journals[[n for n in journals if n != amended.name][0]]
+        self.assertEqual(sum(d for *_x, d, _c in late), 1200)
+        for phone in ("254711000771", "254722000781", "254711000773"):
+            self.assertEqual(frappe.db.get_value(REQ, requests[phone], "accounting_booked"), 1, phone)
+
+    def test_mark_as_not_paid_needs_an_answered_query_and_only_the_sheets_retry_failed_retries(self):
+        doc = self._approved()
+        batch = self._pay(doc.name)
+        requests = self._send(batch)
+        request = requests["254722000781"]
+        first_id = frappe.db.get_value(REQ, request, "originator_conversation_id")
+        frappe.db.set_value(REQ, request, {"status": "Status Unknown", "conversation_id": None})
+        row = self._rows_of(doc.name)[1]
+        with _as(self.manager):
+            self.assertRaisesRegex(frappe.ValidationError, "has not answered a Transaction Status query",
+                                   bulk_payout.mark_not_paid, doc.name, row.name, "_T the statement shows nothing")
+        query = frappe.get_doc({"doctype": "Mpesa B2C Status Query", "b2c_request": request, "mpesa_settings": SETTINGS,
+                                "query_by": "OriginalConversationID", "query_value": first_id,
+                                "status": "Sent"}).insert(ignore_permissions=True)
+        with _as(self.manager):  # asked, not answered yet
+            self.assertRaisesRegex(frappe.ValidationError, "has not answered a Transaction Status query",
+                                   bulk_payout.mark_not_paid, doc.name, row.name, "_T the statement shows nothing")
+        frappe.db.set_value("Mpesa B2C Status Query", query.name,
+                            {"status": "Result Received", "outcome": "Unresolved"})  # "not found": settles nothing
+        with _as(self.manager):
+            bulk_payout.mark_not_paid(doc.name, row.name, "_T the statement of today shows no such payment")
+        self.assertEqual(frappe.db.get_value(SROW, row.name, "status"), "Failed")
+        # the request's own Retry and its batch's Retry Failed Transactions are refused: the sheet retries it
+        with _as(PAYER):
+            self.assertRaisesRegex(frappe.ValidationError, f"retry it with Retry Failed on {doc.name}",
+                                   frappe.get_doc(REQ, request).retry_failed_payment)
+            self.assertRaisesRegex(frappe.ValidationError, f"retry it with Retry Failed on {doc.name}",
+                                   frappe.get_doc(DISB, batch).retry_failed_payments)
+        self.assertEqual(frappe.db.get_value(REQ, request, ["status", "originator_conversation_id"]),
+                         ("Failed", first_id))
+        # the sheet's Retry Failed: a new request with its own OriginatorConversationID; the first keeps its own
+        retry = self._pay(doc.name, "retry_failed")
+        again = self._send(retry)
+        self.assertNotEqual(again["254722000781"], request)
+        self.assertNotEqual(frappe.db.get_value(REQ, again["254722000781"], "originator_conversation_id"), first_id)
+        self._result(again["254722000781"], "_T BULK OVERTIME WORKER")
+        self.assertEqual(frappe.db.get_value(SROW, row.name, "status"), "Paid")
+        self.assertEqual(frappe.db.get_value(REQ, request, "originator_conversation_id"), first_id)
