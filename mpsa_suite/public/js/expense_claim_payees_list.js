@@ -68,7 +68,13 @@ function mpsa_pay_casual_payees(listview) {
 								maker_checker
 									? __("An M-Pesa Payer who did not prepare it sends it with Send via M-Pesa.")
 									: __("An M-Pesa Payer sends it with Send via M-Pesa.")
-							}</p>`,
+							}</p>` +
+							// the ticked claims with nothing to pay, and why (no M-Pesa Payees lines, all paid...)
+							((r.skipped || []).length
+								? `<p style="color: var(--orange-600)">${__("Not in this batch:")}</p><ul>${r.skipped
+										.map((s) => `<li>${frappe.utils.escape_html(s)}</li>`)
+										.join("")}</ul>`
+								: ""),
 					});
 					listview.refresh();
 				});

@@ -7,6 +7,35 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## Bulk casual payouts made easy (2026-11-13, branch r4-4-bulk-casual)
+
+Found on 13 Nov 2026. At Astral, 69 casuals (KES 247,652) were typed into a site's own older payee
+list on a claim, which nothing pays any more. Then Pay Casual Payees by M-Pesa said only "Nothing to
+pay: every payee line is paid, on its way…". No migrate needed (no DocType change).
+
+- **Pay Casual Payees by M-Pesa** (list) and **Pay Merchants and Payees** (form) say why a claim had
+  nothing to pay (`claim_payees.nothing_to_pay`), naming the claims:
+  - no lines in the M-Pesa Payees table (with what to do: cancel, amend, Paste Payees, approve);
+  - no phone payees (its merchants are paid from the form);
+  - every line paid or on its way.
+  When the batch is made, the ticked claims left out of it are listed with the reason (`made.skipped`).
+- **Paste Payees reads real sheets** (`claim_payees.read_rows`):
+  - the column names may sit under title rows, as in a sheet's title or a payee table's own
+    Download (title, field names, notes), and those rows are left out;
+  - each field takes the column its strongest word names ("Amount", not "Pay To" or "Payment Status");
+  - TOTAL rows and rows that are no payee (no digit in the phone, no amount) are left out, and the
+    dialog lists them by row number;
+  - without column names, a first column of row numbers is passed over, the name may follow the
+    phone, and a column after the amount is ignored;
+  - a phone or an amount typed as a number in Excel (711000333.0) is read whole.
+- **The dialog**:
+  - it saves a new or changed claim first (an expense line is needed: it says so);
+  - it preselects the one expense line whose type allows payees;
+  - it shows the good rows' total against the expense line, with a box to set the line's Amount to
+    the payees' total (ticked when they come to more, which the save would refuse);
+  - "Add N Payees and Save" adds the rows and saves the claim.
+- The M-Pesa Payees section has a **Paste Payees** button of its own, not only under the M-Pesa menu.
+
 ## STK prompts paid on draft Sales Orders release the order and book (2026-11-09, branch r4-2-phones)
 
 Found at Astral on 9 Nov 2026, the first business day on v16 + the suite. Sales staff send M-Pesa

@@ -1203,7 +1203,8 @@ def test_pasted_rows_by_tab_or_comma_with_or_without_a_header(env):
     assert [(r.row, r.payee_name, r.phone, r.amount_text) for r in rows] == [
         (1, "Jane Wanjiku", "0711000333", "1,500"), (2, "John Otieno", "711000444", "1200")]
     rows = cp.table_rows([["Amount", "Phone Number", "Payee Name"], [1500.0, 711000333, "Jane"]])
-    assert [(r.row, r.payee_name, r.phone, r.amount_text) for r in rows] == [(2, "Jane", "711000333", "1500.0")]
+    # a spreadsheet's whole number comes without its ".0" (round 4.4)
+    assert [(r.row, r.payee_name, r.phone, r.amount_text) for r in rows] == [(2, "Jane", "711000333", "1500")]
     assert cp.parse_amount("KES 1,500") == 1500 and cp.parse_amount("Ksh. 20") == 20 and cp.parse_amount("x") is None
 
 

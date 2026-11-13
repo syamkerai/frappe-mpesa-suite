@@ -408,6 +408,52 @@ class TestClaimPayees(IntegrationTestCase):
         rows = frappe.get_all(ROW, filters={"parent": made["b2c"]}, fields=["reference_name"], order_by="idx")
         self.assertEqual(sorted(r.reference_name for r in rows), sorted([one.name, two.name]))
 
+    def test_a_bulk_sheet_with_a_title_and_a_total_is_pasted_from_an_upload_and_paid_in_one_batch(self):
+        # round 4.4: an XLSX as staff keep it (a title, the column names, numbers typed as numbers, a TOTAL row)
+        import io
+
+        from openpyxl import Workbook
+
+        book = Workbook()
+        sheet = book.active
+        for row in (["_T CASUALS SITE A 11 NOV"], ["No.", "Name", "Phone", "Amount"], [1, "_T Ann", 711000351, 1500],
+                    [2, "_T Ben", 711000352.0, 2000.0], [None, "TOTAL", None, 3500]):
+            sheet.append(row)
+        content = io.BytesIO()
+        book.save(content)
+        file = frappe.get_doc({"doctype": "File", "file_name": f"_t_bulk_{frappe.generate_hash(length=6)}.xlsx",
+                               "content": content.getvalue(), "is_private": 1}).insert(ignore_permissions=True)
+        draft = self._claim([], amount=3500, submit=False)
+        answer = claim_payees.parse_payees(file_url=file.file_url, claim=draft.name)
+        self.assertEqual((answer["good"], answer["bad"], answer["good_total"], answer["left_out"]),
+                         (2, 0, 3500, [1, 2, 5]))
+        self.assertEqual([(r["payee_name"], r["phone"], r["amount"]) for r in answer["rows"]],
+                         [("_T Ann", "254711000351", 1500), ("_T Ben", "254711000352", 2000)])
+        for r in answer["rows"]:  # what the dialog adds
+            draft.append("mpesa_payees", {"payee_type": "Phone (B2C)", "payee_name": r["payee_name"],
+                                          "phone": r["phone"], "amount": r["amount"],
+                                          "expense_detail": draft.expenses[0].name})
+        draft.save()
+        with _as(APPROVER):
+            draft.submit()
+        with _as(PREPARER):
+            made = claim_payees.pay_claims([draft.name], SETTINGS)
+        self.assertEqual((made["lines"], made["total"], made["skipped"]), (2, 3500, []))
+
+    def test_the_list_names_a_claim_with_no_mpesa_payees_lines_and_says_where_payees_go(self):
+        # round 4.4: casuals typed anywhere else on a claim (another list, the expense lines) are not paid
+        one = self._claim([{"payee_type": "Phone (B2C)", "payee_name": "_T Jane", "phone": "0711000343",
+                            "amount": 1000}])
+        none = self._claim([])
+        with _as(PREPARER):
+            with self.assertRaisesRegex(frappe.ValidationError, f"^Nothing to pay: {none.name} has no lines in the "
+                                                                "M-Pesa Payees table"):
+                claim_payees.pay_claims([none.name], SETTINGS)
+            made = claim_payees.pay_claims([one.name, none.name], SETTINGS)
+        self.assertEqual(made["lines"], 1)
+        self.assertEqual(len(made["skipped"]), 1)
+        self.assertTrue(made["skipped"][0].startswith(f"{none.name} has no lines in the M-Pesa Payees table"))
+
     def test_an_amended_claims_payees_start_as_drafts_on_its_own_expense_line(self):
         claim = self._claim([{"payee_type": "Till (Buy Goods)", "payee_name": "_T Shell", "shortcode": "835811",
                               "amount": 2000}])

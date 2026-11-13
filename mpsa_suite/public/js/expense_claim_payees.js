@@ -112,6 +112,46 @@ const mpsa_payees = {
 		return (frm.doc.expenses || []).filter((r) => !r.__islocal);
 	},
 
+	can_write(frm) {
+		return Boolean(frm.perm && frm.perm[0] && frm.perm[0].write);
+	},
+
+	// the payees of an expense line after a paste: those on it already and the good pasted rows
+	line_total(frm, line, r) {
+		const on_line = (frm.doc.mpesa_payees || [])
+			.filter((p) => p.expense_detail === line.name)
+			.reduce((sum, p) => sum + flt(p.amount), 0);
+		return flt(on_line + flt(r.good_total), 0);
+	},
+
+	// what a paste does to its expense line: within it (the rest is reimbursed to the claimant) or more than it
+	// (the save refuses that); the dialog's box sets the line's Amount to the payees' total
+	line_note(frm, d, r) {
+		const line = this.saved_expenses(frm).find((x) => x.name === d.get_value("expense_detail"));
+		if (!line || !r.good) return "";
+		const kes = (v) => format_currency(flt(v), "KES", 0);
+		const total = this.line_total(frm, line, r);
+		const limit = flt(line.sanctioned_amount) || flt(line.amount);
+		if (Math.abs(total - limit) < 0.5) return "";
+		const more = total > limit;
+		d.set_df_property(
+			"set_line_amount",
+			"label",
+			__("Set expense line #{0} to {1}, the payees' total (it is {2})", [line.idx, kes(total), kes(limit)])
+		);
+		d.set_df_property("set_line_amount", "hidden", 0);
+		d.set_value("set_line_amount", more ? 1 : 0);
+		return more
+			? `<p style="color: var(--orange-600)">${__(
+					"The payees of expense line #{0} come to {1}, more than its {2}: the claim cannot be saved like that. Leave the box below ticked to set the line to {1}, or remove payees.",
+					[line.idx, kes(total), kes(limit)]
+			  )}</p>`
+			: `<p class="text-muted">${__(
+					"The payees of expense line #{0} come to {1} of its {2}: the other {3} is reimbursed to the claimant. Tick the box below to set the line to {1}.",
+					[line.idx, kes(total), kes(limit), kes(limit - total)]
+			  )}</p>`;
+	},
+
 	expense_label(frm, r) {
 		const amount = flt(r.sanctioned_amount) || flt(r.amount);
 		return `#${r.idx} ${r.expense_type || ""} ${format_currency(amount, frm.doc.currency || "KES", 0)}`;
@@ -195,6 +235,14 @@ const mpsa_payees = {
 		const t = s.totals || {};
 		const kes = (v) => format_currency(flt(v), "KES", 0);
 		const parts = [];
+		if (frm.doc.docstatus === 0 && s.enabled && this.can_write(frm)) {
+			// in plain sight where the payees are, not only under the M-Pesa menu
+			parts.push(
+				`<p><button class="btn btn-xs btn-primary mpsa-paste">${__("Paste Payees")}</button> <span class="text-muted">${__(
+					"Many casuals at once: copy name, phone and amount from Excel and paste them, or upload the file."
+				)}</span></p>`
+			);
+		}
 		if ((s.lines || []).length) {
 			parts.push(
 				`<p><b>${__("Payees")}</b>: ${__("paid {0}", [kes(t["Paid"])])} &middot; ${__("in flight {0}", [
@@ -246,6 +294,7 @@ const mpsa_payees = {
 			parts.push(`<p style="color: var(--orange-600)">${ask}</p>`);
 		}
 		field.$wrapper.html(parts.join(""));
+		field.$wrapper.find(".mpsa-paste").on("click", () => this.paste(frm));
 		field.$wrapper.find(".mpsa-suggest").on("click", (ev) => {
 			// a new Supplier M-Pesa Account with the destination filled in: the user picks the supplier
 			const x = s.suggestions[cint($(ev.currentTarget).attr("data-i"))];
@@ -281,7 +330,7 @@ const mpsa_payees = {
 		const flags = frappe.boot.mpsa || {};
 		const s = this.state(frm);
 		const lines = s.lines || [];
-		if (frm.doc.docstatus === 0 && s.enabled && frm.perm && frm.perm[0] && frm.perm[0].write) {
+		if (frm.doc.docstatus === 0 && s.enabled && this.can_write(frm)) {
 			frm.add_custom_button(__("Paste Payees"), () => this.paste(frm), __("M-Pesa"));
 		}
 		if (frm.doc.docstatus !== 1) return;
@@ -481,9 +530,29 @@ const mpsa_payees = {
 		);
 	},
 
-	paste(frm) {
+	// Paste Payees, many casuals at once: the claim is saved first (a new claim, or one with changes), as each
+	// payee is paid for a saved expense line. The dialog checks the rows on the server, shows what the pasted
+	// total does to the expense line, and adds the good rows; the claim's save checks them again.
+	paste(frm, after_save) {
+		if (!(frm.doc.expenses || []).some((r) => r.expense_type)) {
+			frappe.msgprint({
+				title: __("Paste Payees"),
+				message: __(
+					"Add the expense line first: its Expense Type (casual labour, say) and Amount. Then press Paste Payees again."
+				),
+			});
+			return;
+		}
+		if (frm.is_new() || frm.is_dirty() || !this.saved_expenses(frm).length) {
+			// a failed save resolves too (Frappe shows why): the dialog opens only on a saved claim
+			if (!after_save) frm.save().then(() => this.paste(frm, true));
+			return;
+		}
 		const e = frappe.utils.escape_html;
 		const saved = this.saved_expenses(frm);
+		const allowed = this.state(frm).allowed_types || [];
+		const payable = saved.filter((r) => allowed.includes(r.expense_type));
+		const preset = payable.length === 1 ? payable[0] : saved.length === 1 ? saved[0] : null;
 		let checked = null;
 		const d = new frappe.ui.Dialog({
 			title: __("Paste Payees"),
@@ -493,7 +562,7 @@ const mpsa_payees = {
 					fieldtype: "HTML",
 					fieldname: "intro",
 					options: `<p>${__(
-						"One payee per row: name, phone, amount, separated by tabs (copied from a spreadsheet) or commas. A first row naming the columns may come first. Each phone is paid by B2C, so it must be an M-Pesa (Safaricom) number, and never an employee's."
+						"Copy the payees from Excel (name, phone, amount) and paste them below, or upload the file. Title rows, the column names and a TOTAL row are left out, and a first column of row numbers is passed over. Each phone is paid by B2C, so it must be an M-Pesa (Safaricom) number, and never an employee's."
 					)}</p>`,
 				},
 				{
@@ -502,8 +571,7 @@ const mpsa_payees = {
 					label: __("Expense Line"),
 					reqd: 1,
 					options: saved.map((r) => ({ value: r.name, label: this.expense_label(frm, r) })),
-					default: saved.length === 1 ? saved[0].name : undefined,
-					description: saved.length ? "" : __("Save the claim with its expense lines first."),
+					default: preset ? preset.name : undefined,
 				},
 				{ fieldtype: "Small Text", fieldname: "text", label: __("Rows") },
 				{
@@ -513,6 +581,7 @@ const mpsa_payees = {
 					change: () => reset(),
 				},
 				{ fieldtype: "HTML", fieldname: "result" },
+				{ fieldtype: "Check", fieldname: "set_line_amount", hidden: 1 },
 			],
 			primary_action_label: __("Check"),
 			primary_action: (values) => {
@@ -548,18 +617,33 @@ const mpsa_payees = {
 					`<td>${e(x.phone)}</td><td>${x.amount === null ? "" : format_currency(x.amount, "KES", 0)}</td>` +
 					`<td>${e(x.errors.join("; "))}</td></tr>`
 			);
+			const left_out = (r.left_out || []).length
+				? `<p class="text-muted">${__("Not payee rows, left out: row {0} (a title, the column names, a blank or total row).", [
+						(r.left_out || []).join(", "),
+				  ])}</p>`
+				: "";
 			d.fields_dict.result.$wrapper.html(
-				`<p>${__("{0} rows can be added; {1} have problems and are left out.", [r.good, r.bad])}</p>` +
+				`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [
+					r.good,
+					format_currency(flt(r.good_total), "KES", 0),
+					r.bad,
+				])}</p>` +
+					left_out +
+					this.line_note(frm, d, r) +
 					`<table class="table table-bordered table-condensed"><thead><tr><th>${__("Row")}</th><th>${__("Name")}</th>` +
 					`<th>${__("Phone")}</th><th>${__("Amount")}</th><th>${__("Problem")}</th></tr></thead>` +
 					`<tbody>${rows.join("")}</tbody></table>`
 			);
 			if (!r.good) return;
 			checked = r;
-			d.get_primary_btn().html(__("Add {0} Payees", [r.good]));
+			d.get_primary_btn().html(__("Add {0} Payees and Save", [r.good]));
 		};
 		const add = (values) => {
 			const line = saved.find((x) => x.name === values.expense_detail) || {};
+			if (values.set_line_amount && line.name) {
+				// HRMS copies the Amount to the Sanctioned Amount and adds up the claim
+				frappe.model.set_value(line.doctype, line.name, "amount", this.line_total(frm, line, checked));
+			}
 			checked.rows
 				.filter((r) => !r.errors.length)
 				.forEach((r) =>
@@ -580,10 +664,15 @@ const mpsa_payees = {
 			frm.refresh_field("mpesa_payees");
 			frm.dirty();
 			d.hide();
-			frappe.show_alert({ message: __("{0} payees added: save the claim.", [checked.good]), indicator: "green" });
+			frappe.show_alert({ message: __("{0} payees added.", [checked.good]), indicator: "green" });
+			// the save checks them again (and names the numbers M-Pesa paid before); a refusal says why and
+			// leaves the rows on the form to put right
+			frm.save();
 		};
 		// a change to what is pasted needs a new check
 		const reset = () => {
+			d.set_df_property("set_line_amount", "hidden", 1);
+			d.set_value("set_line_amount", 0);
 			if (!checked) return;
 			checked = null;
 			d.get_primary_btn().html(__("Check"));

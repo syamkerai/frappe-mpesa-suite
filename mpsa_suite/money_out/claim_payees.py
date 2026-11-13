@@ -1727,7 +1727,7 @@ def make_payouts(docs, states, b2b_settings=None, b2c_settings=None, phones_only
     again when it is saved and sent. Nothing is sent here."""
     if not settings().allow:
         frappe.throw("Paying merchants and payees from an Expense Claim is switched off (M-Pesa Suite Settings).")
-    merchants, phones = [], []
+    merchants, phones, skipped = [], [], {}
     for doc in sorted(docs, key=lambda d: d.name):
         problem = payable_problem(doc)
         if problem:
@@ -1737,13 +1737,17 @@ def make_payouts(docs, states, b2b_settings=None, b2c_settings=None, phones_only
             picked = [line for line in lines
                       if line.status in states and (not phones_only or line.payee_type == PHONE)]
             _check_left(doc, picked)
+        if not picked:
+            skipped.setdefault(_why_nothing(lines, phones_only), []).append(doc.name)
         for line in picked:
             (phones if line.payee_type == PHONE else merchants).append((doc, line))
     if not (merchants or phones):
         frappe.throw("No payee line has failed." if states == (FAILED,) else
-                     "Nothing to pay: every payee line is paid, on its way, or has a payout waiting to be sent.")
+                     f"Nothing to pay: {nothing_to_pay(skipped, len(docs))}.")
     made = frappe._dict(b2b=[], b2c=None, lines=len(merchants) + len(phones),
-                        total=flt(sum(flt(line.amount) for _doc, line in merchants + phones), 2))
+                        total=flt(sum(flt(line.amount) for _doc, line in merchants + phones), 2),
+                        # the ticked claims left out of the batch, and why (the list says so)
+                        skipped=[_sentence(nothing_to_pay({why: names}, 2)) for why, names in skipped.items()])
     for doc, line in merchants:
         request = new_b2b(doc, line, pick_settings(b2b_settings, apis.B2B, doc.company))
         request.insert(ignore_permissions=True)
@@ -1763,6 +1767,49 @@ def make_payouts(docs, states, b2b_settings=None, b2c_settings=None, phones_only
         doc.add_comment("Comment", f"{frappe.session.user} prepared M-Pesa payouts for its payees: {names}. {who} sends "
                                    "them with Send via M-Pesa.")
     return made
+
+
+_NOTHING = {
+    # a claim whose payees were typed somewhere else (a site's own list, the expense lines) has none here
+    "no_lines": "{names} {has} no lines in the M-Pesa Payees table, so there is nobody to pay: M-Pesa pays only "
+                "that table's payees, never a list typed anywhere else on the claim. A submitted claim takes no new "
+                "payees: cancel it, amend it, add them with M-Pesa > Paste Payees (many at once, from Excel) and "
+                "approve it again",
+    "no_phones": "{names} {has} no phone payees: {its} merchants (till, paybill, bank account) are paid from the "
+                 "claim, with M-Pesa > Pay Merchants and Payees",
+    "done_phones": "every phone payee line{of} is paid, on its way, or has a payout waiting to be sent",
+    "done": "every payee line{of} is paid, on its way, or has a payout waiting to be sent",
+}
+
+
+def _why_nothing(lines, phones_only: bool) -> str:
+    """Why a claim gave no line to pay (a _NOTHING key)."""
+    if not lines:
+        return "no_lines"
+    if phones_only:
+        return "done_phones" if any(line.payee_type == PHONE for line in lines) else "no_phones"
+    return "done"
+
+
+def nothing_to_pay(skipped: dict, ticked: int) -> str:
+    """What the claims with nothing to pay ({_NOTHING key: [claim]}) are told, each group with its
+    claims named; one claim whose lines are all paid or on their way is not named (it is the
+    claim on screen)."""
+    parts = []
+    for why in _NOTHING:
+        names = skipped.get(why)
+        if not names:
+            continue
+        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        one = len(names) == 1
+        of = "" if ticked == 1 else f" of {listed}"
+        parts.append(_NOTHING[why].format(names=listed, has="has" if one else "have", its="its" if one else "their",
+                                          of=of))
+    return "; ".join(parts)
+
+
+def _sentence(text: str) -> str:
+    return f"{text[:1].upper()}{text[1:]}." if text else ""
 
 
 def _check_left(doc, picked) -> None:
@@ -2146,44 +2193,104 @@ def parse_amount(value) -> float | None:
         return None
 
 
+_HEADER_WITHIN = 15  # the row naming the columns is looked for among the first rows
+_TOTAL_ROWS = {"total", "totals", "grand total", "sub total", "subtotal", "total amount"}
+
+
 def _header(cells) -> dict | None:
-    """{field: column} when the first row names the columns (in any order)."""
+    """{field: column} when the row names the columns (in any order). Each field takes the column
+    its strongest word names, a column serving one field: 'Amount' is the amount before 'Pay To'
+    or 'Payment Status', 'Phone' the phone before 'M-Pesa No.'."""
+    texts = {i: cstr(cell).strip().lower() for i, cell in enumerate(cells)
+             if cstr(cell).strip() and parse_amount(cell) is None and not normalize_msisdn(cell)}
     found = {}
-    for i, cell in enumerate(cells):
-        text = cstr(cell).strip().lower()
-        if parse_amount(cell) is not None or normalize_msisdn(cell):
-            continue
+    for rank in range(max(len(words) for words in _HEADERS.values())):
         for field, words in _HEADERS.items():
-            if field not in found and any(w in text for w in words):
-                found[field] = i
-                break
+            if field in found or rank >= len(words):
+                continue
+            column = next((i for i, text in texts.items() if words[rank] in text and i not in found.values()), None)
+            if column is not None:
+                found[field] = column
     return found if len(found) == len(_HEADERS) else None
 
 
-def table_rows(table) -> list:
-    """Rows of name, phone, amount (a first row naming the columns may come first, in any order):
-    [{row, payee_name, phone, amount_text}]. Without names, the phone is the first cell after the
-    name that is a phone number, and the cells after it are the amount ('1,500' split by a comma
-    comes back whole)."""
-    table = [[cstr(c).strip() if c is not None else "" for c in row or []] for row in table or []]
+def _cell(value) -> str:
+    """A cell as text; a spreadsheet's whole number without its '.0' (a phone typed as a number)."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return cstr(value).strip() if value is not None else ""
+
+
+def _has_phone(cells) -> bool:
+    return any(normalize_msisdn(cell) for cell in cells)
+
+
+def _no_header_row(cells) -> tuple:
+    """(name, phone, amount text) of a row without column names. The phone is the first cell that
+    is a phone number (else the cell after the name, to show it wrong); the name the first text
+    before it (a serial number in front is passed over), or after it when the phone comes first;
+    the amount the cells after the phone run together ('1,500' split by a comma comes back
+    whole), else the first of them that is a number (a column after the amount)."""
+    at = next((i for i, cell in enumerate(cells) if normalize_msisdn(cell)), None)
+    if at is None:
+        return cells[0], (cells[1] if len(cells) > 1 else ""), "".join(cells[2:])
+    text = [i for i, cell in enumerate(cells) if cell and parse_amount(cell) is None and not normalize_msisdn(cell)]
+    before = [i for i in text if i < at]
+    if before:
+        name_at = before[0]
+    elif at == 0:
+        name_at = next((i for i in text if i > at), None)
+    else:
+        name_at = None  # an empty name cell in front: the row has no name
+    after = [cell for i, cell in enumerate(cells) if i > at and i != name_at]
+    amount = "".join(after)
+    if after and parse_amount(amount) is None:
+        amount = next((cell for cell in after if parse_amount(cell) is not None), amount)
+    return (cells[name_at] if name_at is not None else ""), cells[at], amount
+
+
+def _payee_row(name: str, phone: str, amount: str) -> bool:
+    """A row that can be a payee: a phone with a digit in it, or an amount (a total row is not).
+    Title rows, the column names, a blank row and the notes a table's Download writes above its
+    rows are none."""
+    if any(c.isdigit() for c in phone):
+        return True
+    return parse_amount(amount) is not None and cstr(name).strip().lower().rstrip(":") not in _TOTAL_ROWS
+
+
+def read_rows(table) -> tuple:
+    """([{row, payee_name, phone, amount_text}], [row numbers left out]) of a pasted or uploaded
+    table of name, phone, amount. A row naming the columns (in any order) may come first, or under
+    title rows (a sheet's title, the column names and notes of a payee table's Download), which are
+    left out with it; so are the rows that are no payee (a blank one, a TOTAL row)."""
+    table = [[_cell(c) for c in row or []] for row in table or []]
     table = [(n, row) for n, row in enumerate(table, start=1) if any(row)]
-    if not table:
-        return []
-    order = _header(table[0][1])
-    if order:
-        table = table[1:]
+    order, left_out = None, []
+    for k, (_n, cells) in enumerate(table[:_HEADER_WITHIN]):
+        if _has_phone(cells):
+            break  # a payee row: no title above it, so no header below it either
+        order = _header(cells)
+        if order:
+            left_out = [n for n, _cells in table[:k + 1]]
+            table = table[k + 1:]
+            break
     rows = []
     for n, cells in table:
         if order:
             name, phone, amount = (cells[order[f]] if order[f] < len(cells) else "" for f in ("payee_name", "phone",
                                                                                               "amount"))
         else:
-            name, rest = cells[0], cells[1:]
-            at = next((i for i, cell in enumerate(rest) if normalize_msisdn(cell)), 0)
-            phone = rest[at] if rest else ""
-            amount = "".join(rest[at + 1:])
+            name, phone, amount = _no_header_row(cells)
+        if not _payee_row(name, phone, amount):
+            left_out.append(n)
+            continue
         rows.append(frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount))
-    return rows
+    return rows, left_out
+
+
+def table_rows(table) -> list:
+    """The payee rows of a pasted or uploaded table (read_rows)."""
+    return read_rows(table)[0]
 
 
 def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
@@ -2246,7 +2353,7 @@ def parse_payees(text: str | None = None, file_url: str | None = None, claim: st
     else:
         frappe.has_permission(CLAIM, "create", throw=True)
     table = _read_file(file_url) if file_url else parse_text(text)
-    rows = table_rows(table)
+    rows, left_out = read_rows(table)
     if len(rows) > PASTE_LIMIT:
         frappe.throw(f"Paste at most {PASTE_LIMIT} payees at a time.")
     if isinstance(existing, str):
@@ -2265,7 +2372,9 @@ def parse_payees(text: str | None = None, file_url: str | None = None, claim: st
         if k:
             r.update(mpesa_name=k.name, mpesa_name_from=name_from(k), typed_name=name)
     bad = sum(1 for r in checked if r["errors"])
-    return {"rows": checked, "good": len(checked) - bad, "bad": bad}
+    good_total = sum(flt(r["amount"]) for r in checked if not r["errors"])
+    # left_out: the rows that are no payee (titles, the column names, blank and total rows), said in the dialog
+    return {"rows": checked, "good": len(checked) - bad, "bad": bad, "good_total": good_total, "left_out": left_out}
 
 
 def _read_file(file_url: str) -> list:
