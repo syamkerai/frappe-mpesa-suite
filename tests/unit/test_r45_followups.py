@@ -74,3 +74,12 @@ def test_the_bulk_handler_names_the_rows_employee(claims_env, monkeypatch):
     assert bulk.HANDLER.employee(request) == "EMP-7"
     monkeypatch.setattr(bulk, "_sheet_row", lambda reference_row, sheet=None: (None, False))
     assert bulk.HANDLER.employee(request) is None
+
+
+def test_a_long_mpesa_error_never_overflows_the_rows_progress(claims_env):
+    # bench (MariaDB): "Data too long for column 'progress'" after Mark as Not Paid's long note
+    bulk = importlib.import_module("mpsa_suite.money_out.bulk_payout")
+    current = claims_env.frappe._dict(is_test=False, state=bulk.FAILED, error="x" * 400, amount=1000)
+    text = bulk._progress(bulk.FAILED, current, None)
+    assert len(text) == bulk.PROGRESS_LENGTH and text.startswith("Payout failed: xxx") and text.endswith("…")
+    assert bulk._fit("short") == "short" and bulk._fit(None) is None and bulk._fit("") is None

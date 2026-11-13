@@ -720,8 +720,23 @@ def _clock(value) -> str:
     return when.strftime("%H:%M") if when else ""
 
 
+PROGRESS_LENGTH = 140  # the row's and the sheet's Progress (Data: VARCHAR(140) in MariaDB)
+
+
+def _fit(text: str | None, length: int = PROGRESS_LENGTH) -> str | None:
+    """``text`` cut to a Data field's length, ending in an ellipsis when cut (an M-Pesa error can be
+    longer than the field; its full text stays in the row's Error)."""
+    text = cstr(text).strip() if text else None
+    return text if not text or len(text) <= length else text[:length - 1].rstrip() + "…"
+
+
 def _progress(row_status, current, verification, test=None) -> str | None:
-    """What the row shows of where its payout is (``test``: its test payout, whose amount it names)."""
+    """What the row shows of where its payout is (``test``: its test payout, whose amount it names),
+    at most PROGRESS_LENGTH characters (_fit)."""
+    return _fit(_progress_text(row_status, current, verification, test))
+
+
+def _progress_text(row_status, current, verification, test=None) -> str | None:
     tried = f"KES {money(test.amount if test else TEST_AMOUNT)} test"
     if not current:
         if verification == VERIFIED and row_status == DRAFT:
@@ -877,7 +892,7 @@ def sheet_values(docstatus, rows) -> dict:
         if n and not (key == CANCELLED and cint(docstatus) == 2):
             parts.append(f"{n} {label}")
     progress = f"{status}: {', '.join(parts)}" if parts and status not in (S_DRAFT, S_CANCELLED) else status
-    return {"status": status, "progress": progress, "paid_amount": paid_amount, "failed_amount": failed_amount,
+    return {"status": status, "progress": _fit(progress), "paid_amount": paid_amount, "failed_amount": failed_amount,
             "left_amount": left}
 
 
