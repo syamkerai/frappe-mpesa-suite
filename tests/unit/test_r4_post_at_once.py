@@ -169,6 +169,10 @@ SITES = [  # every suite insert-and-submit of a Payment or Journal Entry
     ("mpsa_suite/wallet/statement_import.py", "transfer_entry"),
     ("mpsa_suite/utils/utils.py", "_book_payment_request_payment"),
     ("mpsa_suite/utils/utils.py", "_book_on_billed_order"),
+    # round 4.5: a petty cash phone's top-up journal and spend entry, a staff advance's settlement
+    ("mpsa_suite/money_out/petty_cash.py", "book"),
+    ("mpsa_suite/money_out/petty_cash.py", "record_spend"),
+    ("mpsa_suite/money_out/pay_via_staff.py", "settle_staff_advances"),
 ]
 
 

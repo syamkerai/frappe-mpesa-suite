@@ -432,6 +432,11 @@ def check_b2c_row(row) -> None:
     problem = phone_lock_problem(party, getattr(row, "partyb", None))
     if problem:
         frappe.throw(f"Row #{row.idx}: {problem}")
+    if dt == ADVANCE and dn:
+        from . import pay_via_staff
+
+        # a staff advance for a supplier (round 4.5): listed users only, the approved phone only
+        pay_via_staff.check_b2c_row(row, dn, row.payee_account)
 
 
 def supplier_b2c_phone(supplier):
@@ -618,6 +623,9 @@ def check_b2c_retry(doc) -> None:
         problem = employee_accounts.own_payment_problem(employee)
         if problem:
             frappe.throw(problem, frappe.PermissionError)
+    from . import pay_via_staff
+
+    pay_via_staff.check_retry(doc)  # a staff advance for a supplier: listed users, its approved phone (round 4.5)
 
 
 def check_not_own_b2c(doc) -> None:
@@ -635,6 +643,9 @@ def check_not_own_b2c(doc) -> None:
             problem = employee_accounts.own_payment_problem(employee)
             if problem:
                 frappe.throw(f"Row #{row.idx}: {problem}", frappe.PermissionError)
+    from . import pay_via_staff
+
+    pay_via_staff.check_send(doc)  # a staff advance for a supplier is sent by a listed user only (round 4.5)
 
 
 def payable_entries(doctype: str, entries: list) -> list:
@@ -767,8 +778,19 @@ def document_status(doctype: str, name: str) -> dict:
         "problem": payable_problem(values, doctype),
         "can_prepare": can_prepare(),
     }
+    staff = None
+    if doctype == ADVANCE:
+        from . import pay_via_staff
+
+        # a staff advance for a supplier (round 4.5): paid by the listed users only, to the approved phone only
+        staff = pay_via_staff.staff_advance(name)
+        refusal = pay_via_staff.form_problem(name) if staff else None
+        if refusal:
+            status.update(problem=status["problem"] or refusal, can_prepare=False)
     if status["can_prepare"]:
         status.update(_pay_options(doctype, values))
+        if staff:
+            status.update(b2b_accounts=[], b2b_default=None, b2b_settings=[])
     return status
 
 
@@ -963,6 +985,10 @@ def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_setti
         except (frappe.ValidationError, frappe.PermissionError) as e:
             skipped.append({"name": name, "reason": _refusal(e)})
             continue
+        staff = _staff_refusal(doctype, name)  # a staff advance for a supplier: never in another's batch
+        if staff:
+            skipped.append({"name": name, "reason": staff})
+            continue
         company = company or values.company
         if values.company != company:
             skipped.append({"name": name, "reason": f"It is {values.company}'s: tick one company's at a time."})
@@ -1006,6 +1032,20 @@ def prepare_bulk(doctype: str, names, b2c_settings: str | None = None, b2b_setti
                 frappe.db.rollback(save_point="mpsa_bulk_b2b")
                 skipped.append({"name": values.name, "reason": _refusal(e)})
     return {"b2c": made_b2c, "b2c_rows": len(phone_rows) if made_b2c else 0, "b2b": made_b2b, "skipped": skipped}
+
+
+def _staff_refusal(doctype: str, name: str) -> str | None:
+    """Why the list's Pay by M-Pesa leaves a staff advance (Pay via Staff, round 4.5) out: it is paid by
+    the listed users only, and to an approved phone only (never in a B2B request)."""
+    if doctype != ADVANCE:
+        return None
+    from . import pay_via_staff
+
+    if not pay_via_staff.staff_advance(name):
+        return None
+    if pay_via_staff.form_problem(name):
+        return pay_via_staff.form_problem(name)
+    return pay_via_staff.b2b_problem(doctype, name) if _route(read_document(doctype, name)) == "B2B" else None
 
 
 def _refusal(e) -> str:

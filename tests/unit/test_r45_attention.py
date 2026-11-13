@@ -147,6 +147,13 @@ def test_the_daily_job_and_the_sections_hook_are_in_hooks_py():
     scheduler = ast.literal_eval(hooks["scheduler_events"])
     assert scheduler["daily"] == ["mpsa_suite.money_out.attention.daily_attention"]
     sections = ast.literal_eval(hooks["mpsa_attention_sections"])  # each feature adds its own
-    assert all(isinstance(path, str) and path.startswith("mpsa_suite.money_out.") for path in sections)
+    # round 4.5: the bulk payout sheets, the petty cash phones and the staff advances
+    assert {"mpsa_suite.money_out.bulk_payout.attention_section",
+            "mpsa_suite.money_out.petty_cash.attention_section",
+            "mpsa_suite.money_out.pay_via_staff.attention_section"} <= set(sections)
+    for path in sections:  # each a function a module of the app defines
+        module, _, name = path.rpartition(".")
+        source = (APP.parent / Path(*module.split("."))).with_suffix(".py").read_text(encoding="utf-8")
+        assert f"def {name}(" in source, path
     module, _, function = scheduler["daily"][0].rpartition(".")
     assert (APP / "money_out" / "attention.py").exists() and module.endswith("attention") and function

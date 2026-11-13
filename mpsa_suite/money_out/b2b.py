@@ -535,6 +535,11 @@ def _check_employee_document(doc, dt: str, dn: str, for_update: bool = False) ->
     problem = employee_documents.payable_problem(values, dt, for_update=for_update)
     if problem:
         frappe.throw(problem)
+    from .pay_via_staff import b2b_problem
+
+    problem = b2b_problem(dt, dn)  # a staff advance for a supplier is paid by B2C only (round 4.5)
+    if problem:
+        frappe.throw(problem)
     if values.employee != doc.employee:
         frappe.throw(f"{dn} belongs to {values.employee}, not {doc.employee}.")
     if values.get("company") and doc.company != values.company:

@@ -221,6 +221,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | M-Pesa Bulk Payout | `rRep` | `rwcsxadRepmh` | `rRp` |  | `rRep` | `rwcsxadRepmh` | `rwcdRepmh` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |
 | M-Pesa Known Name |  | `rRe` | `r` |  |  | `r` | `r` | `r` | `r` | `r` |  | `r` |  |
 | M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |
+| M-Pesa Petty Cash Phone | `rRep` | `rwcsxadRepmh` | `rRep` |  | `rRep` | `rwcsxadRepmh` | `rRep` |  |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |  |
 | Mpesa B2B Payment Request | `rRep` | `rwcsxadRepmh` | `rwcsxadRepmh` |  | `rRep` | `rwcadRepmh` | `rwcdRep` | `rwcadRepmh` | `rwcadRepmh` | `rwcadRepmh` |  |  |  |
@@ -337,6 +338,9 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.employee_documents.prepare_b2c` | PREPARE_ROLES + read the claim / advance + create the disbursement | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_bulk` | PREPARE_ROLES + read each claim / advance + create the payouts | roles:PREPARE_ROLES, perm |
 | `money_out.known_names.for_destinations` | Read M-Pesa Known Name | perm |
+| `money_out.pay_via_staff.document_state` | Read the order / invoice (the buttons for the listed users) | perm |
+| `money_out.pay_via_staff.make_advance` | The users listed in Who May Pay via Staff, a named login + read the order / invoice | via:require_listed, perm |
+| `money_out.pay_via_staff.settle_now` | The users listed in Who May Pay via Staff or Accounts Manager, a named login + read the invoice | via:_require_settler, perm |
 | `money_out.payment_print.proof_recipients` | Read the payout | perm |
 | `money_out.payroll.from_payroll_entry` | PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule | roles:PREPARE_ROLES, via:require_salary_reader, perm |
 | `money_out.payroll.from_salary_slip` | PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip | via:require_salary_preparer, perm |
@@ -344,6 +348,13 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.payroll.payroll_salary_totals` | Who may see salaries + read the Payroll Entry | via:require_salary_reader, perm |
 | `money_out.payroll.payroll_status` | Read the Payroll Entry | perm |
 | `money_out.payroll.salary_slip_status` | Who may see salaries + read the Salary Slip | via:require_salary_reader, perm |
+| `money_out.petty_cash.approve` | M-Pesa Manager or Accounts Manager, a named login + submit the phone (not who entered it or holds it) | roles:M-Pesa Manager, roles:Accounts Manager, via:require_named_user, perm |
+| `money_out.petty_cash.confirm_name` | M-Pesa Manager or Accounts Manager, a named login + write the phone (not its holder) | roles:M-Pesa Manager, roles:Accounts Manager, via:require_named_user, perm |
+| `money_out.petty_cash.document_state` | Read the order / invoice | perm |
+| `money_out.petty_cash.phone_state` | Read the phone | perm |
+| `money_out.petty_cash.read_sms` | Read the order / invoice | perm |
+| `money_out.petty_cash.record_spend` | The phone's holder, or Accounts Manager / Accounts User + read the order / invoice | via:_check_recorder, perm |
+| `money_out.petty_cash.top_up` | PREPARE_ROLES + read the phone + create the disbursement (not its holder) | roles:PREPARE_ROLES, perm |
 | `money_out.schedule.close_schedule` | PREPARE_ROLES + write the schedule | roles:PREPARE_ROLES, perm |
 | `money_out.schedule.confirm_payment` | PAYOUT_ROLES, the user the summary was made for | roles:PAYOUT_ROLES |
 | `money_out.schedule.from_payroll_entry` | PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule | via:from_payroll_entry |

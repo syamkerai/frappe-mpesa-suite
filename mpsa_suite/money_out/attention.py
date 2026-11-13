@@ -12,10 +12,11 @@ Sections, in hooks.py (read with ``frappe.get_hooks``, every app's in turn):
 
 Each path names a function taking no argument and returning ``(title, [lines])``: a short title
 ("Bulk payout sheets") and one line per item ("MBP-26-11-0003: 64 paid, 3 failed, KES 12,400 left").
-No lines (or None): the section has nothing to say today. ``(title, [lines], link)``: also where the
-section's items are listed (a URL, e.g. the sheets' list): its title links there in the email, and
-the alert opens the first such link instead of M-Pesa Suite Settings. ``register(section)`` adds a function
-(or a path) in-process. A section that raises is logged and left out: it never stops the others.
+No lines (or None): the section has nothing to say today. ``(title, [lines], link)``: also the route of
+the section's own list (e.g. "/app/m-pesa-petty-cash-phone"): its title links there in the email (the
+site's full URL), and the alert opens the first such link instead of M-Pesa Suite Settings, which the
+Notify Role may not open. ``register(section)`` adds a function (or a path) in-process. A section that
+raises is logged and left out: it never stops the others.
 """
 
 import html
@@ -96,14 +97,26 @@ def subject(collected) -> str:
     return f"{SUBJECT}: " + "; ".join(f"{title} ({len(lines)})" for title, lines, *_link in collected)
 
 
+def _url(link: str) -> str:
+    """A section's link as the email gives it: the site's full URL of a route."""
+    get_url = getattr(getattr(frappe, "utils", None), "get_url", None)
+    if link.startswith("/") and callable(get_url):
+        try:
+            return get_url(link)
+        except Exception:
+            return link
+    return link
+
+
 def details(collected) -> str:
-    """The email: each section's title and its lines, as HTML (the lines are escaped)."""
+    """The email: each section's title (a link to its list, when it names one) and its lines, as HTML
+    (the lines are escaped)."""
     parts = []
     for title, lines, *link in collected:
         items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
         heading = html.escape(title)
         if link and link[0]:
-            heading = f'<a href="{html.escape(link[0], quote=True)}">{heading}</a>'
+            heading = f'<a href="{html.escape(_url(link[0]), quote=True)}">{heading}</a>'
         parts.append(f"<p><b>{heading}</b></p><ul>{items}</ul>")
     return "".join(parts)
 
