@@ -493,6 +493,11 @@ def check_b2c_request(doc) -> None:
     if dt in DOCTYPES:
         frappe.throw(f"An {dt} is paid by a B2C Payment Disbursement (Pay employee (phone) on the {dt}), not by a "
                      "B2C Disbursement Request made by hand.")
+    from . import partyless
+
+    if partyless.handler_for(dt):
+        frappe.throw(f"{dt} pays its rows with the B2C Payment Disbursement it makes, never by a B2C Disbursement "
+                     "Request made by hand.")
     if dt == owed.SLIP:
         frappe.throw("A Salary Slip is paid from an M-Pesa Payment Schedule line (Pay by M-Pesa on the slip or its "
                      "Payroll Entry) or a B2C Payment Disbursement row, not by a B2C Disbursement Request made by "
@@ -540,7 +545,11 @@ def row_mismatch(doc) -> str | None:
         differs.append("phone number")
     if abs(flt(getattr(doc, "amount", None)) - flt(row.allocated_amount)) >= 0.01:
         differs.append("amount")
-    if differs or not cstr(row.party).strip():
+    from . import partyless
+
+    # a row of a document that pays people no party names has none (money_out.partyless)
+    unnamed = not cstr(row.party).strip() and not partyless.handler_for(row.reference_doctype)
+    if differs or unnamed:
         return (f"This B2C request's {', '.join(differs) or 'party'} is not that of {disbursement} row {ref}: a B2C "
                 "request pays exactly what its disbursement row says.")
     return None

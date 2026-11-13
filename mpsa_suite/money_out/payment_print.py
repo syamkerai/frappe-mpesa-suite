@@ -500,7 +500,7 @@ def mpsa_payout_proof(doc) -> frappe._dict:
                 dt, dn = row.get("reference_doctype"), row.get("reference_name")
                 status = row.get("payment_status") or "Not Initiated"
                 blocks.append(frappe._dict(
-                    status=status, receipt="", sms="", name=row.get("party"),
+                    status=status, receipt="", sms="", name=row.get("party") or _receiver(row),
                     number=masked(row.get("partyb")), amount=flt(row.get("allocated_amount"), 2), charge=None,
                     charge_how="", paid_from="", when=None, document=" ".join(filter(None, [dt, dn])),
                     hidden=_salary_hidden(B2C_REQUEST, row), of=(dt, dn) if dt and dn else None,
@@ -584,6 +584,8 @@ def _b2c_block(r, row=None) -> frappe._dict:
     party = r.get("party") or ""
     if payee:
         party = cstr(frappe.db.get_value("M-Pesa Claim Payee", payee, "payee_name")) or party
+    elif not party and row is not None:
+        party = _receiver(row)  # a row that pays a person no party names: its document names them
     paid = r.get("status") == "Paid" and receipt
     document = " ".join(filter(None, [r.get("reference_doctype"), r.get("reference_name")]))
     return frappe._dict(
@@ -597,6 +599,14 @@ def _b2c_block(r, row=None) -> frappe._dict:
         hidden=_salary_hidden(B2C_REQUEST, r), payout=r.get("name"),
         of=(r.get("reference_doctype"), r.get("reference_name")) if r.get("reference_doctype") and r.get(
             "reference_name") else None)
+
+
+def _receiver(row) -> str:
+    """Who a party-less batch row pays, as its document names them (money_out.partyless); ''
+    for any other row."""
+    from . import partyless
+
+    return partyless.receiver_of(row) if cstr(row.get("reference_row")).strip() else ""
 
 
 def _entry_blocks(doc) -> list:
@@ -681,6 +691,10 @@ def is_salary_payout(doctype: str, doc) -> bool:
 
 
 def _row_party(doc, row) -> tuple:
+    """Who a batch row pays. A row that pays a person no party names (money_out.partyless) is
+    known by its phone: each such person gets the proof of their own payout only."""
+    if not cstr(row.get("party")).strip() and cstr(row.get("reference_row")).strip():
+        return ("Phone", normalize_msisdn(row.get("partyb")) or cstr(row.get("partyb")).strip())
     return (row.get("party_type") or doc.get("party_type"), row.get("party"))
 
 

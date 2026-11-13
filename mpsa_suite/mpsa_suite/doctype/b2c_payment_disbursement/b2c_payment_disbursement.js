@@ -214,7 +214,12 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 
 	validate: function (frm) {
 		frm.events.validate_company(frm);
-		if (!frm.doc.party_type) {
+		// rows that name the row of the document they pay pay people no party names (a bulk payout
+		// sheet, a petty cash top-up): no Party Type (money_out.partyless checks them on the server)
+		const partyless =
+			(frm.doc.references || []).length &&
+			frm.doc.references.every((row) => row.reference_row);
+		if (!frm.doc.party_type && !partyless) {
 			frappe.throw({ message: __("Please select Party Type."), title: __("Mandatory") });
 		}
 		if (!frm.doc.references.length) {
@@ -222,6 +227,9 @@ frappe.ui.form.on("B2C Payment Disbursement", {
 				message: __("At least one reference is required."),
 				title: __("Mandatory"),
 			});
+		}
+		if (partyless) {
+			return;
 		}
 
 		let invalid_references = frm.doc.references.filter(

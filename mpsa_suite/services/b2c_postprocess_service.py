@@ -5,6 +5,7 @@ from mpsa_suite.accounting.journal_service import create_journal_entry
 from mpsa_suite.accounting.payment_entry_service import (
     create_payment_entry_for_doc,
 )
+from mpsa_suite.money_out import partyless
 from mpsa_suite.utils.doctype_names import (
     B2C_REQUEST_DOCTYPE,
     MPESA_SETTINGS_DOCTYPE,
@@ -63,7 +64,7 @@ def _handle(disbursement_name: str, reference_name: str) -> bool:
             return False
         frappe.db.savepoint("mpesa_b2c_booking")
         try:
-            _book(disbursement_name, ref)
+            result = _book(disbursement_name, ref)
         except Exception as e:
             frappe.db.rollback(save_point="mpesa_b2c_booking")
             from mpsa_suite.accounting.posting import period_closed
@@ -73,15 +74,25 @@ def _handle(disbursement_name: str, reference_name: str) -> bool:
                 closed_period_hint(ref, receipt) if period_closed(e) else None,
             )
             return False
+        if partyless.is_deferred(result):
+            _mark_waiting(ref, result)
+            return False
     return _mark_booked(disbursement_name, ref)
 
 
-def _book(disbursement_name: str, ref) -> None:
+def _book(disbursement_name: str, ref):
+    """Post the payout's entry. None, or for a party-less row (money_out.partyless) what its
+    handler's ``book`` answered: a Deferred when its document books it later."""
     b2c_req = frappe.get_doc(B2C_REQUEST_DOCTYPE, ref.b2c_disbursement_request)
     b2c_disb = frappe.get_doc(ref.parenttype, disbursement_name)
 
     if not b2c_req.mpesa_settings:
         frappe.throw(f"No Mpesa Settings on B2C Request {b2c_req.name}")
+
+    handler = partyless.handler_for(ref.reference_doctype)
+    if handler:
+        # a row that pays a person no party names: its document books it, now or with others later
+        return partyless.book(handler, ref)
 
     settings = frappe.get_doc(MPESA_SETTINGS_DOCTYPE, b2c_req.mpesa_settings)
     submit = settings.submit_b2c_accounting_entries
@@ -136,15 +147,32 @@ def _mark_booked(disbursement_name: str, ref) -> bool:
     return submitted
 
 
+def _mark_waiting(ref, result) -> None:
+    """A party-less payout its document books later, with others (a bulk payout sheet's one
+    journal): unbooked, saying why (no error, no alert). retry_unbooked_payouts asks its
+    document again every 15 minutes."""
+    request = ref.b2c_disbursement_request
+    if not request or not _has_field("accounting_booked"):
+        return
+    frappe.db.set_value(
+        B2C_REQUEST_DOCTYPE, request,
+        {"accounting_booked": 0, "accounting_error": partyless.waiting_note(ref, result)[:500]},
+        update_modified=False,
+    )
+
+
 def _record_booking_error(b2c_request: str | None, traceback: str, hint: str | None = None) -> None:
     """A booking that failed: one Error Log, the reason on the request (``accounting_error``) and
     an alert to the Notify Role (M-Pesa Suite Settings), once per payout and reason (the sweep
-    retries every run). ``hint``: what staff do about it, after the reason."""
+    retries every run). ``hint``: what staff do about it, after the reason. A party-less payout's
+    note that it waits for its document's booking is no earlier error."""
     previous = (
         frappe.db.get_value(B2C_REQUEST_DOCTYPE, b2c_request, "accounting_error")
         if b2c_request and _has_field("accounting_error")
         else None
     )
+    if partyless.is_waiting_note(previous):
+        previous = None
     if not previous:  # log the traceback once
         frappe.log_error(title=f"B2C accounting failed for {b2c_request}"[:140], message=traceback)
     reason = traceback.strip().splitlines()[-1] if traceback.strip() else "Unknown error"
@@ -165,7 +193,10 @@ def closed_period_hint(ref, receipt: str) -> str:
     last two binding Administrator too): its entry made by hand in an open period, carrying the
     receipt, which booked_docstatus counts as this payout's (a Payment Entry allocated to the
     document, or a salary's Journal Entry naming the employee) and entry_carrying_receipt keeps
-    from being booked twice."""
+    from being booked twice. A party-less row's document says what to do (money_out.partyless)."""
+    handler = partyless.handler_for(ref.reference_doctype)
+    if handler:
+        return partyless.closed_period_hint(handler, ref, receipt)
     if ref.reference_doctype == "Salary Slip":
         how = (f"a Journal Entry with Reference Number {receipt} and {ref.party} as party on the payroll "
                "payable row")
@@ -309,10 +340,16 @@ def booked_docstatus(disbursement_name: str, ref, for_update: bool = False) -> i
     ``for_update``: every read is a locking read, which sees what is committed now (and waits
     for a cancel or submit still in flight) instead of this transaction's snapshot. The
     retry guard passes it: an entry cancelled after the snapshot must not count as booked.
+
+    A party-less row (money_out.partyless) is booked by its document, which says where: its
+    handler's ``booked``.
     """
     receipt = payout_receipt(ref)
     if not receipt:
         return None
+    handler = partyless.handler_for(ref.reference_doctype)
+    if handler:
+        return partyless.booked(handler, ref)
     if ref.reference_doctype == "Salary Slip":
         # a Journal Entry names the employee, not the slip
         entries = frappe._dict(

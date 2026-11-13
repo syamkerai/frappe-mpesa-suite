@@ -13,8 +13,8 @@ from ....permissions import CONFIG_ROLES, require
 # sent to the Notify Role, naming who changed what (turning off maker-checker, allowing one-off
 # B2B, shortening the hold on new payee accounts, another Integration User, Administrator sends,
 # employees paid to phones not approved, paying merchants and casual payees and their caps, the
-# Expense Claim workflow states that may be paid, and the Notify Role itself: that alert goes to the
-# old role and the new one).
+# Expense Claim workflow states that may be paid, who may pay via staff, and the Notify Role itself:
+# that alert goes to the old role and the new one).
 WATCHED = (
     "schedule_maker_checker",
     "refuse_administrator_payouts",
@@ -29,6 +29,7 @@ WATCHED = (
     "claim_payee_daily_cap",
     "claim_payee_employee_names",  # payees M-Pesa paid under an employee's name blocked (R4.1)
     "claim_payable_workflow_states",  # the payable gate of claims and advances (blank = any approved one)
+    "pay_via_staff_users",  # who may pay a supplier's till through a staff member (round 4.5)
 )
 
 
@@ -121,4 +122,7 @@ def _shown(df, value) -> str:
         return f"{flt(value, 2):,.2f}".removesuffix(".00")
     if df.fieldtype in ("Small Text", "Text", "Long Text"):  # one value per line: "Approved, Paid Out"
         return ", ".join(line.strip() for line in cstr(value).splitlines() if line.strip()) or _("not set")
+    if df.fieldtype == "Table MultiSelect":  # its rows' users, sorted: "a@x, b@x"
+        users = sorted({cstr(row.get("user")).strip() for row in value or [] if cstr(row.get("user")).strip()})
+        return ", ".join(users) or _("nobody")
     return cstr(value).strip() or _("not set")

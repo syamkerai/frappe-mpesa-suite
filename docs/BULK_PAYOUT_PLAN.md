@@ -168,6 +168,57 @@ The second review's open findings in `read_rows` are shared with this sheet:
 
 Fix, test and commit them on `r4-4-bulk-casual` first. The sheet builds on that branch, in a new branch `r4-5-bulk-payout`.
 
+## Know who you pay: the M-Pesa name at every step (your 13 Nov request)
+The Daraja API has no Hakikisha: nothing confirms the receiver's name before the money leaves. So every name M-Pesa has ever given us is saved, and shown wherever someone types, approves or sends a payout.
+
+### The known-names list: new DocType "M-Pesa Known Name"
+- One record per destination:
+  - `B2C:2547…` for a phone;
+  - `TILL:835811` for a till;
+  - `PAYBILL:400200` for a paybill.
+- Fields:
+  - the name M-Pesa gave (e.g. "254705783406 - Amber Demas Namusiah", without the number);
+  - first and last seen;
+  - times paid;
+  - the last payout (a link);
+  - the source: B2C Result, B2B Result, or a petty-cash SMS.
+- **Filled automatically:**
+  - from every Paid B2C Result (`ReceiverPartyPublicName`) and B2B Result (the receiver name), through the existing result hooks;
+  - from the SMS pasted for a petty-cash spend: a send-money SMS names the person and number; a till SMS names the till against the supplier.
+- **Backfilled once** from history, in a migrate patch. At Astral that is 2,691 paid payouts naming 436 numbers, plus 6 tills.
+- **Salary payouts** feed the list but are only shown to roles that may see salaries (`salary_access`). Everything else is shown to the people who prepare, approve and send.
+- `claim_payees.mpesa_names` and the claim's name lookup read this list instead of searching the payouts each time. Same answers, faster, and tills and paybills included.
+- **It works the same for B2C and B2B, phones, tills and paybills** (your 13 Nov request):
+  - **Phones:** from B2C Results, from claim-payee, bulk-sheet, salary, advance and top-up payouts alike, and from send-money SMS.
+  - **Tills and paybills:** from B2B Results (e.g. "835811 - SHELL KILIMANI"). That covers B2B requests from PIs and POs, schedule lines, claim merchant lines and Supplier M-Pesa Accounts.
+  - **Bank paybills:** M-Pesa returns the bank's name (e.g. "KCB Paybill AC"), never the account holder's. The list keeps the bank's name per paybill and says plainly that the account holder can't be confirmed by M-Pesa.
+
+  The flags below show on every place a B2B or B2C payout is typed, approved or sent:
+  - Supplier M-Pesa Account and Employee M-Pesa Account (at entry and approval);
+  - the B2B request form;
+  - M-Pesa Payment Schedule lines and Pay Due Lines;
+  - claim payee lines (merchants and phones);
+  - the bulk sheet;
+  - petty-cash top-ups;
+  - Pay via Staff;
+  - the Send via M-Pesa confirm screen, for both B2B and B2C.
+
+### Shown at every step
+1. **Entry (paste or typing)** on the bulk sheet, claim payees, petty-cash top-ups and Pay via Staff, next to every number:
+   - **Name on M-Pesa** with "paid N times, last 28 Oct" (green when it matches the typed name);
+   - **orange**: M-Pesa knows this number as someone else. The typed name is kept as Name Given, and M-Pesa's name is shown and locked (round 4.3);
+   - **blue**: **new number**, never paid before, so nobody can vouch for the name.
+2. **Approval (submit):** a summary at the top, e.g. "60 known and matching · 4 known under another name · 5 new numbers". Each list opens. The approver must tick "I checked the 4 different names and 5 new numbers" before Submit works.
+3. **Send via M-Pesa (the confirm screen):** every row shows the phone, the M-Pesa name we know, the typed name, and its flag. The header repeats the counts. The sender confirms again.
+4. **After payment:** the name M-Pesa returns is compared with the typed and known names (the existing name check). A mismatch is flagged in red on the row, with a comment and an alert.
+
+### New numbers: an optional test payment
+- A sheet option, **"Pay new numbers KES 10 first"** (setting `verify_new_numbers`, off by default; can be ticked per sheet).
+  - A number never paid before first gets KES 10. Its full amount is held until the Result brings back M-Pesa's name.
+  - If the name matches the typed name, the rest is released automatically. If not, the row stops for a manager to check.
+  - Cost: KES 10 plus one M-Pesa charge per new number.
+- Without the option, new numbers rely on the approver's and sender's confirmation above.
+
 ## Built in the same round: paying supplier tills
 The companion plan is [PAY_VIA_STAFF_PLAN.md](PAY_VIA_STAFF_PLAN.md), revised 13 Nov to your decisions:
 - **The Petty Cash Phone is the main method.**
@@ -199,13 +250,14 @@ What they share (built once, first):
 Order of work for the round:
 1. The paste-reader fixes (round 4.4).
 2. The party-less B2C branch, `self_pay.py` and the daily alert job.
-3. The bulk payout sheet.
-4. The Petty Cash Phone: setup, top-up, spends from SMS.
-5. Pay via Staff, strict.
-6. Unit and bench tests for all three on v15 and v16.
-7. One review of the whole round.
-8. Ask to push.
-9. Trident pilot: a small sheet, the petty cash phone with one top-up and one petrol purchase from its SMS. Then Astral.
+3. The known-names list (DocType, result hooks, backfill patch, lookups, the flags shown at entry, approval and send), shared by everything below.
+4. The bulk payout sheet, with the optional KES 10 test for new numbers.
+5. The Petty Cash Phone: setup, top-up, spends from SMS.
+6. Pay via Staff, strict.
+7. Unit and bench tests for all of it on v15 and v16.
+8. One review of the whole round.
+9. Ask to push.
+10. Trident pilot: a small sheet, the petty cash phone with one top-up and one petrol purchase from its SMS. Then Astral.
 
 ## Critical files
 - New:

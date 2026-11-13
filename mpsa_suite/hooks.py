@@ -296,7 +296,19 @@ scheduler_events = {
     "hourly": [
         "mpsa_suite.services.b2c_pull_transaction_scheduler_service.run_hourly_pull_transactions"
     ],
+    # one "needs attention" alert to the Notify Role, from every section below (money_out.attention)
+    "daily": ["mpsa_suite.money_out.attention.daily_attention"],
 }
+
+# M-Pesa Suite's own hooks
+# ------------------------
+# DocTypes whose B2C payouts pay people no ERPNext party names (a bulk payout sheet's rows, a
+# petty cash phone's top-ups): {DocType: dotted path of its handler}. The handler checks, books
+# and reconciles its own rows (money_out.partyless); each feature adds its line.
+mpsa_partyless_payouts = {}
+# The daily "needs attention" alert's sections: dotted paths of functions returning (title, [lines])
+# (money_out.attention); each feature adds its own.
+mpsa_attention_sections = []
 
 # Testing
 # -------

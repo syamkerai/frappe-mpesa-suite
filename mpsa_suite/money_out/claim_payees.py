@@ -993,7 +993,8 @@ def mpesa_names(numbers) -> dict:
     """{2547...: _dict(name, payout, paid_on)}: the name M-Pesa last paid each phone under (a Paid B2C
     payout's ReceiverPartyPublicName without its number; one naming another number is skipped, and a
     salary's payout is never read), the payout and when (round 4.3). A phone M-Pesa never paid is
-    not in it: its line keeps the typed name."""
+    not in it: its line keeps the typed name. A party-less payout (money_out.partyless: a bulk
+    payout sheet's row, a petty cash top-up) names no party type, so it is read like any other."""
     wanted = {m for m in (normalize_msisdn(n) for n in numbers or []) if m}
     if not wanted:
         return {}

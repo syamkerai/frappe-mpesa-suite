@@ -25,9 +25,11 @@ PAID = {
          "receiver_shortcode", "account_reference", "command_id"),
         None,
     ),
+    # reference_row: the row of the document a party-less row pays (money_out.partyless)
     "B2C Payment Disbursement": (
         ("mode_of_payment",),
-        ("references", ("party", "partyb", "allocated_amount", "reference_doctype", "reference_name", "payee_account")),
+        ("references", ("party", "partyb", "allocated_amount", "reference_doctype", "reference_name", "payee_account",
+                        "reference_row")),
     ),
     "B2C Disbursement Request": (
         ("amount", "phone_number", "mpesa_settings", "reference_doctype", "reference_name", "party_type", "party"),

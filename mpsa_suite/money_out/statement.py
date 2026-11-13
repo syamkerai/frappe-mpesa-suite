@@ -702,7 +702,9 @@ def entries_for(key: str, gl: str) -> list:
 
     A payout's Payment Entry carries its receipt as Reference No (B2C, B2B; also an Internal
     Transfer staff made between two shortcodes), a salary payout's and a charge's Journal
-    Entry as Cheque No.
+    Entry as Cheque No. A party-less B2C payout (money_out.partyless) may be booked in one entry
+    with others (a bulk payout sheet's journal): that entry, for this payout's own amount, which
+    ERPNext allocates to this line and leaves the rest for the other payouts' lines.
     """
     found = [
         ("Payment Entry", r.name, flt(r.paid_amount))
@@ -728,12 +730,17 @@ def entries_for(key: str, gl: str) -> list:
             (key, gl),
         )
     ]
+    from . import partyless
+
+    listed = {(doctype, name) for doctype, name, _amount in found}
+    found += [e for e in partyless.statement_entries(key, gl) if (e[0], e[1]) not in listed]
     return found
 
 
 def reconcile_withdrawal(name: str, gl: str) -> str | None:
     """Match one withdrawal line with the one entry carrying its receipt (or "CHG-" key) for
-    exactly its amount. No entry, another amount or two candidates: left for staff."""
+    exactly its amount, or with its part of the entry that books a party-less payout with others
+    (entries_for). No entry, another amount or two candidates: left for staff."""
     from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import reconcile_vouchers
 
     # row lock: the result's job and the sweep may reach the same line together

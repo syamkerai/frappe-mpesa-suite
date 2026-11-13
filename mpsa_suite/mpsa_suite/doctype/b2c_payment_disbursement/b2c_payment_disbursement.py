@@ -10,7 +10,7 @@ from frappe.query_builder import DocType
 from frappe.utils import cint, flt, now
 
 from ....daraja.guard import B2C_MIN_AMOUNT
-from ....money_out import maker_checker, send_confirm
+from ....money_out import maker_checker, partyless, send_confirm
 from ....permissions import PAYOUT_ROLES, is_direct_call, require, require_named_user
 from ....services.b2c_batch_status import batch_status
 from ....utils.doctype_names import (
@@ -61,6 +61,7 @@ class B2CPaymentDisbursement(Document):
         from ....money_out.employee_documents import check_not_own_b2c
 
         check_not_own_b2c(self)  # nobody pays themselves
+        partyless.check_not_own(self)  # nor by a row no party names: its phone or name is not the sender's
         if self.payment_type == "Mpesa Disbursement":
             settings = self._get_mpesa_settings()
 
@@ -218,6 +219,13 @@ class B2CPaymentDisbursement(Document):
             if not doctype or not name:
                 continue
             with named_lock(f"b2c-pay:{doctype}:{name}", busy=busy_message(doctype, name)):
+                if partyless.handler_for(doctype):
+                    # each row pays its own row of the document, never what the document owes: only
+                    # another payout of the same row refuses it (money_out.partyless)
+                    partyless.check_rows_not_paid(
+                        self, [r for r in rows if (r.reference_doctype, r.reference_name) == (doctype, name)]
+                    )
+                    continue
                 others = list(open_payouts(doctype, name, exclude_parent=self.name, exclude_requests=own_requests))
                 # Paid payouts nothing books (entry cancelled, Cancel All, or older than the
                 # retry window) are not in what the document owes; the retry guard counts them
@@ -298,6 +306,10 @@ class B2CPaymentDisbursement(Document):
             "paid_from",
             "paid_to",
         ]
+        if partyless.handler_for(self.transaction_to_pay_against):
+            # its rows pay people no party names, each booked by its document (money_out.partyless):
+            # no Party Type, and no one account they are paid to
+            mandatory_fields = ["company", "posting_date", "paid_from"]
         for field in mandatory_fields:
             if not self.get(field):
                 frappe.throw(f"Field {self.meta.get_label(field)} is mandatory.")
@@ -310,6 +322,11 @@ class B2CPaymentDisbursement(Document):
             frappe.throw("Mode of Payment is required")
 
     def validate_party_type(self) -> None:
+        if partyless.handler_for(self.transaction_to_pay_against):
+            if self.party_type:
+                frappe.throw(f"A payout of {self.transaction_to_pay_against} names no Party Type: its rows pay "
+                             "people no party names.")
+            return
         if self.party_type not in ["Employee", "Supplier"]:
             frappe.throw("Party Type must be Employee or Supplier")
 

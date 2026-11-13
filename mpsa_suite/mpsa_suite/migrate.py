@@ -426,13 +426,16 @@ def create_custom_erpnext_fields():
                 "fieldtype": "Column Break",
                 "insert_after": "paid_from_account_currency",
             },
+            # Needed by the disbursement's own validate (validate_mandatory_fields), not here: a payout
+            # whose rows pay people no party names leaves it empty, each row booked on its document's
+            # accounts (money_out.partyless).
             {
                 "fieldname": "paid_to",
                 "label": "Account Paid To",
                 "fieldtype": "Link",
                 "options": "Account",
                 "insert_after": "column_break_nsjt",
-                "reqd": 1,
+                "reqd": 0,
             },
             {
                 "fieldname": "paid_to_account_type",

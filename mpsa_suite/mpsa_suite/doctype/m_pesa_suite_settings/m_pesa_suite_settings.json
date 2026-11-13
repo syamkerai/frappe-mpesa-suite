@@ -97,6 +97,12 @@
   "claim_payee_daily_cap",
   "suggest_supplier_after",
   "claim_payee_employee_names",
+  "bulk_payouts_section",
+  "bulk_payout_book_after_hours",
+  "staff_advance_settle_days",
+  "column_break_bulk_payouts",
+  "pay_via_staff_users",
+  "petty_cash_alert_days",
   "accounts_tab",
   "accounts_intro",
   "statement_import_section",
@@ -563,6 +569,43 @@
    "description": "Payouts completed before this date get no lines or charge entries from the sweep (set to the upgrade date, so going live books nothing into past periods). Clear it, or move it back, to fill older payouts within Look Back (Days)."
   },
   {
+   "fieldname": "bulk_payouts_section",
+   "fieldtype": "Section Break",
+   "label": "Bulk Payouts and Tills"
+  },
+  {
+   "fieldname": "bulk_payout_book_after_hours",
+   "fieldtype": "Int",
+   "label": "Book a Bulk Payout's Paid Rows While One Waits After (Hours)",
+   "default": "2",
+   "description": "A bulk payout sheet books its paid rows in one Journal Entry once no row waits for M-Pesa's answer. A row still waiting this many hours after the send no longer holds the others back: the paid rows are booked, and the late row gets a small Journal Entry of its own when it is paid."
+  },
+  {
+   "fieldname": "staff_advance_settle_days",
+   "fieldtype": "Int",
+   "label": "Remind When a Staff Advance for a Supplier Is Not Settled After (Days)",
+   "default": "3",
+   "description": "An Employee Advance paid to a staff member to pay a supplier's till (Pay via Staff) that is not settled against the supplier's invoice this many days after it was paid is listed in the daily M-Pesa alert to the Notify Role."
+  },
+  {
+   "fieldname": "column_break_bulk_payouts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "pay_via_staff_users",
+   "fieldtype": "Table MultiSelect",
+   "label": "Who May Pay via Staff",
+   "options": "M-Pesa Pay via Staff User",
+   "description": "The only users who may pay a supplier's till through a staff member's own approved phone (an Employee Advance from a Purchase Order or Invoice) and send that advance. Empty: nobody."
+  },
+  {
+   "fieldname": "petty_cash_alert_days",
+   "fieldtype": "Int",
+   "label": "Remind When a Petty Cash Phone Has Money but No Spend For (Days)",
+   "default": "7",
+   "description": "A petty cash phone holding money with no spend recorded for this many days is listed in the daily M-Pesa alert to the Notify Role, with its book balance against the balance on its last SMS."
+  },
+  {
    "fieldname": "accounts_tab",
    "fieldtype": "Tab Break",
    "label": "M-Pesa Accounts"
@@ -721,7 +764,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-11 12:00:00.000000",
+ "modified": "2026-11-13 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Mpsa Suite",
  "name": "M-Pesa Suite Settings",

@@ -15,7 +15,12 @@ from ....utils.privacy import shown
 class B2CPaymentDisbursementReference(Document):
     def validate(self) -> None:
         """Validation Hook"""
-        if not self.party:
+        from ....money_out import partyless
+
+        # a row of a DocType registered as party-less (a bulk payout sheet's row, a top-up) pays a
+        # person no party names: its DocType checks it (money_out.partyless)
+        handler = partyless.handler_for(getattr(self, "reference_doctype", None))
+        if not self.party and not handler:
             frappe.throw(
                 f"Row #{self.idx}: Party is mandatory",
                 frappe.ValidationError,
@@ -51,14 +56,26 @@ class B2CPaymentDisbursementReference(Document):
             mobile_no = sanitise_phone_number(str(self.partyb).strip())
 
             if not is_valid_receiver_contact(mobile_no):
+                who = self.party or getattr(self, "reference_row", None)  # a party-less row: its paying row
                 frappe.throw(
-                    f"Row #{self.idx} ({self.party}): the Receiver's Mobile Number {shown(self.partyb)} is not "
+                    f"Row #{self.idx} ({who}): the Receiver's Mobile Number {shown(self.partyb)} is not "
                     f"a number M-Pesa B2C can pay. Enter {FORMATS}.",
                     frappe.ValidationError,
                     title="Incorrect Contact",
                 )
 
             self.partyb = mobile_no
+
+        if handler:
+            partyless.check_row(self, getattr(self, "parent_doc", None))
+            return
+        if getattr(self, "reference_row", None):
+            frappe.throw(
+                f"Row #{self.idx}: only a payout of a document that pays people no party names (a bulk payout "
+                f"sheet, a petty cash phone) names a Paying Row; {self.reference_doctype} is paid to its party.",
+                frappe.ValidationError,
+                title="Validation Error",
+            )
 
         if getattr(self, "mpesa_schedule_line", None):
             # a payment schedule's phone line: the number is its employee's approved phone, the

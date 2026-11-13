@@ -354,6 +354,8 @@ def _b2c_send_rows(doc) -> list:
 
 
 def _b2c_rows(doc) -> list:
+    from . import partyless
+
     rows = _b2c_send_rows(doc)
     payees = _payee_lines(row.get("claim_payee") for row in rows)
     out = []
@@ -365,6 +367,12 @@ def _b2c_rows(doc) -> list:
         line = payees.get(cstr(row.get("claim_payee")).strip())
         if line:  # a casual payee of a claim: the row's party is the claimant, who is not who is paid
             out.append(_payee_row(line, phone, amount, _b2c_charge(amount)))
+            continue
+        if partyless.handler_for(row.get("reference_doctype")):
+            # a row that pays a person no party names: who is paid is what its document says
+            found = partyless.describe(row)
+            out.append(_row(cstr(found.get("receiver")).strip() or _("Not named"), phone, amount, _b2c_charge(amount),
+                            found.get("document") or document, found.get("party"), found.get("expected_name")))
             continue
         out.append(_row(_party_name(party_type, row.get("party")), phone, amount, _b2c_charge(amount), document,
                         row.get("party")))
@@ -426,7 +434,14 @@ def _problems(doc) -> list:
     if cstr(doc.get("schedule_line")).strip() or cstr(doc.get("payment_schedule")).strip():
         return [_("A scheduled payment is paid with Pay Selected in M-Pesa Payments Due, not by hand.")]
     problem = maker_checker.preview(doc, user)
-    return ([problem] if problem else []) + _payer_problems(doc, user) + _payee_problems(doc)
+    problems = ([problem] if problem else []) + _payer_problems(doc, user)
+    if doc.doctype == B2C:
+        from . import partyless
+
+        # rows that pay people no party names: never the sender's phone or name (money_out.self_pay)
+        own = partyless.self_pay_problem(doc, user, "send")
+        problems += [own] if own else []
+    return problems + _payee_problems(doc)
 
 
 def _paid_employees(doc) -> set:

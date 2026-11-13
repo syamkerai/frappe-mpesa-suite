@@ -212,6 +212,14 @@ class B2CDisbursementRequest(Document):
         dt, dn = self.reference_doctype, self.reference_name
         if not dt or not dn:
             return
+        from ....money_out import partyless
+
+        if partyless.handler_for(dt):
+            # a row that pays a row of its document, never what the document owes: the document's other
+            # rows on their way are not this payout's (money_out.partyless)
+            with self._document_lock():
+                partyless.check_retry(self)
+            return
         mine = self.b2c_payment_disbursement
         with self._document_lock():
             # this request is Failed, so open_payouts leaves it out without being told to

@@ -13,6 +13,7 @@
   "section_break_erqv",
   "reference_doctype",
   "reference_name",
+  "reference_row",
   "party_type",
   "party",
   "due_date",
@@ -212,6 +213,15 @@
    "description": "The employee's approved M-Pesa account (its name) whose phone this row pays: set from Mobile / AC No. each time it saves. The name M-Pesa paid is checked against it. Not a link: an account cancelled since never stops a save, amend or duplicate."
   },
   {
+   "fieldname": "reference_row",
+   "fieldtype": "Data",
+   "label": "Paying Row",
+   "read_only": 1,
+   "search_index": 1,
+   "depends_on": "eval:doc.reference_row",
+   "description": "The row of the document this pays, for a payout that names no party (a bulk payout sheet's row, a petty cash phone's top-up): that document checks and books it (money_out.partyless)."
+  },
+  {
    "fieldname": "claim_payee",
    "fieldtype": "Data",
    "label": "Expense Claim Payee",
@@ -224,7 +234,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-10-27 23:45:00.000000",
+ "modified": "2026-11-13 12:00:00.000000",
  "modified_by": "a@d.com",
  "module": "Mpsa Suite",
  "name": "B2C Payment Disbursement Reference",
