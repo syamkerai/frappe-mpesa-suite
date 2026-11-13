@@ -390,6 +390,11 @@ class B2CPaymentDisbursement(Document):
         """Retry failed B2C Payment References"""
         require_named_user()  # as below: each retry would refuse it, but only in the log
         require(PAYOUT_ROLES)  # each retry checks again, but its refusal would only be logged
+        # a failed row no party names whose document retries it with a payout of its own (a bulk payout
+        # sheet's Retry Failed): said here, before anything is retried, not only in the log
+        for ref in self.references:
+            if ref.payment_status == "Failed" and (problem := partyless.retry_problem(ref)):
+                frappe.throw(problem, title="Retry it on its document")
         for ref in self.references:
             if ref.payment_status == "Failed" and ref.b2c_disbursement_request:
                 try:

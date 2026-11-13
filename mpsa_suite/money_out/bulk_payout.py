@@ -45,6 +45,7 @@ a payout paid later gets a small Journal Entry of its own. Each payout's stateme
 own amount of the journal (partial allocation: ``statement_entry``).
 """
 
+import importlib
 import json
 from collections import Counter
 
@@ -166,12 +167,53 @@ def _norm(field: str, value) -> str:
     return cstr(value)
 
 
+def live_journal(journal) -> tuple:
+    """(name, docstatus) of the Journal Entry that books in ``journal``'s place: ``journal`` itself
+    while it is not cancelled; once cancelled, the copy that amended it (ERPNext's Cancel and
+    Amend: ``amended_from``, followed down the chain, a submitted copy before a draft); (None,
+    None) when it is gone, or was cancelled with no live amended copy."""
+    name, seen = cstr(journal).strip(), set()
+    while name and name not in seen:
+        seen.add(name)
+        status = frappe.db.get_value(JE, name, "docstatus")
+        if status is None:
+            return None, None
+        if cint(status) != 2:
+            return name, cint(status)
+        copies = frappe.get_all(JE, filters={"amended_from": name}, fields=["name", "docstatus"],
+                                order_by="creation asc")
+        live = [c for c in copies if cint(c.docstatus) < 2]
+        if live:
+            best = max(live, key=lambda c: cint(c.docstatus))
+            return best.name, cint(best.docstatus)
+        name = copies[-1].name if copies else None
+    return None, None
+
+
 def _journal_status(journal) -> int | None:
-    """A Journal Entry's docstatus, or None when it does not exist or is cancelled."""
-    if not cstr(journal).strip():
-        return None
-    status = frappe.db.get_value(JE, journal, "docstatus")
-    return None if status is None or cint(status) == 2 else cint(status)
+    """The docstatus of the live journal that books in ``journal``'s place (``live_journal``), or
+    None when there is none."""
+    return live_journal(journal)[1]
+
+
+def receipt_entries(receipts) -> dict:
+    """{receipt (upper case): docstatus} of the live entries that carry a payout's receipt: a
+    Journal Entry with it as Cheque No (a voucher made from its bank line, Bank Reconciliation's
+    Create Voucher), a Payment Entry with it as Reference No. A sheet's own journals carry the
+    sheet's name, never a receipt. Such a payout is in the books already: the sheet's journal never
+    books it again (b2c_postprocess_service.entry_carrying_receipt keeps it from any other booking)."""
+    given = {cstr(r).strip() for r in receipts or () if cstr(r).strip()}
+    keys = sorted(given | {r.upper() for r in given})
+    if not keys:
+        return {}
+    found = {}
+    for doctype, field in ((JE, "cheque_no"), ("Payment Entry", "reference_no")):
+        for value, status in frappe.db.sql(
+                f"SELECT {field}, MAX(docstatus) FROM `tab{doctype}` WHERE {field} IN %(keys)s AND docstatus < 2 "
+                f"GROUP BY {field}", {"keys": tuple(keys)}):
+            key = cstr(value).strip().upper()
+            found[key] = max(found.get(key, 0), cint(status))
+    return found
 
 
 # ---------------------------------------------------------------- the sheet (DocType events)
@@ -198,6 +240,7 @@ def validate_sheet(doc) -> None:
     if currency and currency != "KES":
         frappe.throw(f"{doc.company} keeps its books in {currency}. M-Pesa pays KES only.")
     ctx = _context(doc, rows)
+    check_credit_dimensions(ctx)
     warnings, seen = [], {}
     for row in rows:
         clean_row(row, doc, ctx, warnings)
@@ -235,10 +278,37 @@ def _context(doc, rows) -> frappe._dict:
         names=cp.mpesa_names(phones),
         records=known_names.lookup(f"B2C:{m}" for m in phones),
         employees=cp.employee_destinations().destinations,
-        accounts={}, cost_centers={}, projects={},
+        accounts={}, cost_centers={}, projects={}, limits={}, dimension_values={}, report_types={},
         default_cost_center=frappe.db.get_value("Company", doc.get("company"), "cost_center") if doc.get(
             "company") else None,
+        shortcode=sheet_shortcode(doc),
+        dimensions=dimension_rules(doc.get("company")),
+        filters=None,  # the Accounting Dimension Filters, read at the first row (dimension_filters)
     )
+
+
+def sheet_shortcode(doc) -> str | None:
+    """The B2C shortcode the sheet pays from: its own (Pay From), else the company's only one that may
+    send B2C and has an initiator (what Pay by M-Pesa picks: claim_payees.pick_settings); None when
+    that is not one."""
+    if cstr(doc.get("mpesa_settings")).strip():
+        return doc.mpesa_settings
+    has_company = frappe.get_meta("Mpesa Settings").has_field("company")
+    filters = {apis.B2C: 1, **({"company": doc.company} if has_company and doc.get("company") else {})}
+    found = [s.name for s in frappe.get_all("Mpesa Settings", filters=filters, fields=["name", "initiator_name"])
+             if s.get("initiator_name")]
+    return found[0] if len(found) == 1 else None
+
+
+def _limit_problem(amount, ctx) -> str | None:
+    """services.b2c_request_service.payout_limit_problem for the sheet's shortcode (its Transaction
+    Limit, and the Minimum B2C Payout), once per amount."""
+    key = flt(amount, 2)
+    if key not in ctx.limits:
+        from ..services import b2c_request_service
+
+        ctx.limits[key] = b2c_request_service.payout_limit_problem(key, ctx.shortcode)
+    return ctx.limits[key]
 
 
 def clean_row(row, doc, ctx, warnings) -> None:
@@ -280,6 +350,12 @@ def clean_row(row, doc, ctx, warnings) -> None:
         frappe.throw(f"Row #{idx}: {e}")
     if not B2C_MIN_AMOUNT <= flt(row.amount) <= B2C_MAX_AMOUNT:
         frappe.throw(f"Row #{idx}: M-Pesa B2C pays KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,} to a phone.")
+    # the shortcode's Transaction Limit and the Minimum B2C Payout, as the send checks them: refused
+    # here, not when the batch is sent
+    problem = _limit_problem(row.amount, ctx)
+    if problem:
+        frappe.throw(f"Row #{idx}: {problem}" + (f" (Mpesa Settings {ctx.shortcode})." if ctx.shortcode and
+                                                  "transaction limit" in problem else "."))
     row.expense_type = cstr(row.get("expense_type")).strip() or cstr(doc.get("expense_type")).strip() or None
     if not row.expense_type:
         frappe.throw(f"Row #{idx}: pick its Expense Type, or the sheet's default Expense Type.")
@@ -292,6 +368,7 @@ def clean_row(row, doc, ctx, warnings) -> None:
     row.project = cstr(row.get("project")).strip() or cstr(doc.get("project")).strip() or None
     if row.project:
         _check_project(row.project, ctx, idx)
+    _check_dimensions(row, ctx, idx)
     row.employee = ctx.employees.get(f"B2C:{msisdn}") or None
     if not row.get("status"):
         row.status = DRAFT
@@ -363,6 +440,117 @@ def _check_project(project: str, ctx, idx) -> None:
         ctx.projects[project] = problem
     if ctx.projects[project]:
         frappe.throw(f"Row #{idx}: {ctx.projects[project]}")
+
+
+# ---------------------------------------------------------------- accounting dimensions (as ERPNext checks them)
+DIMENSIONS_MODULE = "erpnext.accounts.doctype.accounting_dimension.accounting_dimension"
+DIMENSION_FILTERS_MODULE = "erpnext.accounts.doctype.accounting_dimension_filter.accounting_dimension_filter"
+PL, BS = "Profit and Loss", "Balance Sheet"
+
+
+def dimension_rules(company) -> list:
+    """The active accounting dimensions (``dimensions``: the rows' own fields, project apart) as ERPNext
+    checks them on a ledger line of ``company`` (GL Entry.validate_dimensions_for_pl_and_bs, from
+    accounting_dimension.get_checks_for_pl_and_bs_accounts, in v15 and v16): _dict(fieldname, label,
+    doctype, mandatory_for_pl, mandatory_for_bs, default: the company's default value)."""
+    fields = dimensions()
+    if not fields:
+        return []
+    checks = getattr(importlib.import_module(DIMENSIONS_MODULE), "get_checks_for_pl_and_bs_accounts", None)
+    per = {d.get("fieldname"): d for d in ((checks() if callable(checks) else None) or [])
+           if d.get("company") == company and not cint(d.get("disabled"))}
+    out = []
+    for field in fields:
+        meta = frappe.db.get_value("Accounting Dimension", {"fieldname": field}, ["label", "document_type"],
+                                   as_dict=True) or frappe._dict()
+        check = frappe._dict(per.get(field) or {})
+        out.append(frappe._dict(
+            fieldname=field, label=meta.get("label") or check.get("label") or field, doctype=meta.get("document_type"),
+            mandatory_for_pl=cint(check.get("mandatory_for_pl")), mandatory_for_bs=cint(check.get("mandatory_for_bs")),
+            default=cstr(check.get("default_dimension")).strip() or None))
+    return out
+
+
+def dimension_filters() -> dict:
+    """ERPNext's Accounting Dimension Filters, {(dimension field, account): rule} (accounting_dimension_filter
+    .get_dimension_filter_map, in v15 and v16: GL Entry.validate_allowed_dimensions); {} without it."""
+    try:
+        module = importlib.import_module(DIMENSION_FILTERS_MODULE)
+    except ImportError:
+        return {}
+    found = getattr(module, "get_dimension_filter_map", None)
+    return (found() if callable(found) else None) or {}
+
+
+def _report_type(account, ctx) -> str | None:
+    if account not in ctx.report_types:
+        ctx.report_types[account] = frappe.db.get_value("Account", account, "report_type") if account else None
+    return ctx.report_types[account]
+
+
+def _dimension_value_problem(rule, value, ctx) -> str | None:
+    """A dimension's value exists and, when its DocType has a company, is the sheet company's (as
+    accounts_controller.validate_company_in_accounting_dimension says it)."""
+    key = (rule.doctype, value)
+    if key not in ctx.dimension_values:
+        problem = None
+        if not frappe.db.exists(rule.doctype, value):
+            problem = f"{rule.label} {value} not found."
+        elif frappe.get_meta(rule.doctype).has_field("company"):
+            company = frappe.db.get_value(rule.doctype, value, "company")
+            if company and company != ctx.company:
+                problem = f"{rule.doctype}: {value} does not belong to the Company: {ctx.company}."
+        ctx.dimension_values[key] = problem
+    return ctx.dimension_values[key]
+
+
+def _check_dimensions(row, ctx, idx) -> None:
+    """The row's accounting dimensions checked as ERPNext checks the journal's line when it posts, so
+    the journal is never refused after the money left: a dimension mandatory for the account's kind
+    (Profit and Loss, Balance Sheet) at the company is set (its company default when the row has none,
+    as ERPNext's own forms fill it in; refused when there is none); a value exists and belongs to the
+    company; and the Accounting Dimension Filters of the expense account allow it."""
+    kind = _report_type(row.get("expense_account"), ctx) if ctx.dimensions else None
+    for rule in ctx.dimensions:
+        value = cstr(row.get(rule.fieldname)).strip() or None
+        mandatory = (kind == PL and rule.mandatory_for_pl) or (kind == BS and rule.mandatory_for_bs)
+        if not value and mandatory:
+            if not rule.default:
+                frappe.throw(f"Row #{idx}: Accounting Dimension {rule.label} is required for '{kind}' account "
+                             f"{row.expense_account}: pick its {rule.label}, or set a default {rule.label} for "
+                             f"{ctx.company} on the Accounting Dimension.")
+            value = rule.default
+            setattr(row, rule.fieldname, value)
+        if value and rule.doctype:
+            problem = _dimension_value_problem(rule, value, ctx)
+            if problem:
+                frappe.throw(f"Row #{idx}: {problem}")
+    if ctx.filters is None:
+        ctx.filters = dimension_filters()
+    for (dimension, account), rule in ctx.filters.items():
+        if account != row.get("expense_account"):
+            continue
+        value = cstr(row.get(dimension)).strip()
+        label = cstr(dimension).replace("_", " ").title()
+        allowed = list(rule.get("allowed_dimensions") or [])
+        if cint(rule.get("is_mandatory")) and not value:
+            frappe.throw(f"Row #{idx}: {label} is mandatory for account {account} (Accounting Dimension Filter).")
+        if value and ((rule.get("allow_or_restrict") == "Allow" and value not in allowed)
+                      or (rule.get("allow_or_restrict") == "Restrict" and value in allowed)):
+            frappe.throw(f"Row #{idx}: {value} is not allowed for {label} against account {account} (Accounting "
+                         "Dimension Filter).")
+
+
+def check_credit_dimensions(ctx) -> None:
+    """The journal's credit line (the shortcode's M-Pesa account, a Balance Sheet account) carries no
+    row's dimensions, only the company's default of each one mandatory for Balance Sheet accounts
+    (build_journal): one with no default would have ERPNext refuse the journal after the money left."""
+    missing = [r.label for r in ctx.dimensions if r.mandatory_for_bs and not r.default]
+    if missing:
+        frappe.throw(f"Accounting Dimension {', '.join(missing)} is required for 'Balance Sheet' accounts at "
+                     f"{ctx.company}, and the sheet's journal credits the shortcode's M-Pesa account with the "
+                     f"company's default: set a default {', '.join(missing)} for {ctx.company} on the Accounting "
+                     "Dimension.")
 
 
 def self_pay_rows(rows) -> list:
@@ -477,7 +665,8 @@ def payouts_of(sheet: str, for_update: bool = False) -> list:
                ref.payment_status, ref.creation, d.docstatus AS parent_docstatus, d.creation AS prepared_on,
                d.paid_from, req.name AS request, req.docstatus AS request_docstatus, req.status AS request_status,
                req.transaction_id, req.receiver_public_name, req.transaction_completed_datetime, req.error_message,
-               req.result_desc, req.result_code, req.conversation_id, req.creation AS sent_on, req.mpesa_settings
+               req.result_desc, req.result_code, req.conversation_id, req.creation AS sent_on, req.mpesa_settings,
+               req.send_started_on
         FROM `tab{B2C_ROW}` ref
         JOIN `tab{DISB}` d ON d.name = ref.parent
         LEFT JOIN `tab{REQUEST}` req ON req.name = ref.b2c_disbursement_request
@@ -488,6 +677,9 @@ def payouts_of(sheet: str, for_update: bool = False) -> list:
         as_dict=True,
     ):
         state = cp.b2c_state(r.parent_docstatus, r.payment_status, r.request, r.request_docstatus, r.request_status)
+        if state is None and r.request and partyless.fate_unknown(frappe._dict(
+                status=r.request_status, send_started_on=r.send_started_on)):
+            state = IN_FLIGHT  # cancelled after its send began, never answered: the money may have left
         row_name, is_test = split_paying_row(r.reference_row)
         found.append(frappe._dict(
             ref=r.ref, parent=r.parent, row=row_name, is_test=is_test, state=state, amount=flt(r.allocated_amount, 2),
@@ -525,15 +717,16 @@ def _clock(value) -> str:
     return when.strftime("%H:%M") if when else ""
 
 
-def _progress(row_status, current, verification) -> str | None:
-    """What the row shows of where its payout is."""
+def _progress(row_status, current, verification, test=None) -> str | None:
+    """What the row shows of where its payout is (``test``: its test payout, whose amount it names)."""
+    tried = f"KES {money(test.amount if test else TEST_AMOUNT)} test"
     if not current:
         if verification == VERIFIED and row_status == DRAFT:
-            return f"KES {TEST_AMOUNT} test paid under the name given: the rest is paid by the next Pay by M-Pesa"
+            return f"{tried} paid under the name given: the rest is paid by the next Pay by M-Pesa"
         if verification == DIFFERS:
-            return "Held: its KES 10 test was paid under another name; an M-Pesa Manager checks it"
+            return f"Held: its {tried} was paid under another name; an M-Pesa Manager checks it"
         return None
-    what = f"KES {TEST_AMOUNT} test" if current.is_test else "Payout"
+    what = f"KES {money(current.amount)} test" if current.is_test else "Payout"
     if current.state == QUEUED:
         return f"{what} queued in {current.parent}, not sent yet"
     if current.state == IN_FLIGHT:
@@ -545,7 +738,7 @@ def _progress(row_status, current, verification) -> str | None:
     if current.state == FAILED:
         return f"{what} failed: {current.error}"
     if current.state == PAID and current.is_test and row_status == ON_HOLD:
-        return "Held: its KES 10 test was paid under another name; an M-Pesa Manager checks it"
+        return f"Held: its {tried} was paid under another name; an M-Pesa Manager checks it"
     return None
 
 
@@ -588,7 +781,7 @@ def row_values(row, payouts, sheet_docstatus) -> dict:
         receipt=best.receipt if best and best.state == PAID else None,
         paid_on=best.paid_on if best and best.state == PAID else None,
         receiver_name=best.receiver_name if best and best.state == PAID else None,
-        progress=None if settled else _progress(status, None if status == DRAFT else current, verification),
+        progress=None if settled else _progress(status, None if status == DRAFT else current, verification, test),
     )
     if settled:
         values["error_message"] = row.get("error_message")
@@ -601,7 +794,7 @@ def row_values(row, payouts, sheet_docstatus) -> dict:
         verdict, note = cp.name_check(_line(row), best.receiver_name)
         values.update(name_verdict=cp.VERDICT[verdict], name_note=note)
     elif test and test.state == PAID:
-        values.update(name_verdict=cp.VERDICT[test_ok], name_note=f"KES {TEST_AMOUNT} test: {test_note}")
+        values.update(name_verdict=cp.VERDICT[test_ok], name_note=f"KES {money(test.amount)} test: {test_note}")
     else:
         values.update(name_verdict=None, name_note=None)
     twice = sorted({p.request for p in mains if p.state == PAID})
@@ -632,9 +825,9 @@ def sync_rows(sheet: str, rows=None, for_update: bool = False, with_payouts: boo
         if newly_paid and values.get("name_verdict") == cp.NO_MATCH:
             _alarm(sheet, row, f"{row.name_note} Check with the person before this phone is paid again.")
         if newly_held:
-            _alarm(sheet, row, f"{row.name_note} The rest (KES {money(flt(row.amount) - TEST_AMOUNT)}) is held: an "
-                               "M-Pesa Manager checks it with the person, then Release Held Row, or Settle Outside "
-                               "M-Pesa.", roles=ADMIN_ROLES)
+            _alarm(sheet, row, f"{row.name_note} The rest (KES {money(flt(row.amount) - flt(row.paid_amount))}) is "
+                               "held: an M-Pesa Manager checks it with the person, then Release Held Row, or Settle "
+                               "Outside M-Pesa.", roles=ADMIN_ROLES)
         if cstr(changed.get("error_message")).startswith("Paid "):
             _alarm(sheet, row, row.error_message)
     if rows:
@@ -731,18 +924,35 @@ def _test_paid(row, payouts) -> float:
     return flt(sum(p.amount for p in payouts if p.row == row.name and p.is_test and p.state == PAID), 2)
 
 
+def min_payout() -> float:
+    """The least M-Pesa Suite Settings lets one B2C payout be (Minimum B2C Payout, never below KES 10)."""
+    from ..services import b2c_request_service
+
+    return flt(b2c_request_service.min_payout_amount())
+
+
+def trial_amount() -> float:
+    """What a new number's test pays: KES 10, or the Minimum B2C Payout when that is more (a smaller
+    payout would be refused at the send, and the whole batch with it)."""
+    return float(max(TEST_AMOUNT, min_payout()))
+
+
 def plan(doc, rows, payouts) -> list:
-    """[(row, paying row, amount, is test)] of a batch for ``rows``: a new number's KES 10 test
-    first when the sheet pays new numbers so (a row of 20 or more; a smaller one is its own test),
-    a row whose test was paid gets the rest, any other row its whole amount."""
+    """[(row, paying row, amount, is test)] of a batch for ``rows``: a new number's test first
+    (``trial_amount``) when the sheet pays new numbers so, and only when what is left after it can be
+    paid too (no less than the Minimum B2C Payout: KES 20 or more for a KES 10 test); a smaller row
+    is its own test, paid whole. A row whose test was paid gets the rest, any other row its whole
+    amount."""
     new = _new_numbers(rows) if cint(doc.get("verify_new_numbers")) else set()
+    first, least = (trial_amount(), min_payout()) if new else (0.0, 0.0)
     out = []
     for row in rows:
         tested = _test_paid(row, payouts)
         if tested > owed.MIN:
             out.append((row, row.name, flt(flt(row.amount) - tested, 2), False))
-        elif row.phone in new and flt(row.amount) >= 2 * TEST_AMOUNT and row.get("verification") != RELEASED:
-            out.append((row, f"{row.name}{TEST_SUFFIX}", float(TEST_AMOUNT), True))
+        elif (row.phone in new and flt(row.amount) - first >= least - owed.MIN
+              and row.get("verification") != RELEASED):
+            out.append((row, f"{row.name}{TEST_SUFFIX}", first, True))
         else:
             out.append((row, row.name, flt(row.amount, 2), False))
     return out
@@ -804,7 +1014,8 @@ def make_payout(sheet: str, states, b2c_settings=None, only=None) -> dict:
     from .schedule import maker_checker_on
 
     who = "An M-Pesa Payer who did not prepare it" if maker_checker_on() else "An M-Pesa Payer"
-    first = f"; {tests} new numbers get KES {TEST_AMOUNT} first" if tests else ""
+    first = (f"; {tests} new numbers get KES {money(next(a for *_x, a, t in planned if t))} first"
+             if tests else "")
     doc.add_comment("Comment", f"{frappe.session.user} prepared {disbursement.name} for {len(planned)} rows (KES "
                                f"{money(total)}{first}). {who} sends it with Send via M-Pesa.")
     return frappe._dict(b2c=disbursement.name, rows=len(planned), total=total, tests=tests)
@@ -877,8 +1088,9 @@ def release_row(sheet: str, row: str, reason: str | None = None) -> dict:
         found.verification = RELEASED
         sync_rows(sheet)
     frappe.get_doc(SHEET, sheet).add_comment(
-        "Comment", f"Row #{found.idx} ({found.payee_name}, {privacy.phone(found.phone)}): its KES {TEST_AMOUNT} test "
-                   f"was paid under another name; released by {frappe.session.user}: {reason}.")
+        "Comment", f"Row #{found.idx} ({found.payee_name}, {privacy.phone(found.phone)}): its KES "
+                   f"{money(found.paid_amount or TEST_AMOUNT)} test was paid under another name; released by "
+                   f"{frappe.session.user}: {reason}.")
     return {"row": found.name, "status": DRAFT}
 
 
@@ -925,14 +1137,17 @@ def correct_phone(sheet: str, row: str, phone: str | None = None, reason: str | 
 @frappe.whitelist(methods=["POST"])
 def mark_not_paid(sheet: str, row: str, reason: str | None = None) -> dict:
     """Mark as Not Paid: a row stuck Checking with M-Pesa (its send got no answer, and a
-    Transaction Status query settled nothing), which a named M-Pesa Manager checked on the M-Pesa
-    statement, becomes Failed and may be retried. Its payout is marked Failed with who did it and
-    why; a Result that still comes settles it as M-Pesa says. For a named M-Pesa Manager who can
-    read the sheet."""
+    Transaction Status query M-Pesa answered settled nothing), which a named M-Pesa Manager checked
+    on the M-Pesa statement, becomes Failed and may be retried with the sheet's Retry Failed (a new
+    payout: the marked one keeps its IDs, so a Result that still comes for it settles it as M-Pesa
+    says). Refused while M-Pesa holds the payout (Initiated: it acknowledged it, and its Result or a
+    query will say), and for the person the row pays. For a named M-Pesa Manager who can read the
+    sheet."""
     reason = _manager_row(sheet, row, reason, "Say what the M-Pesa statement shows for this payment.")
     with owed.doc_lock(SHEET, sheet):
         rows, payouts = sync_rows(sheet, for_update=True, with_payouts=True)
         found = _row_of(rows, row, sheet)
+        _check_not_own(found, "settle")  # nobody clears the way to paying themselves again
         mine = [p for p in payouts if p.row == found.name and p.state == IN_FLIGHT and p.request]
         if found.status != IN_FLIGHT or not mine:
             frappe.throw(f"Row #{found.idx} ({found.payee_name}) is {found.status}: only a row sent and waiting for "
@@ -942,9 +1157,16 @@ def mark_not_paid(sheet: str, row: str, reason: str | None = None) -> dict:
                                       for_update=True)
         if request.status not in ("Initiated", "Status Unknown", "Not Initiated") or cstr(request.result_code).strip():
             frappe.throw(f"{payout.request} is {request.status}: M-Pesa answered it.")
-        if not frappe.db.exists(STATUS_QUERY, {"b2c_request": payout.request}):
-            frappe.throw(f"Nobody asked M-Pesa about {payout.request} yet: press Check with M-Pesa Now, and mark it "
-                         "only when the answer settles nothing and the M-Pesa statement shows no such payment.")
+        if request.status == "Initiated":
+            frappe.throw(f"M-Pesa acknowledged {payout.request} (Initiated): it has the payout, and its Result, or a "
+                         "Transaction Status query (Check with M-Pesa Now), says whether it paid. Only a payout whose "
+                         "send got no answer is marked as not paid.")
+        answered = frappe.get_all(STATUS_QUERY, filters={"b2c_request": payout.request, "status": "Result Received"},
+                                  fields=["name", "outcome"], order_by="creation desc")
+        if not [q for q in answered if q.get("outcome") != "Paid"]:
+            frappe.throw(f"M-Pesa has not answered a Transaction Status query about {payout.request} yet: press Check "
+                         "with M-Pesa Now and wait for its answer. Mark it only when the answer settles nothing and "
+                         "the M-Pesa statement shows no such payment.")
         note = f"Marked as not paid by {frappe.session.user}, who checked the M-Pesa statement: {reason}"
         frappe.db.set_value(REQUEST, payout.request, {"status": "Failed", "error_message": note[:500]},
                             update_modified=False)
@@ -1072,17 +1294,25 @@ def build_journal(sheet, items, posting_date=None):
             row["project"] = project
         row.update({d: v for d, v in zip(dims, values) if v})
         je.append("accounts", row)
+    # a dimension mandatory for Balance Sheet accounts: the company's default on the credit line (checked
+    # at the save: check_credit_dimensions)
+    defaults = {r.fieldname: r.default for r in dimension_rules(sheet.company) if r.mandatory_for_bs and r.default}
     for gl in sorted(credits):
         credit = credits[gl]
         je.append("accounts", {"account": gl, "credit_in_account_currency": credit["amount"],
                                "bank_account": credit["bank_account"],
                                "cost_center": payout_cost_center(credit["settings"], sheet.company),
-                               "user_remark": remark[:140]})
+                               "user_remark": remark[:140], **defaults})
     return je
 
 
 def unbooked(rows, payouts) -> list:
-    """[(row, payout)]: the sheet's Paid payouts no live journal books yet."""
+    """[(row, payout)]: the sheet's Paid payouts nothing books yet. Booked: by the journal the row's
+    bookings name, or by the copy that amended it once it was cancelled (Cancel and Amend:
+    ``live_journal``); or by another live entry that carries the payout's receipt (a voucher made
+    from its bank line: ``receipt_entries``, which _handle counts as its booking too). Only a payout
+    whose journal was cancelled with no amended copy, and that no other entry carries, is booked
+    again."""
     by_name = {r.name: r for r in rows}
     out = []
     for payout in payouts:
@@ -1091,7 +1321,10 @@ def unbooked(rows, payouts) -> list:
             continue
         if _journal_status(bookings_of(row).get(payout.request)) is None:
             out.append((row, payout))
-    return out
+    if not out:
+        return out
+    elsewhere = receipt_entries(p.receipt for _r, p in out)
+    return [(r, p) for r, p in out if cstr(p.receipt).strip().upper() not in elsewhere]
 
 
 def book_sheet(sheet: str, rows=None, payouts=None, current: str | None = None, posting_date=None) -> str | None:
@@ -1145,8 +1378,12 @@ def book_waiting(sheet: str) -> str | None:
     """A job: once no row holds the sheet's journal (its last waiting row failed, or a manager marked
     it not paid), its Paid payouts are booked the way a Paid result books them
     (b2c_response_service.update_b2c_reference_status: one of them books them all, a failure is
-    recorded on it and the 15-minute sweep tries again). Returns the payout it booked through."""
-    rows, payouts = sync_rows(sheet, with_payouts=True)
+    recorded on it and the 15-minute sweep tries again). Returns the payout it booked through.
+
+    The sheet's lock first (held until the result job below commits): sync_rows writes the sheet's
+    rows, and a booking that holds the lock reads them with a locking read (partyless.result_lock)."""
+    with owed.doc_lock(SHEET, sheet, timeout=owed.BOOKING_WAIT):
+        rows, payouts = sync_rows(sheet, for_update=True, with_payouts=True)
     waiting = unbooked(rows, payouts)
     if holding_rows(rows) or not waiting:
         return None
@@ -1212,16 +1449,32 @@ class BulkPayoutHandler(partyless.Handler):
         # read once per batch and sheet (each of its rows is checked on every save and at the send)
         payouts = [p for p in cp._memo(parent, f"mpsa_bulk_payouts:{sheet}", lambda: payouts_of(sheet))
                    if p.row == found.name]
+        # the row's own status, from its other payouts (b2c_state: a cancelled payout M-Pesa may have
+        # paid counts as on its way): its main payouts and its test together, whichever this one is
+        mine = parent.get("name") if parent is not None else None
+        others = [p for p in payouts if not (mine and p.parent == mine)]
+        busy = [p for p in others if p.state in (IN_FLIGHT, PAID) and (is_test or not p.is_test)]
+        if busy:
+            p = max(busy, key=lambda p: (p.state == PAID, cstr(p.creation)))
+            frappe.throw(f"Row #{idx}: row #{found.idx} of {sheet} ({found.payee_name}) is "
+                         f"{'paid' if p.state == PAID else 'being paid'} by {p.parent}"
+                         f"{f' (its KES {money(p.amount)} test)' if p.is_test else ''}"
+                         f"{f', {p.request} ({p.request_status})' if p.request else ''}. A row is never paid twice; "
+                         "a payout whose fate is unknown is asked about (Check with M-Pesa Now), never sent again.")
         tested = flt(sum(p.amount for p in payouts if p.is_test and p.state == PAID), 2)
         if is_test:
-            expected = float(TEST_AMOUNT)
+            expected = trial_amount()
+            if found.verification in (VERIFIED, DIFFERS, RELEASED):
+                frappe.throw(f"Row #{found.idx} of {sheet}: its test is done ({found.verification}); it is not "
+                             "tested again.")
         else:
             expected = flt(flt(found.amount) - tested, 2)
-            if found.verification == TESTING and any(p.is_test and p.state in LIVE for p in payouts):
-                frappe.throw(f"Row #{found.idx} of {sheet}: its KES {TEST_AMOUNT} test is not answered yet.")
+            if any(p.is_test and p.state in LIVE for p in others):
+                frappe.throw(f"Row #{found.idx} of {sheet}: its KES {money(trial_amount())} test is not answered "
+                             "yet.")
             if found.verification == DIFFERS:
-                frappe.throw(f"Row #{found.idx} of {sheet} is held: its KES {TEST_AMOUNT} test was paid under another "
-                             "name. An M-Pesa Manager checks it first (Release Held Row).")
+                frappe.throw(f"Row #{found.idx} of {sheet} is held: its KES {money(tested or trial_amount())} test was "
+                             "paid under another name. An M-Pesa Manager checks it first (Release Held Row).")
         if abs(flt(row.get("allocated_amount")) - expected) > 0.001:
             frappe.throw(f"Row #{idx}: KES {money(row.get('allocated_amount'))} is not what row #{found.idx} of "
                          f"{sheet} pays (KES {money(expected)}).")
@@ -1232,6 +1485,7 @@ class BulkPayoutHandler(partyless.Handler):
         sheet = cstr(row.reference_name).strip()
         if not sheet:
             return
+        # taken already by the result job, before it wrote the B2C row (partyless.result_lock): re-entered
         with owed.doc_lock(SHEET, sheet, timeout=owed.BOOKING_WAIT):
             rows, payouts = sync_rows(sheet, with_payouts=True)
         if row.payment_status != "Paid" and not holding_rows(rows) and unbooked(rows, payouts):
@@ -1255,17 +1509,25 @@ class BulkPayoutHandler(partyless.Handler):
         return None
 
     def booked(self, row) -> int | None:
+        """The sheet's journal that books the payout (or the copy that amended it), else a live
+        entry that carries its receipt (a voucher made from its bank line): booked by it, never
+        swept into the sheet's next journal."""
         found, _test = _sheet_row(row.reference_row, row.reference_name)
         request = cstr(row.get("b2c_disbursement_request")).strip()
         if not found or not request:
             return None
-        return _journal_status(bookings_of(found).get(request))
+        status = _journal_status(bookings_of(found).get(request))
+        if status is not None:
+            return status
+        receipt = cstr(row.get("reference_no")).strip() or cstr(
+            frappe.db.get_value(REQUEST, request, "transaction_id")).strip()
+        return receipt_entries([receipt]).get(receipt.upper()) if receipt else None
 
     def statement_entry(self, request):
         found, _test = _sheet_row(request.reference_row, request.reference_name)
-        journal = bookings_of(found).get(request.name) if found else None
-        if _journal_status(journal) != 1:
-            return None
+        journal, status = live_journal(bookings_of(found).get(request.name) if found else None)
+        if status != 1:
+            return None  # not booked yet; or booked by an entry carrying the receipt, found as usual
         return JE, journal, flt(request.amount, 2)
 
     def describe(self, row) -> dict:
@@ -1275,10 +1537,29 @@ class BulkPayoutHandler(partyless.Handler):
         what = ", ".join(x for x in (found.project, found.expense_type) if cstr(x).strip())
         document = f"{SHEET} {found.parent}, row #{found.idx}"
         if is_test:
-            document += f" (KES {TEST_AMOUNT} test of a new number)"
-        # the name given: M-Pesa's own name for the number is shown beside it (known_names)
+            document += f" (KES {money(row.get('allocated_amount') or trial_amount())} test of a new number)"
+        # the name given: M-Pesa's own name for the number is shown beside it (known_names); the name
+        # M-Pesa paid it under before is the self-pay checks' too (a retry's, as the sheet's own)
         return {"receiver": cstr(found.typed_name).strip() or found.payee_name, "party": what or None,
-                "document": document}
+                "document": document, "mpesa_name": cstr(found.mpesa_name).strip() or None}
+
+    def related_rows(self, paying_row) -> list:
+        """A KES 10 test is held by its row's own payouts too: a row paid, or on its way, is not tested
+        (a main payout is not held by its paid test: it pays the rest)."""
+        name, is_test = split_paying_row(paying_row)
+        return [name] if is_test and name else []
+
+    def retry_problem(self, row, request) -> str:
+        """A sheet's row is retried only by the sheet's own Retry Failed (a new payout, a new request),
+        never by sending a failed request again (Retry Payment on it, Retry Failed Transactions on its
+        batch): that would replace the OriginatorConversationID of the first attempt, whose late Result
+        (a row marked as not paid may still be paid) could then never be matched."""
+        sheet = cstr(partyless._value(row, "reference_name")).strip()
+        name = cstr(partyless._value(request, "name")).strip() or "This payout"
+        return (f"{name} pays a row of {SHEET} {sheet}: retry it with Retry Failed on {sheet}, which makes a new "
+                "payout (a new B2C Disbursement Request with its own OriginatorConversationID). This request is "
+                "not sent again: it stays the record of the first attempt, so a late Result for it is still "
+                "matched.")
 
     def self_pay_rows(self, parent):
         out = []
@@ -1441,7 +1722,8 @@ def sheet_state(sheet: str | None = None) -> dict:
             part["failed"] = flt(part["failed"] + flt(row.amount), 2)
         if row.get("status") not in (PAID, CANCELLED):
             part["left"] = flt(part["left"] + max(0.0, flt(row.amount) - flt(row.get("paid_amount"))), 2)
-    journals = sorted({j for r in rows for j in bookings_of(r).values()})
+    # each as the live journal that books in its place (a cancelled one's amended copy)
+    journals = sorted({live_journal(j)[0] or j for r in rows for j in bookings_of(r).values()})
     failures = {}
     for row in rows:
         failed = [p for p in payouts if p.row == row.name and p.state == FAILED]

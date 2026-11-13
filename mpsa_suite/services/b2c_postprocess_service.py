@@ -241,6 +241,11 @@ def retry_unbooked_payouts(limit: int = 100) -> None:
             frappe.db.set_value(
                 B2C_REQUEST_DOCTYPE, name, "accounting_attempted_on", now_datetime(), update_modified=False
             )
+            # committed before the attempt: the job then holds no row lock when it waits for the
+            # document's lock (a party-less row's result takes it first: partyless.result_lock),
+            # whose holder may be reading this request with a locking read. The stamp only orders
+            # the sweep; a failed attempt keeps it, as before.
+            frappe.db.commit()
             update_b2c_reference_status(name, enqueue_next=True)
             frappe.db.commit()
         except Exception:
