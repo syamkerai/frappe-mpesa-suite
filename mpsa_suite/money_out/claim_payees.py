@@ -1775,10 +1775,11 @@ _NOTHING = {
                 "that table's payees, never a list typed anywhere else on the claim. A submitted claim takes no new "
                 "payees: cancel it, amend it, add them with M-Pesa > Paste Payees (many at once, from Excel) and "
                 "approve it again",
-    "no_phones": "{names} {has} no phone payees: {its} merchants (till, paybill, bank account) are paid from the "
-                 "claim, with M-Pesa > Pay Merchants and Payees",
-    "done_phones": "every phone payee line{of} is paid, on its way, or has a payout waiting to be sent",
-    "done": "every payee line{of} is paid, on its way, or has a payout waiting to be sent",
+    "no_phones": "{names} {has} no phone payees: {its} merchants (till, paybill, bank account) are paid from "
+                 "{the_claim}, with M-Pesa > Pay Merchants and Payees",
+    "done_phones": "every phone payee line{of} is paid, on its way, settled outside M-Pesa, or has a payout "
+                   "waiting to be sent",
+    "done": "every payee line{of} is paid, on its way, settled outside M-Pesa, or has a payout waiting to be sent",
 }
 
 
@@ -1804,7 +1805,7 @@ def nothing_to_pay(skipped: dict, ticked: int) -> str:
         one = len(names) == 1
         of = "" if ticked == 1 else f" of {listed}"
         parts.append(_NOTHING[why].format(names=listed, has="has" if one else "have", its="its" if one else "their",
-                                          of=of))
+                                          the_claim="the claim" if one else "each claim", of=of))
     return "; ".join(parts)
 
 
@@ -2168,9 +2169,14 @@ def settle_line(claim: str, line: str, reason: str | None = None) -> dict:
 # ---------------------------------------------------------------- casual payees: paste or upload
 _HEADERS = {
     "payee_name": ("name", "payee"),
-    "phone": ("phone", "mobile", "msisdn", "number", "tel"),
-    "amount": ("amount", "kes", "ksh", "pay"),
+    # an "M-Pesa Number" column before an "ID Number" one
+    "phone": ("phone", "mobile", "mpesa", "m-pesa", "msisdn", "number", "tel"),
+    # "Net Pay" or "Total" before a rate's "(Kshs)"
+    "amount": ("amount", "net pay", "total", "kes", "ksh", "pay"),
 }
+# the columns that say a row was paid already (a payee table's Download): such a row is never added again
+_PAID_COLUMNS = {"status": "status", "receipt": "receipt"}
+_PAID_STATUSES = {"paid", "success", "successful", "completed"}
 
 
 def parse_text(text) -> list:
@@ -2185,8 +2191,9 @@ def parse_text(text) -> list:
 
 
 def parse_amount(value) -> float | None:
-    """'1,500', 'KES 1500', 1500.0 -> 1500.0; None when it is no number."""
-    text = re.sub(r"(?i)\b(kes|kshs?|sh)\b\.?", "", cstr(value)).replace(",", "").replace(" ", "")
+    """'1,500', 'KES 1500', 'KES2000', '1,500/=', 1500.0 -> 1500.0; None when it is no number."""
+    text = re.sub(r"(?i)\b(kes|kshs?|sh)\.?", "", cstr(value)).replace(",", "").replace(" ", "")
+    text = re.sub(r"(/=|/-|=/|=)$", "", text)
     try:
         return float(text) if text else None
     except ValueError:
@@ -2197,12 +2204,23 @@ _HEADER_WITHIN = 15  # the row naming the columns is looked for among the first 
 _TOTAL_ROWS = {"total", "totals", "grand total", "sub total", "subtotal", "total amount"}
 
 
+def _phone_like(cell) -> bool:
+    """A cell that is a number (to dial or to pay): digits with spaces, dashes, a + or brackets, no
+    letters. A title with a phone in it ('CASUALS - supervisor 0722 000 444') is none."""
+    return bool(re.fullmatch(r"[+(]?\d[\d\s().-]*", cstr(cell).strip()))
+
+
+def _phone_cell(cell) -> bool:
+    return _phone_like(cell) and bool(normalize_msisdn(cell))
+
+
 def _header(cells) -> dict | None:
     """{field: column} when the row names the columns (in any order). Each field takes the column
     its strongest word names, a column serving one field: 'Amount' is the amount before 'Pay To'
-    or 'Payment Status', 'Phone' the phone before 'M-Pesa No.'."""
+    or 'Payment Status', 'Phone' the phone before 'M-Pesa No.', 'Net Pay' before 'Rate (Kshs)'.
+    A Status or Receipt column is noted too, when there is one (_paid_already)."""
     texts = {i: cstr(cell).strip().lower() for i, cell in enumerate(cells)
-             if cstr(cell).strip() and parse_amount(cell) is None and not normalize_msisdn(cell)}
+             if cstr(cell).strip() and parse_amount(cell) is None and not _phone_cell(cell)}
     found = {}
     for rank in range(max(len(words) for words in _HEADERS.values())):
         for field, words in _HEADERS.items():
@@ -2211,7 +2229,13 @@ def _header(cells) -> dict | None:
             column = next((i for i, text in texts.items() if words[rank] in text and i not in found.values()), None)
             if column is not None:
                 found[field] = column
-    return found if len(found) == len(_HEADERS) else None
+    if len(found) != len(_HEADERS):
+        return None
+    for field, word in _PAID_COLUMNS.items():
+        column = next((i for i, text in texts.items() if word in text and i not in found.values()), None)
+        if column is not None:
+            found[field] = column
+    return found
 
 
 def _cell(value) -> str:
@@ -2221,70 +2245,95 @@ def _cell(value) -> str:
     return cstr(value).strip() if value is not None else ""
 
 
-def _has_phone(cells) -> bool:
-    return any(normalize_msisdn(cell) for cell in cells)
+def _amount_after(cells) -> tuple:
+    """(amount text, problem) of the cells after the phone, in a row without column names: the one
+    number among them (text cells are passed over), or a number typed with thousands commas between
+    comma-separated cells ('12', '000'). More numbers than that are not guessed at (a Days or a
+    Balance column would be paid as money): the problem asks for the column names."""
+    at = [i for i, cell in enumerate(cells) if cell and parse_amount(cell) is not None]
+    numbers = [cells[i] for i in at]
+    if len(numbers) <= 1:
+        return (numbers[0] if numbers else ""), None
+    if (at == list(range(at[0], at[0] + len(at))) and re.fullmatch(r"\d{1,3}", numbers[0])
+            and all(re.fullmatch(r"\d{3}", n) for n in numbers[1:-1])
+            and re.fullmatch(r"\d{3}(\.\d{1,2})?", numbers[-1])):
+        return "".join(numbers), None
+    return "", (f"more than one number after the phone ({', '.join(numbers)}): add a first row naming the columns "
+                "(Name, Phone, Amount) so the amount is not guessed")
 
 
 def _no_header_row(cells) -> tuple:
-    """(name, phone, amount text) of a row without column names. The phone is the first cell that
-    is a phone number (else the cell after the name, to show it wrong); the name the first text
-    before it (a serial number in front is passed over), or after it when the phone comes first;
-    the amount the cells after the phone run together ('1,500' split by a comma comes back
-    whole), else the first of them that is a number (a column after the amount)."""
-    at = next((i for i, cell in enumerate(cells) if normalize_msisdn(cell)), None)
+    """(name, phone, amount text, problem) of a row without column names. The phone is the first
+    cell that is a phone number. The name is the first text before it (row numbers in front are
+    passed over), else the cell right after the phone when that is text. The amount is the one
+    number after them (_amount_after). With no phone, the name is the first text, the cell after it
+    the phone (shown wrong) and the cells after that the amount."""
+    def is_text(i):
+        return bool(cells[i]) and parse_amount(cells[i]) is None and not _phone_like(cells[i])
+
+    at = next((i for i, cell in enumerate(cells) if _phone_cell(cell)), None)
     if at is None:
-        return cells[0], (cells[1] if len(cells) > 1 else ""), "".join(cells[2:])
-    text = [i for i, cell in enumerate(cells) if cell and parse_amount(cell) is None and not normalize_msisdn(cell)]
-    before = [i for i in text if i < at]
+        name_at = next((i for i in range(len(cells)) if is_text(i)), 0)
+        rest = cells[name_at + 1:]
+        amount, problem = _amount_after(rest[1:])
+        return cells[name_at], (rest[0] if rest else ""), amount, problem
+    before = [i for i in range(at) if is_text(i)]
     if before:
         name_at = before[0]
-    elif at == 0:
-        name_at = next((i for i in text if i > at), None)
+    elif at + 1 < len(cells) and is_text(at + 1):
+        name_at = at + 1  # the phone first, the name after it
     else:
-        name_at = None  # an empty name cell in front: the row has no name
-    after = [cell for i, cell in enumerate(cells) if i > at and i != name_at]
-    amount = "".join(after)
-    if after and parse_amount(amount) is None:
-        amount = next((cell for cell in after if parse_amount(cell) is not None), amount)
-    return (cells[name_at] if name_at is not None else ""), cells[at], amount
+        name_at = None  # an empty name cell: the row has no name
+    amount, problem = _amount_after([cell for i, cell in enumerate(cells) if i > at and i != name_at])
+    return (cells[name_at] if name_at is not None else ""), cells[at], amount, problem
 
 
-def _payee_row(name: str, phone: str, amount: str) -> bool:
-    """A row that can be a payee: a phone with a digit in it, or an amount (a total row is not).
-    Title rows, the column names, a blank row and the notes a table's Download writes above its
-    rows are none."""
-    if any(c.isdigit() for c in phone):
-        return True
-    return parse_amount(amount) is not None and cstr(name).strip().lower().rstrip(":") not in _TOTAL_ROWS
+def _paid_already(cells, order) -> str | None:
+    """Why a row is never added: its Status column says Paid, or its Receipt column has one."""
+    def cell(field):
+        column = order.get(field)
+        return cells[column] if column is not None and column < len(cells) else ""
+
+    status, receipt = cell("status"), cell("receipt")
+    if status.strip().lower() in _PAID_STATUSES or receipt:
+        said = f"M-Pesa receipt {receipt}" if receipt else f"status {status}"
+        return f"marked paid already ({said}): not added, so it is never paid twice"
+    return None
 
 
 def read_rows(table) -> tuple:
-    """([{row, payee_name, phone, amount_text}], [row numbers left out]) of a pasted or uploaded
-    table of name, phone, amount. A row naming the columns (in any order) may come first, or under
-    title rows (a sheet's title, the column names and notes of a payee table's Download), which are
-    left out with it; so are the rows that are no payee (a blank one, a TOTAL row)."""
+    """([{row, payee_name, phone, amount_text, problem}], [row numbers left out]) of a pasted or
+    uploaded table of name, phone, amount. A row naming the columns (in any order) may come first
+    or under title rows. What comes before the first payee row (a sheet's title, the column names,
+    the notes a payee table's Download writes) is left out, and so are TOTAL rows and blank rows
+    (blank ones are not listed); every other row is shown, a wrong one with its problem. A row
+    marked paid (a Status or Receipt column) and a row whose amount is not clear carry a problem."""
     table = [[_cell(c) for c in row or []] for row in table or []]
     table = [(n, row) for n, row in enumerate(table, start=1) if any(row)]
     order, left_out = None, []
     for k, (_n, cells) in enumerate(table[:_HEADER_WITHIN]):
-        if _has_phone(cells):
+        if any(_phone_cell(cell) for cell in cells):
             break  # a payee row: no title above it, so no header below it either
         order = _header(cells)
         if order:
             left_out = [n for n, _cells in table[:k + 1]]
             table = table[k + 1:]
             break
-    rows = []
+    rows, started = [], False
     for n, cells in table:
         if order:
             name, phone, amount = (cells[order[f]] if order[f] < len(cells) else "" for f in ("payee_name", "phone",
                                                                                               "amount"))
+            unclear = None
         else:
-            name, phone, amount = _no_header_row(cells)
-        if not _payee_row(name, phone, amount):
-            left_out.append(n)
+            name, phone, amount, unclear = _no_header_row(cells)  # unclear: numbers, but which is the amount?
+        total = not any(c.isdigit() for c in phone) and cstr(name).strip().lower().rstrip(":") in _TOTAL_ROWS
+        if total or not (started or _phone_like(phone) or parse_amount(amount) is not None or unclear):
+            left_out.append(n)  # a total row, or a title or note above the list
             continue
-        rows.append(frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount))
+        started = True
+        problem = _paid_already(cells, order) if order else unclear
+        rows.append(frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount, problem=problem))
     return rows, left_out
 
 
@@ -2312,7 +2361,9 @@ def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
             errors.append(f"{to_local(msisdn)} does not start like a Safaricom number (B2C pays M-Pesa lines only: add "
                           "it by hand if it is an M-Pesa line moved from another network)")
         amount = parse_amount(r.amount_text)
-        if amount is None or amount <= 0:
+        if r.get("problem"):
+            errors.append(r.problem)  # read_rows: paid already, or the amount not clear
+        elif amount is None or amount <= 0:
             errors.append("the amount must be more than 0")
         elif amount != int(amount):
             errors.append("M-Pesa pays whole shillings")

@@ -78,12 +78,67 @@ def test_without_column_names_row_numbers_and_columns_after_the_amount_are_passe
         "0711000555, Ann Njeri, 700",
         "John Otieno, 711000666, 1,200",
         "Mary, 07110, 900",  # a mistyped phone stays, to be shown wrong
-        "Only A Name",
+        "Only A Name",  # inside the list: shown (no phone), never hidden
+        "1, 0711000777, Rose, 1500",  # a row number, then the phone, then the name
+        "Jane, 0711000888, 12,000, Site B",  # thousands typed between commas, then a text column
+        "\tTOTAL\t\t3500",
     ])))
     assert payees(rows) == [(1, "Jane Wanjiku", "0711000333", "1500"), (2, "Peter Otieno", "0711000444", "2000"),
                             (3, "Ann Njeri", "0711000555", "700"), (4, "John Otieno", "711000666", "1200"),
-                            (5, "Mary", "07110", "900")]
-    assert left_out == [6]
+                            (5, "Mary", "07110", "900"), (6, "Only A Name", "", ""), (7, "Rose", "0711000777", "1500"),
+                            (8, "Jane", "0711000888", "12000")]
+    assert left_out == [9]
+
+
+@pytest.mark.parametrize("line", [
+    "Jane\t0711000333\t1500\t5",  # a Days column after the amount
+    "Jane\t0711000333\t2000\t0",  # a Balance column
+    "Jane\t0711000333\t5\t1500",  # Days before the amount
+    "Jane, 0711000333, 1,500, 2",
+])
+def test_without_column_names_more_than_one_number_is_never_guessed(claims_env, line):
+    cp = claims_env.cp
+    (row,) = cp.table_rows(cp.parse_text(line))
+    assert row.amount_text == "" and "more than one number after the phone" in row.problem
+    (checked,) = cp.check_pasted([row], "EMP-1", [], cp.employee_destinations())
+    assert checked["errors"] == [row.problem]  # shown once, with no amount error besides
+
+
+def test_a_phone_first_row_takes_no_name_from_after_the_amount(claims_env):
+    cp = claims_env.cp
+    assert payees(cp.table_rows(cp.parse_text("0711000333\t\t1500\tok"))) == [(1, "", "0711000333", "1500")]
+
+
+@pytest.mark.parametrize("text, amount", [("1,500/=", 1500), ("1500/-", 1500), ("KES2000", 2000), ("Kshs. 750", 750),
+                                          ("Sh 20", 20), ("x", None), ("Shabani", None)])
+def test_kenyan_ways_of_writing_an_amount_are_read(claims_env, text, amount):
+    assert claims_env.cp.parse_amount(text) == amount
+
+
+def test_a_title_with_a_phone_in_it_does_not_hide_the_column_names_below(claims_env):
+    cp = claims_env.cp
+    rows, left_out = cp.read_rows(cp.parse_text("\n".join([
+        "CASUALS - supervisor John 0722 000 444", "No.\tName\tPhone\tDays\tAmount", "1\tJane\t0711000333\t5\t1500"])))
+    assert (payees(rows), left_out) == ([(3, "Jane", "0711000333", "1500")], [1, 2])
+
+
+def test_net_pay_and_an_mpesa_number_are_preferred_to_a_rate_and_an_id_number(claims_env):
+    cp = claims_env.cp
+    rows = cp.table_rows([["Name", "ID Number", "Mpesa Number", "Rate (Kshs)", "Days", "Net Pay"],
+                          ["Jane", "23456789", "0711000333", "300", "5", "1500"]])
+    assert payees(rows) == [(2, "Jane", "0711000333", "1500")]
+
+
+def test_rows_marked_paid_in_a_downloaded_list_are_never_added_again(claims_env):
+    cp = claims_env.cp
+    rows = cp.table_rows([["Payee Name", "Phone", "Amount", "Status", "M-Pesa Receipt"],
+                          ["Jane", "0711000333", "1500", "Paid", "UKD1A2B3C4"],
+                          ["Peter", "0711000444", "2000", "Pending", ""],
+                          ["Ann", "0711000555", "700", "Paid", ""]])
+    checked = cp.check_pasted(rows, "EMP-1", [], cp.employee_destinations())
+    assert [r["errors"] for r in checked] == [
+        ["marked paid already (M-Pesa receipt UKD1A2B3C4): not added, so it is never paid twice"], [],
+        ["marked paid already (status Paid): not added, so it is never paid twice"]]
 
 
 def test_a_spreadsheets_number_cells_are_read_whole(claims_env):
@@ -95,7 +150,8 @@ def test_a_spreadsheets_number_cells_are_read_whole(claims_env):
 def test_column_names_under_a_payee_row_are_not_taken_as_the_header(claims_env):
     cp = claims_env.cp
     rows, left_out = cp.read_rows([["Jane", "0711000333", "1500"], ["Name", "Phone", "Amount"]])
-    assert (payees(rows), left_out) == ([(1, "Jane", "0711000333", "1500")], [2])
+    # inside the list, so shown (and refused: "Phone" is no number), not taken as the header
+    assert (payees(rows), left_out) == ([(1, "Jane", "0711000333", "1500"), (2, "Name", "Phone", "")], [])
 
 
 def test_the_paste_dialog_is_told_the_good_total_and_the_rows_left_out(claims_env):
@@ -137,17 +193,18 @@ def test_claims_paid_already_are_named_when_several_are_ticked(claims_env):
     claim(claims_env, [phone_line("LN-3", phone="0711000555")], name="HR-EXP-2", employee="EMP-2")
     assert claims_env.cp.pay_claims(["HR-EXP-1", "HR-EXP-2"], "Astral B2C").skipped == []
     with raises(claims_env, "^Nothing to pay: every phone payee line of HR-EXP-1 and HR-EXP-2 is paid, on its way, "
-                            "or has a payout waiting to be sent.$"):
+                            "settled outside M-Pesa, or has a payout waiting to be sent.$"):
         claims_env.cp.pay_claims(["HR-EXP-1", "HR-EXP-2"], "Astral B2C")
-    # one claim (its own form): said as before
-    with raises(claims_env, "^Nothing to pay: every payee line is paid, on its way, or has a payout waiting to be "
-                            "sent.$"):
+    # one claim (its own form): not named
+    with raises(claims_env, "^Nothing to pay: every payee line is paid, on its way, settled outside M-Pesa, or has a "
+                            "payout waiting to be sent.$"):
         claims_env.cp.pay_payees("HR-EXP-1")
 
 
 @pytest.mark.parametrize("skipped, ticked, said", [
     ({"no_lines": ["A"]}, 1, "A has no lines in the M-Pesa Payees table"),
-    ({"no_phones": ["A", "B", "C"]}, 3, "A, B and C have no phone payees: their merchants"),
+    ({"no_phones": ["A", "B", "C"]}, 3, "A, B and C have no phone payees: their merchants (till, paybill, bank "
+                                        "account) are paid from each claim"),
     ({"done": ["A"]}, 1, "every payee line is paid"),
     ({"done": ["A"]}, 2, "every payee line of A is paid"),
 ])

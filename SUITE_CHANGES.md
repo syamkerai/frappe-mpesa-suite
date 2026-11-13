@@ -23,16 +23,23 @@ pay: every payee line is paid, on its way…". No migrate needed (no DocType cha
   - the column names may sit under title rows, as in a sheet's title or a payee table's own
     Download (title, field names, notes), and those rows are left out;
   - each field takes the column its strongest word names ("Amount", not "Pay To" or "Payment Status");
-  - TOTAL rows and rows that are no payee (no digit in the phone, no amount) are left out, and the
-    dialog lists them by row number;
+  - what comes before the first payee row (titles, the column names, a Download's notes) and TOTAL
+    rows are left out, and the dialog lists them by row number; every row inside the list is shown,
+    a wrong one in red with its problem, never hidden;
   - without column names, a first column of row numbers is passed over, the name may follow the
-    phone, and a column after the amount is ignored;
+    phone, and a text column after the amount is ignored. A row with more than one number after
+    the phone (a Days, Rate or Balance column) is refused with a request for the column names: the
+    amount is never guessed. Thousands typed between commas ("12,000" in a CSV) are read whole;
+  - "1,500/=", "KES2000" and "Kshs. 750" are amounts; "Net Pay" and "Total" outrank "(Kshs)", and
+    "M-Pesa Number" outranks "ID Number";
+  - a row marked Paid (a Status column) or carrying an M-Pesa receipt is refused, so a re-pasted
+    list never pays anyone twice;
   - a phone or an amount typed as a number in Excel (711000333.0) is read whole.
 - **The dialog**:
   - it saves a new or changed claim first (an expense line is needed: it says so);
-  - it preselects the one expense line whose type allows payees;
+  - it preselects the one expense line whose type allows payees (read again after the save);
   - it shows the good rows' total against the expense line, with a box to set the line's Amount to
-    the payees' total (ticked when they come to more, which the save would refuse);
+    the payees' total (never ticked for the user: a wrong total must not raise the line);
   - "Add N Payees and Save" adds the rows and saves the claim.
 - The M-Pesa Payees section has a **Paste Payees** button of its own, not only under the M-Pesa menu.
 

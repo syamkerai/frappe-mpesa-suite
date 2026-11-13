@@ -140,10 +140,11 @@ const mpsa_payees = {
 			__("Set expense line #{0} to {1}, the payees' total (it is {2})", [line.idx, kes(total), kes(limit)])
 		);
 		d.set_df_property("set_line_amount", "hidden", 0);
-		d.set_value("set_line_amount", more ? 1 : 0);
+		// never ticked for the user: a line raised to a wrong total would be approved as it stands
+		d.set_value("set_line_amount", 0);
 		return more
 			? `<p style="color: var(--orange-600)">${__(
-					"The payees of expense line #{0} come to {1}, more than its {2}: the claim cannot be saved like that. Leave the box below ticked to set the line to {1}, or remove payees.",
+					"The payees of expense line #{0} come to {1}, more than its {2}: the claim cannot be saved like that. Check the amounts below; if they are right, tick the box below to set the line to {1}.",
 					[line.idx, kes(total), kes(limit)]
 			  )}</p>`
 			: `<p class="text-muted">${__(
@@ -548,11 +549,21 @@ const mpsa_payees = {
 			if (!after_save) frm.save().then(() => this.paste(frm, true));
 			return;
 		}
+		// which expense types allow payees, as the saved claim has its lines (the refresh after a save may
+		// not have brought them yet): the line preselected is one of them
+		frappe.xcall(`${MPSA_PAYEES_API}.claim_state`, { claim: frm.doc.name }).then((r) => {
+			frm.mpsa_payees = r || {};
+			this.paste_dialog(frm);
+		});
+	},
+
+	paste_dialog(frm) {
 		const e = frappe.utils.escape_html;
 		const saved = this.saved_expenses(frm);
 		const allowed = this.state(frm).allowed_types || [];
 		const payable = saved.filter((r) => allowed.includes(r.expense_type));
-		const preset = payable.length === 1 ? payable[0] : saved.length === 1 ? saved[0] : null;
+		// one line whose type allows payees; else the claim's only line (the save says when its type does not)
+		const preset = payable.length === 1 ? payable[0] : !payable.length && saved.length === 1 ? saved[0] : null;
 		let checked = null;
 		const d = new frappe.ui.Dialog({
 			title: __("Paste Payees"),
@@ -562,7 +573,7 @@ const mpsa_payees = {
 					fieldtype: "HTML",
 					fieldname: "intro",
 					options: `<p>${__(
-						"Copy the payees from Excel (name, phone, amount) and paste them below, or upload the file. Title rows, the column names and a TOTAL row are left out, and a first column of row numbers is passed over. Each phone is paid by B2C, so it must be an M-Pesa (Safaricom) number, and never an employee's."
+						"Copy the payees from Excel (name, phone, amount) and paste them below, or upload the file. Title rows, the column names and a TOTAL row are left out, and a first column of row numbers is passed over. When the rows have other numbers too (days, a rate), copy the column names with them (Name, Phone, Amount), so the amount is never guessed. Rows marked Paid are not added again. Each phone is paid by B2C, so it must be an M-Pesa (Safaricom) number, and never an employee's."
 					)}</p>`,
 				},
 				{
@@ -617,10 +628,17 @@ const mpsa_payees = {
 					`<td>${e(x.phone)}</td><td>${x.amount === null ? "" : format_currency(x.amount, "KES", 0)}</td>` +
 					`<td>${e(x.errors.join("; "))}</td></tr>`
 			);
-			const left_out = (r.left_out || []).length
-				? `<p class="text-muted">${__("Not payee rows, left out: row {0} (a title, the column names, a blank or total row).", [
-						(r.left_out || []).join(", "),
-				  ])}</p>`
+			const skipped = r.left_out || [];
+			const left_out = skipped.length
+				? `<p class="text-muted">${
+						skipped.length === 1
+							? __("Left out as no payee row: row {0} (a title, the column names or notes above the list, or a total).", [
+									skipped[0],
+							  ])
+							: __("Left out as no payee rows: rows {0} (titles, the column names or notes above the list, totals).", [
+									skipped.join(", "),
+							  ])
+				  }</p>`
 				: "";
 			d.fields_dict.result.$wrapper.html(
 				`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [
