@@ -1018,7 +1018,7 @@ def build_spend_entry(doctype: str, values, doc, spend, charge: float) -> object
     if spend.balance is not None:
         remark += f"; the phone's new balance KES {money(spend.balance)}"
     pe.custom_remarks = 1
-    pe.remarks = remark + "."
+    pe.remarks = f"{remark}. Recorded by {frappe.session.user}."
     rows, problem = reference_rows(doctype, values.name, amount)
     if problem or flt(sum(flt(r["allocated_amount"]) for r in rows), 2) < amount:
         frappe.throw(problem or f"{values.name} cannot take KES {money(amount)} now.")
@@ -1105,8 +1105,15 @@ def record_spend(doctype: str, name: str, phone: str | None = None, sms: str | N
                          "complete.")
         pe = build_spend_entry(doctype, values, doc, spend, charge)
         from ..accounting.posting import insert_entry
+        from ..money_in.common import as_user
 
-        insert_entry(pe, True, ignore_permissions=True)  # posted at once (accounting.posting)
+        recorder = frappe.session.user
+        # posted at once (accounting.posting), as the system: the holder records a spend without a right on
+        # Payment Entry, and ERPNext's own account lookups check that right whatever ignore_permissions says
+        # (accounting.payment_entry_service books payouts the same way); who recorded it is in its remarks
+        with as_user("Administrator"):
+            insert_entry(pe, True, ignore_permissions=True)
+            pe.add_comment("Comment", f"Recorded from petty cash phone {doc.name} by {recorder}.")
     _attach(pe.name, screenshot)
     frappe.db.savepoint(SAVEPOINT)
     try:
