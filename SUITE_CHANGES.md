@@ -29,11 +29,18 @@ pay: every payee line is paid, on its way…". No migrate needed (no DocType cha
   - without column names, a first column of row numbers is passed over, the name may follow the
     phone, and a text column after the amount is ignored. A row with more than one number after
     the phone (a Days, Rate or Balance column) is refused with a request for the column names: the
-    amount is never guessed. Thousands typed between commas ("12,000" in a CSV) are read whole;
-  - "1,500/=", "KES2000" and "Kshs. 750" are amounts; "Net Pay" and "Total" outrank "(Kshs)", and
-    "M-Pesa Number" outranks "ID Number";
-  - a row marked Paid (a Status column) or carrying an M-Pesa receipt is refused, so a re-pasted
-    list never pays anyone twice;
+    amount is never guessed;
+  - thousands typed between commas ("12,000" in comma-separated text) are put back together, with
+    or without column names. Spreadsheet cells (tabs, XLSX) are never joined;
+  - "1,500/=", "KES2000" and "Kshs. 750" are amounts. "Net Pay" and a whole-header "Total" outrank
+    "(Kshs)", but "Total Days" or "Total Hours" never count as the amount. "M-Pesa Number" outranks
+    "ID Number";
+  - the column names are not looked for below a row of a list: two cells or more, one with a phone,
+    even "0711000333 Saf";
+  - a row that is paid or on its way is refused, so a re-pasted list never pays anyone twice:
+    - a Status column of Paid, In Flight, Queued, Initiated or Cancelled/settled;
+    - a Receipt or Payout column with a value;
+    - without column names, a "Paid" cell or an M-Pesa receipt;
   - a phone or an amount typed as a number in Excel (711000333.0) is read whole.
 - **The dialog**:
   - it saves a new or changed claim first (an expense line is needed: it says so);

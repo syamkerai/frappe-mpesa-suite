@@ -2171,12 +2171,19 @@ _HEADERS = {
     "payee_name": ("name", "payee"),
     # an "M-Pesa Number" column before an "ID Number" one
     "phone": ("phone", "mobile", "mpesa", "m-pesa", "msisdn", "number", "tel"),
-    # "Net Pay" or "Total" before a rate's "(Kshs)"
+    # "Net Pay" or "Total" (the whole header, _names) before a rate's "(Kshs)"
     "amount": ("amount", "net pay", "total", "kes", "ksh", "pay"),
 }
-# the columns that say a row was paid already (a payee table's Download): such a row is never added again
-_PAID_COLUMNS = {"status": "status", "receipt": "receipt"}
-_PAID_STATUSES = {"paid", "success", "successful", "completed"}
+# the columns that say a row was paid, or is being paid, already (a payee table's Download): never added again
+_PAID_COLUMNS = {"status": "status", "receipt": "receipt", "payout": "payout"}
+_PAID_STATUSES = {"paid", "success", "successful", "completed", "in flight", "queued", "initiated", "sent",
+                  "processing", "cancelled", "settled", "settled outside m-pesa"}
+_RECEIPT = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{10}")  # an M-Pesa receipt: UKD1A2B3C4
+_TOTAL_HEADER = re.compile(r"total(\s+(pay|amount|wages?|due|payable|kes|kshs?))?(\s*\(k(es|shs?)\))?")
+
+
+class _CommaRow(list):
+    """A pasted row split at commas: thousands typed with commas ('1,500') came apart (_join_thousands)."""
 
 
 def parse_text(text) -> list:
@@ -2185,8 +2192,10 @@ def parse_text(text) -> list:
     for raw in cstr(text).splitlines():
         if not raw.strip():
             continue
-        cells = raw.split("\t") if "\t" in raw else next(csv.reader([raw]))
-        rows.append([c.strip() for c in cells])
+        if "\t" in raw:
+            rows.append([c.strip() for c in raw.split("\t")])
+        else:
+            rows.append(_CommaRow(c.strip() for c in next(csv.reader([raw]))))
     return rows
 
 
@@ -2214,11 +2223,25 @@ def _phone_cell(cell) -> bool:
     return _phone_like(cell) and bool(normalize_msisdn(cell))
 
 
+def _payee_row(cells) -> bool:
+    """A row of a list rather than a title: two cells or more, one with a phone in it ('0711000333'
+    or '0711000333 Saf'). The row naming the columns is never looked for below one."""
+    return sum(1 for cell in cells if cell) >= 2 and any(normalize_msisdn(cell) for cell in cells if cell)
+
+
+def _names(word: str, text: str) -> bool:
+    """A header's text names a field by this word: 'total' only as the whole header ('Total',
+    'Total Pay', 'Total (KES)'), never 'Total Days' or 'Total Hours'; any other word anywhere in it."""
+    if word == "total":
+        return bool(_TOTAL_HEADER.fullmatch(text))
+    return word in text
+
+
 def _header(cells) -> dict | None:
     """{field: column} when the row names the columns (in any order). Each field takes the column
     its strongest word names, a column serving one field: 'Amount' is the amount before 'Pay To'
     or 'Payment Status', 'Phone' the phone before 'M-Pesa No.', 'Net Pay' before 'Rate (Kshs)'.
-    A Status or Receipt column is noted too, when there is one (_paid_already)."""
+    A Status, Receipt or Payout column is noted too, when there is one (_paid_already)."""
     texts = {i: cstr(cell).strip().lower() for i, cell in enumerate(cells)
              if cstr(cell).strip() and parse_amount(cell) is None and not _phone_cell(cell)}
     found = {}
@@ -2226,7 +2249,8 @@ def _header(cells) -> dict | None:
         for field, words in _HEADERS.items():
             if field in found or rank >= len(words):
                 continue
-            column = next((i for i, text in texts.items() if words[rank] in text and i not in found.values()), None)
+            column = next((i for i, text in texts.items() if _names(words[rank], text) and i not in found.values()),
+                          None)
             if column is not None:
                 found[field] = column
     if len(found) != len(_HEADERS):
@@ -2245,19 +2269,30 @@ def _cell(value) -> str:
     return cstr(value).strip() if value is not None else ""
 
 
+def _join_thousands(cells) -> list:
+    """A comma-split row with a number typed with thousands commas put back together: '12', '000'
+    -> '12000' (1 to 3 digits, then groups of 3, the last with its cents). Only for pasted text split
+    at commas: a spreadsheet's cells (tabs, XLSX) never split a number."""
+    out, i = [], 0
+    while i < len(cells):
+        j = i + 1
+        if re.fullmatch(r"\d{1,3}", cells[i]):
+            while j < len(cells) and re.fullmatch(r"\d{3}", cells[j]):
+                j += 1
+            if j < len(cells) and j > i and re.fullmatch(r"\d{3}\.\d{1,2}", cells[j]):
+                j += 1
+        out.append("".join(cells[i:j]))
+        i = j
+    return out
+
+
 def _amount_after(cells) -> tuple:
     """(amount text, problem) of the cells after the phone, in a row without column names: the one
-    number among them (text cells are passed over), or a number typed with thousands commas between
-    comma-separated cells ('12', '000'). More numbers than that are not guessed at (a Days or a
-    Balance column would be paid as money): the problem asks for the column names."""
-    at = [i for i, cell in enumerate(cells) if cell and parse_amount(cell) is not None]
-    numbers = [cells[i] for i in at]
+    number among them (text cells are passed over). More numbers than one are not guessed at (a Days
+    or a Balance column would be paid as money): the problem asks for the column names."""
+    numbers = [cell for cell in cells if cell and parse_amount(cell) is not None]
     if len(numbers) <= 1:
         return (numbers[0] if numbers else ""), None
-    if (at == list(range(at[0], at[0] + len(at))) and re.fullmatch(r"\d{1,3}", numbers[0])
-            and all(re.fullmatch(r"\d{3}", n) for n in numbers[1:-1])
-            and re.fullmatch(r"\d{3}(\.\d{1,2})?", numbers[-1])):
-        return "".join(numbers), None
     return "", (f"more than one number after the phone ({', '.join(numbers)}): add a first row naming the columns "
                 "(Name, Phone, Amount) so the amount is not guessed")
 
@@ -2267,7 +2302,8 @@ def _no_header_row(cells) -> tuple:
     cell that is a phone number. The name is the first text before it (row numbers in front are
     passed over), else the cell right after the phone when that is text. The amount is the one
     number after them (_amount_after). With no phone, the name is the first text, the cell after it
-    the phone (shown wrong) and the cells after that the amount."""
+    the phone (shown wrong) and the cells after that the amount. A cell saying the row was paid
+    already (Paid, a receipt) makes it a problem (_paid_word)."""
     def is_text(i):
         return bool(cells[i]) and parse_amount(cells[i]) is None and not _phone_like(cells[i])
 
@@ -2276,7 +2312,8 @@ def _no_header_row(cells) -> tuple:
         name_at = next((i for i in range(len(cells)) if is_text(i)), 0)
         rest = cells[name_at + 1:]
         amount, problem = _amount_after(rest[1:])
-        return cells[name_at], (rest[0] if rest else ""), amount, problem
+        used = {name_at, name_at + 1}
+        return cells[name_at], (rest[0] if rest else ""), amount, problem or _paid_word(cells, used)
     before = [i for i in range(at) if is_text(i)]
     if before:
         name_at = before[0]
@@ -2285,19 +2322,37 @@ def _no_header_row(cells) -> tuple:
     else:
         name_at = None  # an empty name cell: the row has no name
     amount, problem = _amount_after([cell for i, cell in enumerate(cells) if i > at and i != name_at])
-    return (cells[name_at] if name_at is not None else ""), cells[at], amount, problem
+    return ((cells[name_at] if name_at is not None else ""), cells[at], amount,
+            problem or _paid_word(cells, {at, name_at}))
+
+
+def _paid_word(cells, used) -> str | None:
+    """A row without column names that says it was paid already: a cell reading Paid (or Queued, In
+    Flight, Cancelled...) or an M-Pesa receipt, besides the name and the phone."""
+    for i, cell in enumerate(cells):
+        if i in used or not cell:
+            continue
+        if cell.strip().lower() in _PAID_STATUSES:
+            return f"marked {cell.strip()} already: not added, so it is never paid twice"
+        if _RECEIPT.fullmatch(cell.strip()):
+            return f"has an M-Pesa receipt ({cell.strip()}): not added, so it is never paid twice"
+    return None
 
 
 def _paid_already(cells, order) -> str | None:
-    """Why a row is never added: its Status column says Paid, or its Receipt column has one."""
+    """Why a row is never added: its Status column says Paid (or on its way, or settled), or its
+    Receipt or Payout column has one."""
     def cell(field):
         column = order.get(field)
         return cells[column] if column is not None and column < len(cells) else ""
 
-    status, receipt = cell("status"), cell("receipt")
-    if status.strip().lower() in _PAID_STATUSES or receipt:
-        said = f"M-Pesa receipt {receipt}" if receipt else f"status {status}"
-        return f"marked paid already ({said}): not added, so it is never paid twice"
+    status, receipt, payout = cell("status"), cell("receipt"), cell("payout")
+    if receipt:
+        return f"has an M-Pesa receipt ({receipt}): not added, so it is never paid twice"
+    if status.strip().lower() in _PAID_STATUSES:
+        return f"marked {status.strip()} already: not added, so it is never paid twice"
+    if payout:
+        return f"has a payout already ({payout}): not added, so it is never paid twice"
     return None
 
 
@@ -2307,20 +2362,25 @@ def read_rows(table) -> tuple:
     or under title rows. What comes before the first payee row (a sheet's title, the column names,
     the notes a payee table's Download writes) is left out, and so are TOTAL rows and blank rows
     (blank ones are not listed); every other row is shown, a wrong one with its problem. A row
-    marked paid (a Status or Receipt column) and a row whose amount is not clear carry a problem."""
+    marked paid (a Status, Receipt or Payout column, or such a cell) and a row whose amount is not
+    clear carry a problem."""
+    comma = [isinstance(row, _CommaRow) for row in table or []]
     table = [[_cell(c) for c in row or []] for row in table or []]
-    table = [(n, row) for n, row in enumerate(table, start=1) if any(row)]
-    order, left_out = None, []
-    for k, (_n, cells) in enumerate(table[:_HEADER_WITHIN]):
-        if any(_phone_cell(cell) for cell in cells):
+    table = [(n, row, comma[n - 1]) for n, row in enumerate(table, start=1) if any(row)]
+    order, width, left_out = None, 0, []
+    for k, (_n, cells, _comma) in enumerate(table[:_HEADER_WITHIN]):
+        if _payee_row(cells):
             break  # a payee row: no title above it, so no header below it either
         order = _header(cells)
         if order:
-            left_out = [n for n, _cells in table[:k + 1]]
+            width = len(cells)
+            left_out = [n for n, _cells, _comma in table[:k + 1]]
             table = table[k + 1:]
             break
     rows, started = [], False
-    for n, cells in table:
+    for n, cells, split in table:
+        if split and (not order or len(cells) > width):
+            cells = _join_thousands(cells)  # '1,500' typed in comma-separated text
         if order:
             name, phone, amount = (cells[order[f]] if order[f] < len(cells) else "" for f in ("payee_name", "phone",
                                                                                               "amount"))
@@ -2328,7 +2388,8 @@ def read_rows(table) -> tuple:
         else:
             name, phone, amount, unclear = _no_header_row(cells)  # unclear: numbers, but which is the amount?
         total = not any(c.isdigit() for c in phone) and cstr(name).strip().lower().rstrip(":") in _TOTAL_ROWS
-        if total or not (started or _phone_like(phone) or parse_amount(amount) is not None or unclear):
+        data = normalize_msisdn(phone) or _phone_like(phone) or parse_amount(amount) is not None or unclear
+        if total or not (started or data):
             left_out.append(n)  # a total row, or a title or note above the list
             continue
         started = True

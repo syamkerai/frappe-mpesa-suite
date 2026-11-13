@@ -137,8 +137,71 @@ def test_rows_marked_paid_in_a_downloaded_list_are_never_added_again(claims_env)
                           ["Ann", "0711000555", "700", "Paid", ""]])
     checked = cp.check_pasted(rows, "EMP-1", [], cp.employee_destinations())
     assert [r["errors"] for r in checked] == [
-        ["marked paid already (M-Pesa receipt UKD1A2B3C4): not added, so it is never paid twice"], [],
-        ["marked paid already (status Paid): not added, so it is never paid twice"]]
+        ["has an M-Pesa receipt (UKD1A2B3C4): not added, so it is never paid twice"], [],
+        ["marked Paid already: not added, so it is never paid twice"]]
+
+
+@pytest.mark.parametrize("status", ["In Flight", "Queued", "Cancelled", "Initiated"])
+def test_rows_on_their_way_or_settled_are_never_added_again(claims_env, status):
+    cp = claims_env.cp
+    (row,) = cp.table_rows([["Payee Name", "Phone", "Amount", "Status"], ["Jane", "0711000333", "1500", status]])
+    assert row.problem == f"marked {status} already: not added, so it is never paid twice"
+
+
+def test_a_row_with_a_payout_already_is_never_added_again(claims_env):
+    cp = claims_env.cp
+    (row,) = cp.table_rows([["Payee Name", "Phone", "Amount", "Payout Request"],
+                            ["Jane", "0711000333", "1500", "B2C-26-10-000830"]])
+    assert row.problem == "has a payout already (B2C-26-10-000830): not added, so it is never paid twice"
+
+
+@pytest.mark.parametrize("line, problem", [
+    ("Jane, 0711000333, 1500, Paid, UKD1A2B3C4", "marked Paid already"),
+    ("Jane\t0711000333\t1500\tUKD1A2B3C4", "has an M-Pesa receipt (UKD1A2B3C4)"),
+])
+def test_without_column_names_a_paid_row_is_never_added_again(claims_env, line, problem):
+    cp = claims_env.cp
+    (row,) = cp.table_rows(cp.parse_text(line))
+    assert row.problem.startswith(problem)
+
+
+# ---------------------------------------------------------------- second review of the reader
+@pytest.mark.parametrize("table", [
+    [["Jane", "0711000333", "5", "300"]],  # XLSX or tab cells: Days 5, Amount 300
+    [["Jane", "711000333", "2", "900"]],
+    [["1", "Jane", "0711000333", "3", "800"]],
+])
+def test_spreadsheet_cells_are_never_joined_into_one_amount(claims_env, table):
+    (row,) = claims_env.cp.table_rows(table)
+    assert row.amount_text == "" and "more than one number after the phone" in row.problem
+
+
+def test_thousands_typed_between_commas_are_joined_also_under_column_names(claims_env):
+    cp = claims_env.cp
+    rows = cp.table_rows(cp.parse_text("Name, Phone, Amount\nJane, 0711000333, 1,500\nPeter, 0711000444, 12,000"))
+    assert payees(rows) == [(2, "Jane", "0711000333", "1500"), (3, "Peter", "0711000444", "12000")]
+
+
+@pytest.mark.parametrize("header, amount", [
+    (["Name", "Phone", "Total Days", "Rate", "Pay"], "3600"),
+    (["Name", "Phone", "Total Hours", "Total"], "3600"),
+    (["Name", "Phone", "Days", "Total (KES)"], "3600"),
+])
+def test_total_is_the_amount_only_as_the_whole_header(claims_env, header, amount):
+    cells = {"Name": "Jane", "Phone": "0711000333", "Total Days": "12", "Rate": "300", "Pay": "3600",
+             "Total Hours": "40", "Total": "3600", "Days": "12", "Total (KES)": "3600"}
+    (row,) = claims_env.cp.table_rows([header, [cells[h] for h in header]])
+    assert row.amount_text == amount
+
+
+def test_a_phone_with_text_still_ends_the_search_for_the_column_names(claims_env):
+    cp = claims_env.cp
+    rows, left_out = cp.read_rows([["Jane", "0711000333 Saf", "1500"], ["Peter", "Tel 0711000444", "2000"],
+                                   ["Name", "Phone", "Amount"], ["Ann", "0711000555", "700"]])
+    assert [r.payee_name for r in rows] == ["Jane", "Peter", "Name", "Ann"] and left_out == []
+    # under column names, a first row whose phone has text and whose amount does not read is shown
+    rows, left_out = cp.read_rows([["Name", "Phone", "Amount"], ["Jane", "0711000333 (Saf)", "1500 cash"]])
+    assert (payees(rows), left_out) == ([(2, "Jane", "0711000333 (Saf)", "1500 cash")], [1])
 
 
 def test_a_spreadsheets_number_cells_are_read_whole(claims_env):
