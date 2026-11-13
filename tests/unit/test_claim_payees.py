@@ -1199,9 +1199,10 @@ def test_a_payee_claims_retry_counts_its_other_payouts_in_the_amount(retry, monk
 # ---------------------------------------------------------------- casual payees: paste or upload
 def test_pasted_rows_by_tab_or_comma_with_or_without_a_header(env):
     cp = env.cp
-    rows = cp.table_rows(cp.parse_text("Jane Wanjiku\t0711000333\t1,500\n\nJohn Otieno, 711000444, 1,200\n"))
+    rows = cp.table_rows(cp.parse_text("Jane Wanjiku\t0711000333\t1,500\n\nJohn Otieno, 711000444, \"1,200\"\n"))
+    # round 4.5 review: the blank line keeps its number; a comma-split amount is quoted (else never guessed)
     assert [(r.row, r.payee_name, r.phone, r.amount_text) for r in rows] == [
-        (1, "Jane Wanjiku", "0711000333", "1,500"), (2, "John Otieno", "711000444", "1200")]
+        (1, "Jane Wanjiku", "0711000333", "1,500"), (3, "John Otieno", "711000444", "1,200")]
     rows = cp.table_rows([["Amount", "Phone Number", "Payee Name"], [1500.0, 711000333, "Jane"]])
     # a spreadsheet's whole number comes without its ".0" (round 4.4)
     assert [(r.row, r.payee_name, r.phone, r.amount_text) for r in rows] == [(2, "Jane", "711000333", "1500")]

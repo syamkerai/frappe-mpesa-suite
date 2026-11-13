@@ -84,7 +84,7 @@ def test_an_m_pesa_salary_entry_is_not_a_bank_entry_of_the_payroll(env):
 def test_a_bank_salary_is_not_sent_once_hr_made_a_bank_entry_after_pay_selected(env):
     schedule_row(env)
     bank_line(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     hrms_bank_entry(env)  # Wednesday: HR presses Make Bank Entry
     run_jobs(env, "schedule.send_batch")
     request = env.frappe.db.table(B2B)[line_of(env, "L1")["request"]]

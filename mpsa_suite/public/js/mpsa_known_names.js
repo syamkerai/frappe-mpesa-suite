@@ -2,8 +2,9 @@
 // shown as a badge wherever a payout is typed or approved. Daraja names no one before the money leaves,
 // so the name M-Pesa gave the number last time is the check that it is the right number:
 // - green "M-Pesa: NAME · paid N times, last 28 Oct": the typed (or expected) name matches;
+// - amber "M-Pesa: NAME · only one name given": one typed word in a longer name (round 4.5 review);
 // - orange "M-Pesa knows this number as NAME": it does not;
-// - blue "New number: never paid; check it with the person";
+// - blue "New number: never paid; check it with the person", or "From SMS, not confirmed by a payout";
 // - gray "M-Pesa shows the bank's name only" (a bank's paybill), or "Paid before" (a name seen on
 //   salaries only, to who may not see salaries).
 // The server builds each badge (for_destinations: read on M-Pesa Known Name, salary names hidden);
@@ -30,6 +31,7 @@ mpsa_known_names.DOCTYPE = "M-Pesa Known Name";
 mpsa_known_names.CACHE_MS = 60 * 1000;
 mpsa_known_names.COLOURS = {
 	green: "--green-600",
+	amber: "--yellow-600",
 	orange: "--orange-600",
 	blue: "--blue-600",
 	gray: "--gray-600",
@@ -52,7 +54,7 @@ mpsa_known_names.badge_html = (info) => {
 	let html = `<span class="mpsa-known-name" data-verdict="${e(info.verdict || info.status || "")}" style="color: var(${colour})">${e(
 		badge.text
 	)}</span>`;
-	if (info.verdict === "differs" && info.typed_name) {
+	if ((info.verdict === "differs" || info.verdict === "partial") && info.typed_name) {
 		html += ` <span class="text-muted">${__("(given: {0})", [e(info.typed_name)])}</span>`;
 	}
 	return html;
@@ -60,17 +62,19 @@ mpsa_known_names.badge_html = (info) => {
 
 // "3 known and matching · 1 under another name · 2 new" for a list of the server's answers
 mpsa_known_names.counts = (infos) => {
-	const n = { match: 0, differs: 0, new: 0, bank: 0, hidden: 0 };
+	const n = { match: 0, partial: 0, differs: 0, new: 0, bank: 0, hidden: 0 };
 	for (const info of infos || []) {
 		if (!info || !info.badge) continue;
 		if (info.bank) n.bank += 1;
 		else if (info.status === "hidden") n.hidden += 1;
 		else if (info.status === "new" || info.verdict === "new") n.new += 1;
 		else if (info.verdict === "differs") n.differs += 1;
+		else if (info.verdict === "partial") n.partial += 1;
 		else n.match += 1;
 	}
 	const parts = [];
 	if (n.match) parts.push(__("{0} known and matching", [n.match]));
+	if (n.partial) parts.push(__("{0} matching one name only", [n.partial]));
 	if (n.differs) parts.push(__("{0} under another name", [n.differs]));
 	if (n.new) parts.push(__("{0} new", [n.new]));
 	if (n.bank) parts.push(__("{0} bank (M-Pesa shows the bank's name only)", [n.bank]));

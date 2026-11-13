@@ -58,8 +58,9 @@ def test_title_rows_above_the_column_names_and_a_total_row_are_left_out(claims_e
     text = "\n".join(["CASUAL LABOUR - SITE A - 11 NOV 2026", "", "No.\tName\tPhone\tAmount",
                       "1\tJane Wanjiku\t0711000333\t1,500", "2\tPeter Otieno\t0711000444\t2,000", "\tTOTAL\t\t3,500"])
     rows, left_out = cp.read_rows(cp.parse_text(text))
-    assert payees(rows) == [(3, "Jane Wanjiku", "0711000333", "1,500"), (4, "Peter Otieno", "0711000444", "2,000")]
-    assert left_out == [1, 2, 5]
+    # round 4.5 review: the blank line 2 is counted, so the row numbers are the pasted lines (and not listed)
+    assert payees(rows) == [(4, "Jane Wanjiku", "0711000333", "1,500"), (5, "Peter Otieno", "0711000444", "2,000")]
+    assert left_out == [1, 3, 6]
 
 
 def test_the_amount_column_is_the_one_named_amount_not_pay_to(claims_env):
@@ -76,17 +77,20 @@ def test_without_column_names_row_numbers_and_columns_after_the_amount_are_passe
         "1, Jane Wanjiku, 0711000333, 1500",
         "2\tPeter Otieno\t0711000444\t2000\tSite B",
         "0711000555, Ann Njeri, 700",
-        "John Otieno, 711000666, 1,200",
+        "John Otieno, 711000666, 1,200",  # round 4.5 review: 1 and 200, or 1,200? never guessed
         "Mary, 07110, 900",  # a mistyped phone stays, to be shown wrong
         "Only A Name",  # inside the list: shown (no phone), never hidden
         "1, 0711000777, Rose, 1500",  # a row number, then the phone, then the name
-        "Jane, 0711000888, 12,000, Site B",  # thousands typed between commas, then a text column
+        "Jane, 0711000888, 12,000, Site B",  # thousands typed between commas: never guessed either
         "\tTOTAL\t\t3500",
     ])))
     assert payees(rows) == [(1, "Jane Wanjiku", "0711000333", "1500"), (2, "Peter Otieno", "0711000444", "2000"),
-                            (3, "Ann Njeri", "0711000555", "700"), (4, "John Otieno", "711000666", "1200"),
+                            (3, "Ann Njeri", "0711000555", "700"), (4, "John Otieno", "711000666", ""),
                             (5, "Mary", "07110", "900"), (6, "Only A Name", "", ""), (7, "Rose", "0711000777", "1500"),
-                            (8, "Jane", "0711000888", "12000")]
+                            (8, "Jane", "0711000888", "")]
+    assert [r.problem for r in rows if r.row in (4, 8)] == [
+        "the amount may be split by a comma (1,200?): write it without commas, quote it, or paste from Excel",
+        "the amount may be split by a comma (12,000?): write it without commas, quote it, or paste from Excel"]
     assert left_out == [9]
 
 

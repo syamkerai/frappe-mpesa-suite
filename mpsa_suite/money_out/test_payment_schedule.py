@@ -143,7 +143,8 @@ class TestPaymentSchedule(IntegrationTestCase):
             summary = schedule.prepare_payment([line.name for line in lines])
             self.clock[0] += 6
             with patch("frappe.enqueue") as enqueue:
-                answer = schedule.confirm_payment(summary["token"]) if summary["token"] else {"sent": [], "refused": []}
+                answer = (schedule.confirm_payment(summary["token"], acknowledged=1) if summary["token"]
+                          else {"sent": [], "refused": []})
         finally:
             frappe.set_user("Administrator")
         answer["summary"], answer["jobs"] = summary, [c for c in enqueue.call_args_list] if summary["token"] else []
@@ -240,7 +241,7 @@ class TestPaymentSchedule(IntegrationTestCase):
         frappe.db.set_value(LINE, line.name, "planned_date", tomorrow, update_modified=False)
         self.clock[0] += 6
         frappe.set_user(PAYER)
-        answer = schedule.confirm_payment(summary["token"])  # 1. Pay Selected
+        answer = schedule.confirm_payment(summary["token"], acknowledged=1)  # 1. Pay Selected
         frappe.set_user("Administrator")
         self.assertEqual(answer["sent"], [])
         self.assertIn("Not due until", answer["refused"][0]["reason"])
@@ -301,11 +302,13 @@ class TestPaymentSchedule(IntegrationTestCase):
         try:
             token = schedule.prepare_payment([line.name])["token"]
             self.clock[0] += 4
-            self.assertRaisesRegex(frappe.ValidationError, "5 seconds", schedule.confirm_payment, token)
+            self.assertRaisesRegex(frappe.ValidationError, "5 seconds", schedule.confirm_payment, token,
+                                   acknowledged=1)
             self.clock[0] += 2
             with patch("frappe.enqueue"):
-                self.assertEqual(len(schedule.confirm_payment(token)["sent"]), 1)
-            self.assertRaisesRegex(frappe.ValidationError, "used already", schedule.confirm_payment, token)
+                self.assertEqual(len(schedule.confirm_payment(token, acknowledged=1)["sent"]), 1)
+            self.assertRaisesRegex(frappe.ValidationError, "used already", schedule.confirm_payment, token,
+                                   acknowledged=1)
         finally:
             frappe.set_user("Administrator")
 

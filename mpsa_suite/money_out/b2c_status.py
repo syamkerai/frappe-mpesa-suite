@@ -201,7 +201,10 @@ def handle_result(result: dict, ref: str | None, final: bool = False) -> None:
 
 
 def apply_to_payout(b2c, query, outcome: str, values: dict) -> None:
-    """Settle the payout from a status query, exactly as its own Result callback would."""
+    """Settle the payout from a status query, exactly as its own Result callback would. Round 4.5
+    review: a Paid answer's CreditPartyName (docs/daraja_api_reference.md §11: whom M-Pesa paid,
+    "2547... - NAME") fills an empty ``receiver_public_name``, and the name is kept in the M-Pesa
+    Known Name list as the Result's would be (known_names.record_b2c: never raises but a deadlock)."""
     if outcome == "Paid":
         update = {
             "status": "Paid",
@@ -215,6 +218,9 @@ def apply_to_payout(b2c, query, outcome: str, values: dict) -> None:
         }
         if not b2c.conversation_id and values.get("ConversationID"):
             update["conversation_id"] = values.get("ConversationID")
+        credited = str(values.get("CreditPartyName") or "").strip()
+        if credited and not str(b2c.get("receiver_public_name") or "").strip():
+            update["receiver_public_name"] = credited[:140]
     else:
         update = {
             "status": "Failed",
@@ -224,6 +230,10 @@ def apply_to_payout(b2c, query, outcome: str, values: dict) -> None:
     b2c.db_set(update, notify=True)
     query.db_set("applied", 1)
     b2c.add_comment("Comment", f"Settled as {outcome} by Transaction Status query {query.name}.")
+    if outcome == "Paid":
+        from . import known_names
+
+        known_names.record_b2c(b2c)  # the name M-Pesa paid the phone under (none kept when it names no one)
 
     # Same downstream work as a real Result: update the disbursement row, book on Paid.
     frappe.enqueue(

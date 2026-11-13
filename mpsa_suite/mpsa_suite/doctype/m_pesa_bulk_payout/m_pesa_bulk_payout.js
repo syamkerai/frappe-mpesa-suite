@@ -499,6 +499,9 @@ const mpsa_bulk = {
 	paste(frm) {
 		const e = frappe.utils.escape_html;
 		let checked = null;
+		// round 4.5: the amount column the user picked (null: the one the server reads as the amount), and the one shown
+		let picked = null;
+		let shown_amount = null;
 		const d = new frappe.ui.Dialog({
 			title: __("Paste Rows"),
 			size: "large",
@@ -515,7 +518,15 @@ const mpsa_bulk = {
 					fieldtype: "Attach",
 					fieldname: "file_url",
 					label: __("Or Upload a CSV or XLSX File"),
-					change: () => reset(),
+					change: () => fresh(),
+				},
+				{
+					fieldtype: "Select",
+					fieldname: "amount_column",
+					label: __("Amount Column"),
+					description: __("The column paid on each row. Pick another one when the amount was read from the wrong column."),
+					hidden: 1,
+					change: () => pick(),
 				},
 				{ fieldtype: "HTML", fieldname: "result" },
 			],
@@ -525,24 +536,63 @@ const mpsa_bulk = {
 					add();
 					return;
 				}
-				if (!values.text && !values.file_url) {
-					frappe.msgprint(__("Paste the rows or upload a file."));
-					return;
-				}
-				frappe
-					.xcall(`${MPSA_BULK_API}.parse_rows`, {
-						text: values.text || null,
-						file_url: values.file_url || null,
-						sheet: frm.is_new() ? null : frm.doc.name,
-						company: frm.doc.company,
-						existing: (frm.doc.rows || []).filter((r) => r.phone).map((r) => [r.phone, r.expense_type || frm.doc.expense_type || ""]),
-						expense_type: frm.doc.expense_type || null,
-						cost_center: frm.doc.cost_center || null,
-						project: frm.doc.project || null,
-					})
-					.then((r) => show(r));
+				check(values);
 			},
 		});
+		const check = (values) => {
+			if (!values.text && !values.file_url) {
+				frappe.msgprint(__("Paste the rows or upload a file."));
+				return;
+			}
+			frappe
+				.xcall(`${MPSA_BULK_API}.parse_rows`, {
+					text: values.text || null,
+					file_url: values.file_url || null,
+					sheet: frm.is_new() ? null : frm.doc.name,
+					company: frm.doc.company,
+					existing: (frm.doc.rows || []).filter((r) => r.phone).map((r) => [r.phone, r.expense_type || frm.doc.expense_type || ""]),
+					expense_type: frm.doc.expense_type || null,
+					cost_center: frm.doc.cost_center || null,
+					project: frm.doc.project || null,
+					amount_column: picked,
+				})
+				.then((r) => show(r));
+		};
+		// which column each field came from ("Amount ← GRAND TOTAL"), and the amount column to pick
+		const show_columns = (c) => {
+			const named = c && c.header_row !== null && c.header_row !== undefined;
+			const choices = named ? c.amount_choices || [] : [];
+			shown_amount = named && c.amount_column !== null && c.amount_column !== undefined ? String(c.amount_column) : "";
+			if (choices.length) {
+				const options = choices.map((x) => ({ value: String(x.column), label: x.label }));
+				if (!shown_amount) options.unshift({ value: "", label: __("Pick the amount column") });
+				d.set_df_property("amount_column", "options", options);
+				d.set_df_property("amount_column", "hidden", 0);
+				d.set_value("amount_column", shown_amount);
+			} else {
+				d.set_df_property("amount_column", "hidden", 1);
+			}
+			if (!named) {
+				return `<p class="text-muted">${__(
+					"No column names: the amount is the one number after the phone (a row with more numbers is not added)."
+				)}</p>`;
+			}
+			const f = c.fields || {};
+			const part = (label, field) => `${e(label)} ← <b>${f[field] ? e(f[field]) : e(__("none"))}</b>`;
+			const parts = [part(__("Name"), "payee_name"), part(__("Phone"), "phone"), part(__("Amount"), "amount")];
+			for (const [field, label] of [["expense_type", __("Expense Type")], ["project", __("Project")], ["cost_center", __("Cost Center")]]) {
+				if (f[field]) parts.push(part(label, field));
+			}
+			return `<p>${__("Columns (row {0})", [c.header_row])}: ${parts.join(" · ")}</p>`;
+		};
+		// another amount column picked: the rows are checked again with it
+		const pick = () => {
+			const value = d.get_value("amount_column");
+			if (value === null || value === undefined || String(value) === shown_amount) return;
+			picked = value === "" ? null : Number(value);
+			reset();
+			check(d.get_values(true) || {});
+		};
 		const show = (r) => {
 			const rows = (r.rows || []).map(
 				(x) =>
@@ -558,7 +608,8 @@ const mpsa_bulk = {
 			);
 			const skipped = r.left_out || [];
 			d.fields_dict.result.$wrapper.html(
-				`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [r.good, this.kes(r.good_total), r.bad])}</p>` +
+				show_columns(r.columns) +
+					`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [r.good, this.kes(r.good_total), r.bad])}</p>` +
 					(skipped.length ? `<p class="text-muted">${__("Left out as no payee rows: rows {0}.", [skipped.join(", ")])}</p>` : "") +
 					`<table class="table table-bordered table-condensed"><thead><tr><th>${__("Row")}</th><th>${__("Name")}</th>` +
 					`<th>${__("Phone")}</th><th>${__("Amount")}</th><th>${__("Accounting")}</th><th>${__("Problem")}</th></tr></thead>` +
@@ -595,7 +646,14 @@ const mpsa_bulk = {
 			checked = null;
 			d.get_primary_btn().html(__("Check"));
 		};
-		d.fields_dict.text.$input.on("input", reset);
+		// other rows: their columns are read afresh
+		const fresh = () => {
+			picked = null;
+			shown_amount = null;
+			d.set_df_property("amount_column", "hidden", 1);
+			reset();
+		};
+		d.fields_dict.text.$input.on("input", fresh);
 		d.show();
 	},
 };

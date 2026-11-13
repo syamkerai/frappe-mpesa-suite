@@ -149,10 +149,14 @@ const mpsa_due = {
 			html += `<h5>${__("Who is paid")}</h5><table class="table table-bordered table-sm"><thead><tr>
 				<th>${__("Payee")}</th><th>${__("Pays To")}</th><th class="text-right">${__("Lines")}</th>
 				<th class="text-right">${__("Amount")}</th></tr></thead><tbody>`;
+			// round 4.5: the name M-Pesa gave each number before, as Send via M-Pesa shows it (mpsa_send.js)
+			const names = r.known_names || null;
+			if (names && names.header && typeof mpsa_send !== "undefined") html += mpsa_send.names_header(names);
 			for (const p of r.parties) {
 				// the supplier's ID, or a plain note for a number not saved on a supplier
 				const note = p.party ? (p.payee && p.payee !== p.party ? p.party : "") : __("not saved on a supplier");
-				const who = e(p.payee || p.party || "") + (note ? ` <span class="text-muted">(${e(note)})</span>` : "");
+				let who = e(p.payee || p.party || "") + (note ? ` <span class="text-muted">(${e(note)})</span>` : "");
+				if (p.known_name && typeof mpsa_send !== "undefined") who += mpsa_send.name_html(p.known_name);
 				html += `<tr><td>${who}</td><td><b>${e(p.destination || "")}</b>
 					<span class="text-muted small">${e(p.route || "")}</span></td>
 					<td class="text-right">${p.lines}</td><td class="text-right">${kes(p.amount)}</td></tr>`;
@@ -204,10 +208,16 @@ const mpsa_due = {
 	},
 
 	confirm(report, r) {
+		// round 4.5: a number M-Pesa knows under another name (or by one name only), never paid, or whose name the
+		// payer may not see is paid only once they tick that they checked it; confirm_payment refuses without it too
+		const ask = (r.token && r.known_names && r.known_names.acknowledge) || null;
+		let enable = () => {};
+		const fields = [{ fieldtype: "HTML", fieldname: "summary" }];
+		if (ask) fields.push({ fieldtype: "Check", fieldname: "acknowledged", label: ask, onchange: () => enable() });
 		const d = new frappe.ui.Dialog({
 			title: r.count ? __("Confirm M-Pesa Payments") : __("Nothing Can Be Paid"),
 			size: "large",
-			fields: [{ fieldtype: "HTML", fieldname: "summary" }],
+			fields,
 		});
 		d.fields_dict.summary.$wrapper.html(mpsa_due.summary_html(r));
 		// each Pay Selected builds a new dialog: drop the old one once closed
@@ -224,29 +234,34 @@ const mpsa_due = {
 				? __("Confirm and Pay {0} ({1})", [mpsa_due.kes(r.total), left])
 				: __("Confirm and Pay {0}", [mpsa_due.kes(r.total)]);
 		let sending = false;
+		const ticked = () => !ask || Boolean(d.get_value("acknowledged"));
 		d.set_primary_action(label(), async () => {
-			if (left > 0 || sending) return;
+			if (left > 0 || sending || !ticked()) return;
 			sending = true;
 			d.get_primary_btn().prop("disabled", true);
 			try {
-				const res = await frappe.xcall(`${MPSA_SCHEDULE}.confirm_payment`, { token: r.token });
+				const res = await frappe.xcall(`${MPSA_SCHEDULE}.confirm_payment`, {
+					token: r.token,
+					acknowledged: ask ? 1 : 0,
+				});
 				d.hide();
 				mpsa_due.show_result(res);
 				mpsa_due.refresh(report);
 			} catch (err) {
 				sending = false;
-				d.get_primary_btn().prop("disabled", false);
+				d.get_primary_btn().prop("disabled", !ticked());
 			}
 		});
 		const btn = d.get_primary_btn();
 		btn.prop("disabled", true).text(label());
-		// Forced reading time: Confirm stays disabled, with a visible countdown.
+		enable = () => btn.prop("disabled", left > 0 || sending || !ticked());
+		// Forced reading time: Confirm stays disabled, with a visible countdown (and until the names are ticked).
 		const timer = setInterval(() => {
 			left -= 1;
 			btn.text(label());
 			if (left <= 0) {
 				clearInterval(timer);
-				btn.prop("disabled", false);
+				enable();
 			}
 		}, 1000);
 		d.onhide = () => {

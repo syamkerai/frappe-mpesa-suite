@@ -565,6 +565,9 @@ const mpsa_payees = {
 		// one line whose type allows payees; else the claim's only line (the save says when its type does not)
 		const preset = payable.length === 1 ? payable[0] : !payable.length && saved.length === 1 ? saved[0] : null;
 		let checked = null;
+		// round 4.5: the amount column the user picked (null: the one the server reads as the amount), and the one shown
+		let picked = null;
+		let shown_amount = null;
 		const d = new frappe.ui.Dialog({
 			title: __("Paste Payees"),
 			size: "large",
@@ -589,7 +592,15 @@ const mpsa_payees = {
 					fieldtype: "Attach",
 					fieldname: "file_url",
 					label: __("Or Upload a CSV or XLSX File"),
-					change: () => reset(),
+					change: () => fresh(),
+				},
+				{
+					fieldtype: "Select",
+					fieldname: "amount_column",
+					label: __("Amount Column"),
+					description: __("The column paid to each payee. Pick another one when the amount was read from the wrong column."),
+					hidden: 1,
+					change: () => pick(),
 				},
 				{ fieldtype: "HTML", fieldname: "result" },
 				{ fieldtype: "Check", fieldname: "set_line_amount", hidden: 1 },
@@ -600,21 +611,60 @@ const mpsa_payees = {
 					add(values);
 					return;
 				}
-				if (!values.text && !values.file_url) {
-					frappe.msgprint(__("Paste the rows or upload a file."));
-					return;
-				}
-				frappe
-					.xcall(`${MPSA_PAYEES_API}.parse_payees`, {
-						text: values.text || null,
-						file_url: values.file_url || null,
-						claim: frm.is_new() ? null : frm.doc.name,
-						employee: frm.doc.employee,
-						existing: (frm.doc.mpesa_payees || []).map((r) => r.phone).filter(Boolean),
-					})
-					.then((r) => show(r));
+				check(values);
 			},
 		});
+		const check = (values) => {
+			if (!values.text && !values.file_url) {
+				frappe.msgprint(__("Paste the rows or upload a file."));
+				return;
+			}
+			frappe
+				.xcall(`${MPSA_PAYEES_API}.parse_payees`, {
+					text: values.text || null,
+					file_url: values.file_url || null,
+					claim: frm.is_new() ? null : frm.doc.name,
+					employee: frm.doc.employee,
+					existing: (frm.doc.mpesa_payees || []).map((r) => r.phone).filter(Boolean),
+					amount_column: picked,
+				})
+				.then((r) => show(r));
+		};
+		// which column each field came from ("Amount ← GRAND TOTAL"), and the amount column to pick
+		const show_columns = (c) => {
+			const named = c && c.header_row !== null && c.header_row !== undefined;
+			const choices = named ? c.amount_choices || [] : [];
+			shown_amount = named && c.amount_column !== null && c.amount_column !== undefined ? String(c.amount_column) : "";
+			if (choices.length) {
+				const options = choices.map((x) => ({ value: String(x.column), label: x.label }));
+				if (!shown_amount) options.unshift({ value: "", label: __("Pick the amount column") });
+				d.set_df_property("amount_column", "options", options);
+				d.set_df_property("amount_column", "hidden", 0);
+				d.set_value("amount_column", shown_amount);
+			} else {
+				d.set_df_property("amount_column", "hidden", 1);
+			}
+			if (!named) {
+				return `<p class="text-muted">${__(
+					"No column names: the amount is the one number after the phone (a row with more numbers is not added)."
+				)}</p>`;
+			}
+			const f = c.fields || {};
+			const part = (label, field) => `${e(label)} ← <b>${f[field] ? e(f[field]) : e(__("none"))}</b>`;
+			return `<p>${__("Columns (row {0})", [c.header_row])}: ${[
+				part(__("Name"), "payee_name"),
+				part(__("Phone"), "phone"),
+				part(__("Amount"), "amount"),
+			].join(" · ")}</p>`;
+		};
+		// another amount column picked: the rows are checked again with it
+		const pick = () => {
+			const value = d.get_value("amount_column");
+			if (value === null || value === undefined || String(value) === shown_amount) return;
+			picked = value === "" ? null : Number(value);
+			reset();
+			check(d.get_values(true) || {});
+		};
 		const show = (r) => {
 			const rows = (r.rows || []).map(
 				(x) =>
@@ -641,11 +691,12 @@ const mpsa_payees = {
 				  }</p>`
 				: "";
 			d.fields_dict.result.$wrapper.html(
-				`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [
-					r.good,
-					format_currency(flt(r.good_total), "KES", 0),
-					r.bad,
-				])}</p>` +
+				show_columns(r.columns) +
+					`<p>${__("{0} rows can be added ({1}); {2} have problems and are left out.", [
+						r.good,
+						format_currency(flt(r.good_total), "KES", 0),
+						r.bad,
+					])}</p>` +
 					left_out +
 					this.line_note(frm, d, r) +
 					`<table class="table table-bordered table-condensed"><thead><tr><th>${__("Row")}</th><th>${__("Name")}</th>` +
@@ -695,7 +746,14 @@ const mpsa_payees = {
 			checked = null;
 			d.get_primary_btn().html(__("Check"));
 		};
-		d.fields_dict.text.$input.on("input", reset);
+		// other rows: their columns are read afresh
+		const fresh = () => {
+			picked = null;
+			shown_amount = null;
+			d.set_df_property("amount_column", "hidden", 1);
+			reset();
+		};
+		d.fields_dict.text.$input.on("input", fresh);
 		d.fields_dict.expense_detail.$input.on("change", reset);
 		d.show();
 	},

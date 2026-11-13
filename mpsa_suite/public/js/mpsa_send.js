@@ -52,9 +52,16 @@ mpsa_send.open = async (frm) => {
 };
 
 // Round 4.5: the name M-Pesa gave a row's number before (money_out.known_names), the name given, and
-// the verdict: green when they match, orange when M-Pesa knows the number as someone else, blue for a
-// number never paid, gray for a bank's paybill. ``info``: the summary's known_names.rows[i].
-mpsa_send.COLOURS = { green: "--green-600", orange: "--orange-600", blue: "--blue-600", gray: "--gray-600" };
+// the verdict: green when they match, amber when one name was given for a longer one, orange when
+// M-Pesa knows the number as someone else, blue for a number never paid (or named by an SMS only),
+// gray for a bank's paybill. ``info``: the summary's known_names.rows[i].
+mpsa_send.COLOURS = {
+	green: "--green-600",
+	amber: "--yellow-600",
+	orange: "--orange-600",
+	blue: "--blue-600",
+	gray: "--gray-600",
+};
 
 mpsa_send.name_html = (info) => {
 	if (!info || !info.badge || !info.badge.text) return "";
@@ -63,7 +70,7 @@ mpsa_send.name_html = (info) => {
 	let html = `<br><span class="small mpsa-known-name" data-verdict="${e(info.verdict || info.status || "")}" style="color: var(${colour})">${e(
 		info.badge.text
 	)}</span>`;
-	if (info.typed_name && info.verdict === "differs") {
+	if (info.typed_name && (info.verdict === "differs" || info.verdict === "partial")) {
 		html += `<br><span class="small" style="color: var(${colour})">${__("Name given: {0}", [e(info.typed_name)])}</span>`;
 	}
 	return html;

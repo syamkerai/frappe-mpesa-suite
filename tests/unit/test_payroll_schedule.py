@@ -345,7 +345,7 @@ def test_salary_slips_need_hrms(env):
 def test_a_bank_salary_is_paid_by_a_b2b_request_to_the_employee(env):
     schedule_row(env)
     bank_line(env)
-    answer = env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    answer = env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     request = env.frappe.db.table(B2B)[answer["sent"][0]["request"]]
     assert (request["employee"], request["employee_mpesa_account"], request["salary_slip"], request.get("supplier"),
             request["receiver_shortcode"], request["account_reference"], request["payroll_entry"]) == (
@@ -384,7 +384,7 @@ def test_phone_lines_are_paid_by_one_b2c_disbursement_with_the_approved_phone(en
     assert {(r["pay_from"], r["route"]) for r in summary["routes"]} == {(SETTINGS, "B2B Paybill"), (SETTINGS, "B2C Phone")}
     assert {b["sub_account"] for b in summary["balances"]} == {"Working", "Utility"}
     env.clock[0] += 6
-    answer = env.schedule.confirm_payment(summary["token"])
+    answer = env.schedule.confirm_payment(summary["token"], acknowledged=1)
     assert len(answer["sent"]) == 3 and answer["refused"] == []
     (disbursement,) = env.frappe.db.table(DISB).values()
     assert (disbursement["docstatus"], disbursement["payment_schedule"], disbursement["paid_to"]) == (
@@ -419,7 +419,7 @@ def test_one_refused_phone_line_leaves_the_others_paid(env):
     phone_line(env, "L3", amount=20000, reference_name="SAL-3")
     token = prepared(env, "L2", "L3")["token"]
     line_of(env, "L3")["changed_by"] = PAYER  # changed by the payer after the summary
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     assert [s["line"] for s in answer["sent"]] == ["L2"]
     assert answer["refused"][0]["line"] == "L3" and line_of(env, "L3")["status"] == "Planned"
     assert [r["mpesa_schedule_line"] for r in b2c_rows(env)] == ["L2"]
@@ -431,7 +431,7 @@ def test_a_failing_group_refuses_its_lines_and_keeps_the_b2b_ones(env):
     phone_line(env, "L2")
     token = prepared(env, "L1", "L2")["token"]
     env.frappe.db.table(PAYROLL)["PAY-1"]["payroll_payable_account"] = None  # its disbursement cannot be made
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     assert [s["line"] for s in answer["sent"]] == ["L1"]
     assert answer["refused"][0]["line"] == "L2"
     assert answer["refused"][0]["reason"] == "Payroll Entry PAY-1 has no Payroll Payable Account."
@@ -474,7 +474,7 @@ def test_the_b2c_row_refuses_another_number_and_rows_made_by_hand(env):
 def confirmed_phone(env, **kw):
     schedule_row(env)
     phone_line(env, "L2", **kw)
-    env.schedule.confirm_payment(prepared(env, "L2")["token"])
+    env.schedule.confirm_payment(prepared(env, "L2")["token"], acknowledged=1)
     (job,) = [j for j in env.frappe.enqueued if j[0].endswith("create_b2c_request")]
     return job[1]
 

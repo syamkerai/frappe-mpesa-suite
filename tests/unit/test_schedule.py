@@ -236,7 +236,7 @@ def test_confirm_refuses_a_line_not_yet_due(env):
     token = env.schedule.prepare_payment(["L1"])["token"]
     line_of(env)["planned_date"] = day(1)
     env.clock[0] += 6
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     assert answer["sent"] == [] and answer["refused"][0]["reason"] == "Not due until 19 Oct 2026."
     assert not env.frappe.db.table(B2B) and line_of(env)["last_problem"] == "Not due until 19 Oct 2026."
 
@@ -524,7 +524,7 @@ def test_maker_checker_is_checked_again_at_confirm(env):
     line_row(env)
     token = prepared(env, "L1")["token"]
     line_of(env)["changed_by"] = PAYER  # the payer changed it after preparing the payment
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     assert answer["refused"][0]["reason"] == "You prepared or last changed this line: another person must pay it."
 
 
@@ -536,9 +536,9 @@ def test_confirm_works_only_five_seconds_after_the_summary(env):
     token = env.schedule.prepare_payment(["L1"])["token"]
     env.clock[0] += 4.9
     with pytest.raises(env.frappe.ValidationError, match="Confirm works 5 seconds after it opens"):
-        env.schedule.confirm_payment(token)
+        env.schedule.confirm_payment(token, acknowledged=1)
     env.clock[0] += 0.2
-    assert len(env.schedule.confirm_payment(token)["sent"]) == 1  # too early did not use it up
+    assert len(env.schedule.confirm_payment(token, acknowledged=1)["sent"]) == 1  # too early did not use it up
 
 
 def test_a_token_is_used_once(env):
@@ -546,9 +546,9 @@ def test_a_token_is_used_once(env):
     schedule_row(env)
     line_row(env)
     token = prepared(env, "L1")["token"]
-    env.schedule.confirm_payment(token)
+    env.schedule.confirm_payment(token, acknowledged=1)
     with pytest.raises(env.frappe.ValidationError, match="expired or was used already"):
-        env.schedule.confirm_payment(token)
+        env.schedule.confirm_payment(token, acknowledged=1)
     assert len(env.frappe.db.table(B2B)) == 1
     assert ("lock", f"pay-token:{token}") in env.log  # checked and used under its lock
 
@@ -563,11 +563,11 @@ def test_a_token_lives_ten_minutes_and_belongs_to_its_user(env):
     env.frappe.session.user = OTHER
     env.frappe.user_roles = {"M-Pesa Manager"}
     with pytest.raises(env.frappe.ValidationError, match="made for another user"):
-        env.schedule.confirm_payment(token)
+        env.schedule.confirm_payment(token, acknowledged=1)
     env.frappe.cache.values.pop(key)  # expired in Redis
     env.frappe.session.user = PAYER
     with pytest.raises(env.frappe.ValidationError, match="expired or was used already"):
-        env.schedule.confirm_payment(token)
+        env.schedule.confirm_payment(token, acknowledged=1)
 
 
 def test_a_line_changed_after_the_summary_is_refused(env):
@@ -577,7 +577,7 @@ def test_a_line_changed_after_the_summary_is_refused(env):
     line_row(env, "L2", amount=1000)
     token = prepared(env, "L1", "L2")["token"]
     line_of(env, "L2")["amount"] = 2000
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     assert [s["line"] for s in answer["sent"]] == ["L1"]
     assert answer["refused"] == [{"line": "L2", "reason": env.schedule.CHANGED, "payee": "Acme Fuel Ltd",
                                   "amount": 2000, "schedule": "MPS-1"}]
@@ -588,7 +588,7 @@ def test_paying_needs_a_payout_role(env):
     with pytest.raises(env.frappe.PermissionError):
         env.schedule.prepare_payment(["L1"])
     with pytest.raises(env.frappe.PermissionError):
-        env.schedule.confirm_payment("x")
+        env.schedule.confirm_payment("x", acknowledged=1)
 
 
 # ---------------------------------------------------------------- the summary
@@ -608,6 +608,9 @@ def test_the_summary_groups_by_payee_and_shortcode_and_lists_what_is_left_out(en
     line_row(env, "L5", planned_date=day(2))
     result = env.schedule.prepare_payment(["L1", "L2", "L3", "L4", "L5"])
     assert (result["count"], result["total"], result["delay"]) == (3, 6500, 5)
+    # round 4.5 review: each payee's M-Pesa name, and what the payer ticks (never paid: new numbers)
+    assert [p.pop("known_name")["status"] for p in result["parties"]] == ["new", "new"]
+    assert result["known_names"]["acknowledge"] == "I checked the 3 new numbers with the people paid."
     assert result["parties"] == [
         {"payee": "Acme Fuel Ltd", "party_type": "Supplier", "party": "ACME", "route": "B2B Paybill",
          "destination": "888880 / ACME-1", "lines": 2, "amount": 5000},
@@ -660,7 +663,7 @@ def test_a_supplier_with_earlier_payouts_needs_a_fresh_summary_when_more_come_in
     result = prepared(env, "L1")
     assert any("already got M-Pesa payments that are not on any invoice: MB2B-0001" in w for w in result["warnings"])
     env.request("MB2B-0002", amount=700, transaction_id="R2", entry_status="Entry Not Made")
-    answer = env.schedule.confirm_payment(result["token"])
+    answer = env.schedule.confirm_payment(result["token"], acknowledged=1)
     assert "got M-Pesa payments with no invoice after you pressed Pay Selected" in answer["refused"][0]["reason"]
 
 
@@ -671,7 +674,7 @@ def test_confirm_submits_the_requests_and_sends_them_from_a_job_after_commit(env
     schedule_row(env)
     line_row(env, "L1", amount=3000, remarks="Fuel October")
     token = prepared(env, "L1")["token"]
-    answer = env.schedule.confirm_payment(token)
+    answer = env.schedule.confirm_payment(token, acknowledged=1)
     ((sent,),) = [answer["sent"]]
     request = env.frappe.db.table(B2B)[sent["request"]]
     assert (request["docstatus"], request["status"], request["payment_schedule"], request["schedule_line"]) == (
@@ -695,7 +698,7 @@ def test_send_deferred_commits_its_marker_before_the_call(env):
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     env.log.clear()
     run_jobs(env, "schedule.send_batch")
     name = line_of(env)["request"]
@@ -714,7 +717,7 @@ def test_send_deferred_takes_the_documents_lock_before_the_rows(env):
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     name = line_of(env)["request"]
     env.locks.clear()  # a new worker holds none
     env.log.clear()
@@ -730,7 +733,7 @@ def test_send_deferred_claims_with_a_locking_read(env, monkeypatch):
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     name = line_of(env)["request"]
     row = env.frappe.db.table(B2B)[name]
     stale = dict(row)
@@ -748,7 +751,7 @@ def test_a_failed_check_keeps_what_was_committed_meanwhile(env, monkeypatch):
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     name = line_of(env)["request"]
     real = env.b2b.lock_for_send
 
@@ -782,7 +785,7 @@ def test_a_send_that_fails_its_checks_is_failed_and_can_be_planned_again(env):
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     env.frappe.db.table("Supplier")["ACME"].update(on_hold=1, hold_type="All", release_date=None)
     run_jobs(env, "schedule.send_batch")
     name = line_of(env)["request"]
@@ -800,7 +803,7 @@ def test_paid_result_books_and_the_line_shows_paid_with_its_entry(env):
     env.pi(outstanding_amount=10000)
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     run_jobs(env, "schedule.send_batch")
     name = line_of(env)["request"]
     result = {"ResultType": 0, "ResultCode": 0, "ResultDesc": "ok", "ConversationID": f"AG_{name}",
@@ -938,7 +941,7 @@ def test_a_request_whose_send_began_is_cancelled_by_a_manager_only_and_stays_unk
     env.pi()
     schedule_row(env)
     line_row(env)
-    env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     name = line_of(env)["request"]
     row = env.frappe.db.table(B2B)[name]
     row["send_started_on"] = NOW - datetime.timedelta(minutes=2)
@@ -1047,7 +1050,7 @@ def test_a_number_not_saved_on_a_supplier_is_paid_by_a_manager_only(env):
     assert result["not_included"][0]["reason"] == (
         "A number not saved on a supplier is paid by an M-Pesa Manager only.")
     env.frappe.session.user, env.frappe.user_roles = OTHER, {"M-Pesa Manager"}
-    answer = env.schedule.confirm_payment(prepared(env, "L1")["token"])
+    answer = env.schedule.confirm_payment(prepared(env, "L1")["token"], acknowledged=1)
     request = env.frappe.db.table(B2B)[answer["sent"][0]["request"]]
     assert (request["receiver_shortcode"], request["account_reference"], request.get("supplier")) == (
         "888888", "ACC-9", None)

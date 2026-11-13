@@ -135,7 +135,8 @@ class _Base(IntegrationTestCase):
             summary = schedule.prepare_payment(lines)
             self.clock[0] += 6
             with patch("frappe.enqueue") as enqueue:
-                answer = schedule.confirm_payment(summary["token"]) if summary["token"] else {"sent": [], "refused": []}
+                answer = (schedule.confirm_payment(summary["token"], acknowledged=1) if summary["token"]
+                          else {"sent": [], "refused": []})
         answer["summary"], answer["jobs"] = summary, list(enqueue.call_args_list) if summary["token"] else []
         return answer
 

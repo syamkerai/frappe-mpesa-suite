@@ -1345,11 +1345,13 @@ def _resolve(doctype: str, value, title_field: str | None = None, company: str |
 @frappe.whitelist(methods=["POST"])
 def parse_rows(text: str | None = None, file_url: str | None = None, sheet: str | None = None,
                company: str | None = None, existing=None, expense_type: str | None = None,
-               cost_center: str | None = None, project: str | None = None) -> dict:
+               cost_center: str | None = None, project: str | None = None, amount_column=None) -> dict:
     """The Paste Rows dialog: pasted rows (name, phone, amount; optional Expense Type, Project and
     Cost Center columns) or an uploaded CSV / XLSX, checked row by row with claim_payees' reader
     and checks (employees allowed). A phone M-Pesa paid before takes M-Pesa's name (what was pasted
-    kept as Name Given). Adds nothing: the form appends the good rows, and the save checks them
+    kept as Name Given). ``amount_column``: the column of the header row the user picked as the
+    amount (round 4.5 review); the answer's ``columns`` says which column each field came from
+    (claim_payees.read_rows). Adds nothing: the form appends the good rows, and the save checks them
     again. For who may change the sheet (or create one, before its first save)."""
     if sheet and frappe.db.exists(SHEET, sheet):
         frappe.has_permission(SHEET, "write", doc=sheet, throw=True)
@@ -1357,7 +1359,8 @@ def parse_rows(text: str | None = None, file_url: str | None = None, sheet: str 
     else:
         frappe.has_permission(SHEET, "create", throw=True)
     table = cp._read_file(file_url) if file_url else cp.parse_text(text)
-    rows, left_out = cp.read_rows(table, extra=EXTRA_COLUMNS)
+    read = cp.read_rows(table, extra=EXTRA_COLUMNS, amount_column=amount_column)
+    rows, left_out = read
     if len(rows) > PASTE_LIMIT:
         frappe.throw(f"Paste at most {PASTE_LIMIT} rows at a time.")
     if isinstance(existing, str):
@@ -1407,7 +1410,8 @@ def parse_rows(text: str | None = None, file_url: str | None = None, sheet: str 
         seen.add(key)
     bad = sum(1 for r in checked if r["errors"])
     good_total = flt(sum(flt(r["amount"]) for r in checked if not r["errors"]), 2)
-    return {"rows": checked, "good": len(checked) - bad, "bad": bad, "good_total": good_total, "left_out": left_out}
+    return {"rows": checked, "good": len(checked) - bad, "bad": bad, "good_total": good_total, "left_out": left_out,
+            "columns": read.columns}
 
 
 # ---------------------------------------------------------------- the form

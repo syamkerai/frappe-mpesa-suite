@@ -175,6 +175,48 @@ Tests: `tests/unit/test_r45_known_names.py` (47); the patch list in `test_rename
 scripts in `test_r4_foundation.py`; two confirms in `test_send_confirm.py` tick the box; the 4.3 and 4.5
 name fixtures record their payouts in the list.
 
+### Review fixes: the names and the paste reader (2026-11-13, branch r4-5-bulk-payout)
+
+`bench migrate` is needed (a new field on M-Pesa Known Name, a new list script).
+
+- **The amount column is scored** (`claim_payees._header`): a total wins (Net Pay, Total Amount, Grand
+  Total, Total, Amount Payable/Due, Gross Pay, Gross, Wages, Earnings, OT Pay, Pay, Amount); a rate or a
+  part (rate, per day/hour, /day, daily, advance, deduction, balance, days, hours, qty, unit) is never
+  the amount, whatever its "(KES)". "Tel" beats "ID Number"; an ID, code or status column is never the
+  phone. A header with a name, a phone and only a rate pays nobody until the amount column is picked.
+- **Both paste dialogs** (the claim's, the bulk sheet's) say which column each field came from
+  ("Amount ← GRAND TOTAL") and offer an Amount Column to pick before adding the rows: `parse_payees`
+  and `bulk_payout.parse_rows` take `amount_column`; `read_rows`' answer has `columns`.
+- **Thousands commas are never guessed**: in comma-separated text, a 1–3 digit amount followed by a
+  3-digit cell is a problem row ("the amount may be split by a comma (12,000?)…"), but where certain
+  (one cell more than the column names, one place to join). Quoting works after a space too. Tab and
+  XLSX cells as before.
+- **Paid already** under column names: an M-Pesa receipt or a paid word in any cell but the name,
+  phone and amount; M-Pesa Code, Transaction, Ref and Paid columns too.
+- **Row numbers** count blank lines (the user's own lines).
+- **Names are plain text**: tags, angle brackets, double quotes and backticks are taken out before a
+  name is kept (`known_names.plain`),
+  screens escape them, and the list view escapes them too (v15 shows Data as it is).
+- **An SMS's name** (source SMS) only starts a record where none exists: shown "From SMS, not confirmed
+  by a payout", never a match (counted new), never locks a claim payee's name (`mpesa_names`); the first
+  Result naming the number replaces it. A B2C or B2B Result's name is never replaced by an SMS's.
+- **One typed word for a longer name** ("Jane" for JANE WANJIKU) is "partial": amber, and acknowledged
+  with the names that differ. (An approved account whose Expected Name is one word reads partial too.)
+- **The bank flag** is read from the current M-Pesa Bank Paybill list when shown.
+- **Pay Selected** (M-Pesa Payments Due, and Pay Due Lines) shows each payee's M-Pesa name and needs the
+  tick for a number that differs, matches in part, is new or hidden; `confirm_payment(token,
+  acknowledged)` refuses without it (before the token is used, names read again).
+- **Names never lost**: a lock wait past MariaDB's limit is logged and the Result goes on; a B2C payout
+  settled by Transaction Status keeps CreditPartyName as its `receiver_public_name` (when empty) and in
+  the list.
+- **An employee's phone** (any payout whose party is an Employee: a claim, an advance, a salary) is
+  marked Paid to an Employee and hidden from who reads neither Expense Claims nor salaries (Purchase
+  Manager): `has_permission`, `query_conditions`, the badges and the send summaries. Tills and paybills
+  stay visible.
+
+Tests: `tests/unit/test_r45_review_names.py`; the changed expectations in `test_r44_bulk_casual.py`,
+`test_claim_payees.py`, `test_r45_known_names.py`; Pay Selected tests tick the box.
+
 ## Bulk casual payouts made easy (2026-11-13, branch r4-4-bulk-casual)
 
 Found on 13 Nov 2026. At Astral, 69 casuals (KES 247,652) were typed into a site's own older payee

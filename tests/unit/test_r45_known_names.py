@@ -395,7 +395,10 @@ def test_the_desk_hides_a_salary_name_from_who_may_not_see_salaries(claims_env):
     assert "name" not in answer["a"] and "times_paid" not in answer["a"] and answer["a"]["verdict"] is None
     assert (answer["b"]["name"], answer["b"]["status"]) == ("JANE WANJIKU", "known")
     assert answer["c"]["status"] == "new" and answer["c"]["verdict"] == "new"
-    assert k.query_conditions("accounts@example.com") == "COALESCE(`tabM-Pesa Known Name`.salary_only, 0) = 0"
+    # round 4.5 review: and a phone paid to an Employee is hidden from who reads no Expense Claims either
+    assert k.query_conditions("accounts@example.com") == (
+        "COALESCE(`tabM-Pesa Known Name`.salary_only, 0) = 0 AND (COALESCE(`tabM-Pesa Known Name`.employee_payee, 0) "
+        "= 0 OR COALESCE(`tabM-Pesa Known Name`.destination_type, '') != 'Phone')")
     assert k.has_permission(_dict(salary_only=1)) is False and k.has_permission(_dict(salary_only=0)) is True
     frappe.user_roles = {"HR User"}  # who may see salaries sees it
     assert k.for_destinations(asked)["a"]["name"] == "MARY AKINYI"
@@ -455,7 +458,7 @@ def test_the_send_screen_shows_each_rows_name_and_the_counts(send_env):
     r = prepared(send_env, B2C, "B2C-1")
     names = r["known_names"]
     assert names["header"] == "1 known and matching · 1 under another name · 1 new"
-    assert names["counts"] == {"match": 1, "differs": 1, "new": 1, "bank": 0, "hidden": 0}
+    assert names["counts"] == {"match": 1, "partial": 0, "differs": 1, "new": 1, "bank": 0, "hidden": 0}
     assert names["acknowledge"] == "I checked the 1 different name and 1 new number with the people paid."
     assert [(x["name"] if x["status"] == "known" else None, x["typed_name"], x["verdict"]) for x in names["rows"]] == [
         ("JANE WANJIRU", "Jane Wanjiru", "match"), ("PETER OTIENO", "Jane Wanjiru", "differs"),

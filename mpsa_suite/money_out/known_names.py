@@ -19,23 +19,42 @@ The list (DocType M-Pesa Known Name, named by its destination key):
   number, the record holds payouts that are no salary only (its count starts again from that payout):
   what the others see never comes from a salary;
 - ``bank``: the paybill is a bank's (M-Pesa Bank Paybill). M-Pesa shows the bank's name, never who
-  holds the account, so its name is no check of the account holder.
+  holds the account, so its name is no check of the account holder. Round 4.5 review: what is shown
+  reads the current M-Pesa Bank Paybill list (``lookup``), so a bank added after its record counts;
+- ``employee_payee`` (round 4.5 review): a payout to the phone paid an Employee party (a claim, an
+  advance or a salary). Such a phone's record is shown only to who may read Expense Claims or see
+  salaries (``sees_employee_phones``); tills and paybills are never hidden so.
+
+Names are plain text: whatever HTML a result or an SMS carries is taken out before it is kept
+(``plain``), and every screen escapes them too (the v15 list view shows a Data field as it is).
+
+Where a name comes from matters (round 4.5 review): a B2C or B2B Result's name (or one from the
+payouts before: History) is M-Pesa's own. An SMS's (a petty cash phone's) is not confirmed by any
+payout: it only starts a record where there is none, never changes one, is shown as "From SMS, not
+confirmed by a payout", is never a match (it reads as new), and never locks a claim payee's name
+(``confirmed``). The first Result that names the number replaces it.
 
 Written by the system only (no role creates or changes a record: ``check_system_write``):
-- going forward, where a payout becomes Paid with a name: ``record_b2c`` (the B2C Result callback),
+- going forward, where a payout becomes Paid with a name: ``record_b2c`` (the B2C Result callback,
+  and a Transaction Status answer that settles a B2C payout: b2c_status.apply_to_payout),
   ``record_b2b`` (the B2B Result, and a Transaction Status answer that names a B2B receiver). Each
-  runs once per payout, under a savepoint, and never stops the payout's own processing: an error
-  rolls back only its own writes and is logged; a deadlock is raised (the transaction is gone, as
-  partyless.on_result). A name whose number in front is another number's is not kept;
+  runs once per payout, under a savepoint, and never stops the payout's own processing: an error,
+  a lock wait past MariaDB's limit too (the transaction stays), rolls back only its own writes and
+  is logged; a deadlock is raised (the transaction is gone, as partyless.on_result). A name whose
+  number in front is another number's is not kept;
 - once, from history, by the migrate patch ``known_mpesa_names`` (``backfill``, idempotent: it
   rebuilds each destination's record from the Paid payouts);
-- by later features through ``observe`` (e.g. a petty cash phone's SMS: source SMS).
+- by later features through ``observe`` (e.g. a petty cash phone's SMS: source SMS, the name the
+  SMS gave only).
 
 Read by:
 - ``lookup(keys)`` and ``verdict(typed_name, known)`` (pure): the claim payees' names
-  (claim_payees.mpesa_names) and any server check;
-- ``summary(targets)``: the Send via M-Pesa confirm screen (money_out.send_confirm): each row's known
-  name, the typed or expected name and the verdict, the counts, and what the sender acknowledges;
+  (claim_payees.mpesa_names) and any server check. A single typed word against a longer M-Pesa
+  name ("Jane" for JANE WANJIKU) is "partial", not a match: shown amber, acknowledged with the
+  names that differ;
+- ``summary(targets)``: the Send via M-Pesa confirm screen (money_out.send_confirm) and Pay Selected
+  (money_out.schedule): each row's known name, the typed or expected name and the verdict, the
+  counts, and what the sender acknowledges;
 - ``for_destinations(destinations)``: the desk badges (public/js/mpsa_known_names.js), for who may read
   the list, a salary-only name hidden from who may not see salaries.
 """
@@ -72,16 +91,21 @@ _TYPES = {
     "paybill": PAYBILL, "b2b paybill": PAYBILL, PAY_BILL.lower(): PAYBILL, "bank": PAYBILL,
     "bank account (via bank paybill)": PAYBILL, "bank paybill (b2b)": PAYBILL,
 }
-# Where the name came from (source)
+# Where the name came from (source); an SMS's is confirmed by no payout
 B2C_RESULT, B2B_RESULT, SMS, HISTORY = "B2C Result", "B2B Result", "SMS", "History"
-# verdict(): the name typed (or expected) against M-Pesa's
-MATCH, DIFFERS, NEW = "match", "differs", "new"
+# verdict(): the name typed (or expected) against M-Pesa's; "partial": one typed word in a longer name
+MATCH, DIFFERS, NEW, PARTIAL = "match", "differs", "new", "partial"
 # for_destinations' status of a destination
 KNOWN_STATUS, NEW_STATUS, HIDDEN, INVALID = "known", "new", "hidden", "invalid"
 # The record's fields, its name first; the values a write sets are the rest
 FIELDS = ("name", "destination_type", "number", "mpesa_name", "received", "first_seen", "last_seen", "times_paid",
-          "last_payout_doctype", "last_payout", "source", "salary_only", "bank")
+          "last_payout_doctype", "last_payout", "source", "salary_only", "bank", "employee_payee")
 VALUES = FIELDS[1:]
+# The party type whose phone is hidden from who may read neither Expense Claims nor salaries
+EMPLOYEE = "Employee"
+# What a kept name may not hold (plain): tags, and the characters that would make one or leave an attribute
+_TAG = re.compile(r"<[^>]*>")
+_UNSAFE = re.compile(r"[<>\"`]")
 # Data fields hold at most 140 characters
 DATA_LENGTH = 140
 # doc.flags key of a system write (check_system_write)
@@ -159,6 +183,26 @@ def is_bank_paybill(number, banks=None) -> bool:
     return bool(number) and number in (bank_paybills() if banks is None else banks)
 
 
+def plain(text) -> str:
+    """A name or a received text as plain text (round 4.5 review): HTML tags taken out, then any
+    character that could start one or end an attribute (< > " `), and the spaces made single. What
+    M-Pesa sends ("254705783406 - AMBER DEMAS NAMUSIAH", "O'BRIEN & SONS") is unchanged."""
+    return " ".join(_UNSAFE.sub(" ", _TAG.sub(" ", cstr(text))).split())
+
+
+def confirmed(known) -> bool:
+    """A record whose name a payout's result gave (a B2C or B2B Result, or History): not an SMS's
+    alone, which only says what was typed or texted."""
+    return bool(known) and cstr(known.get("source")).strip() != SMS
+
+
+def sees_employee_phones(user: str | None = None) -> bool:
+    """Who may see the name on a phone paid to an Employee (a claim, an advance or a salary): who may
+    see salaries, or read Expense Claims by a role other than the employee's own (salary_access)."""
+    user = user or frappe.session.user
+    return salary_access.can_see_salaries(user) or CLAIM in salary_access.reads_documents(user)
+
+
 # ---------------------------------------------------------------- what one payout says (pure, but the bank flag)
 def _when(value):
     """A datetime from a datetime, a date or their text; None for nothing."""
@@ -189,20 +233,21 @@ def _line(kind, number):
 
 
 def observation(kind, number, received, when=None, payout_doctype=None, payout=None, source=SMS, salary=False,
-                bank=None):
+                bank=None, employee=False):
     """What one payout (or SMS) says about a destination, for ``merge``: _dict(key, destination_type,
-    number, mpesa_name, received, when, payout_doctype, payout, source, salary, bank). None when it
-    names no one, or names another number (the number in front of M-Pesa's name is not this one's:
-    claim_payees._same_number, a masked phone by the digits shown). ``bank``: None to read it from
-    M-Pesa Bank Paybill (a paybill)."""
+    number, mpesa_name, received, when, payout_doctype, payout, source, salary, bank, employee). None
+    when it names no one, or names another number (the number in front of M-Pesa's name is not this
+    one's: claim_payees._same_number, a masked phone by the digits shown). The text is kept as plain
+    text (``plain``: a name of HTML only names no one). ``bank``: None to read it from M-Pesa Bank
+    Paybill (a paybill). ``employee``: the payout paid an Employee party (a phone only)."""
     from . import claim_payees as cp
 
     key = key_of(kind, number)
-    received = cstr(received).strip()
+    received = plain(received)
     if not key or not received:
         return None
     kind, number = split_key(key)
-    name = cp._without_number(received)
+    name = plain(cp._without_number(received))
     if not name:
         return None
     prefix = cp.number_prefix(received)
@@ -213,17 +258,20 @@ def observation(kind, number, received, when=None, payout_doctype=None, payout=N
     return frappe._dict(key=key, destination_type=kind, number=number, mpesa_name=name[:DATA_LENGTH],
                         received=received[:DATA_LENGTH], when=_when(when) or now_datetime(),
                         payout_doctype=cstr(payout_doctype).strip() or None, payout=cstr(payout).strip() or None,
-                        source=source or SMS, salary=bool(salary), bank=bool(bank))
+                        source=source or SMS, salary=bool(salary), bank=bool(bank),
+                        employee=bool(employee) and kind == PHONE)
 
 
 def b2c_observation(request, source=B2C_RESULT):
-    """What a Paid B2C Disbursement Request says (``receiver_public_name`` for its phone), or None."""
+    """What a Paid B2C Disbursement Request says (``receiver_public_name`` for its phone), or None.
+    A payout whose party is an Employee marks the phone ``employee_payee``."""
     if _get(request, "status") != "Paid":
         return None
     return observation(PHONE, _get(request, "phone_number"), _get(request, "receiver_public_name"),
                        when=_get(request, "transaction_completed_datetime") or _get(request, "creation"),
                        payout_doctype=B2C_REQUEST, payout=_get(request, "name"), source=source,
-                       salary=salary_access.is_salary_line(request))
+                       salary=salary_access.is_salary_line(request),
+                       employee=cstr(_get(request, "party_type")).strip() == EMPLOYEE)
 
 
 def b2b_kind(command_id) -> str | None:
@@ -246,36 +294,51 @@ def b2b_observation(request, received=None, source=B2B_RESULT, banks=None):
                        salary=salary_access.has_salaries(frappe._dict(links, doctype=B2B)), bank=bank)
 
 
-def _fresh(seen) -> dict:
-    return {"destination_type": seen.destination_type, "number": seen.number, "mpesa_name": seen.mpesa_name,
-            "received": seen.received, "first_seen": seen.when, "last_seen": seen.when, "times_paid": 1,
+def _fresh(seen, record=None) -> dict:
+    """A record started from ``seen``; a phone once paid to an Employee stays marked so (``record``)."""
+    employee = bool(seen.get("employee")) or bool(record and cint(record.get("employee_payee")))
+    return {"destination_type": seen.destination_type, "number": seen.number, "mpesa_name": plain(seen.mpesa_name),
+            "received": plain(seen.received), "first_seen": seen.when, "last_seen": seen.when, "times_paid": 1,
             "last_payout_doctype": seen.payout_doctype, "last_payout": seen.payout, "source": seen.source,
-            "salary_only": 1 if seen.salary else 0, "bank": 1 if seen.bank else 0}
+            "salary_only": 1 if seen.salary else 0, "bank": 1 if seen.bank else 0,
+            "employee_payee": 1 if employee else 0}
 
 
 def merge(record, seen) -> dict | None:
     """The record's values after ``seen`` (pure), or None when ``seen`` changes nothing:
     - a new destination starts with it;
+    - an SMS's name (round 4.5 review) only starts a record: it never changes one, and a Result's
+      name replaces it (the record starts again from the Result);
     - its payout is the record's last payout already (the same result again; each Result is recorded
       once by its caller, after the guard that ignores a re-sent one: this only catches a repeat of
       the latest);
     - a salary on a record that holds payouts that are no salary is left out (what others see never
-      comes from a salary); the first payout that is no salary on a salary-only record starts it again;
+      comes from a salary; the phone is marked paid to an Employee all the same); the first payout
+      that is no salary on a salary-only record starts it again;
     - otherwise it counts once more; the name, the text, the last payout and the source are the
-      latest payout's (one recorded late, older than the last seen, only counts and may be the first)."""
+      latest payout's (one recorded late, older than the last seen, only counts and may be the first).
+    A phone once paid to an Employee party stays ``employee_payee``. Names are kept as plain text."""
     if not record:
         return _fresh(seen)
+    if seen.source == SMS:
+        return None  # an SMS names a number no payout named yet, or nothing
+    if not confirmed(record):
+        return _fresh(seen, record)  # M-Pesa's own name now, for the SMS's
+    employee = 1 if cint(record.get("employee_payee")) or seen.get("employee") else 0
     last_payout = (cstr(record.get("last_payout_doctype")), cstr(record.get("last_payout")))
     if seen.payout and last_payout == (cstr(seen.payout_doctype), cstr(seen.payout)):
         return None
     salary_only = bool(cint(record.get("salary_only")))
     if seen.salary and not salary_only:
-        return None
+        if employee == cint(record.get("employee_payee")):
+            return None
+        return dict({f: record.get(f) for f in VALUES}, employee_payee=employee)
     if salary_only and not seen.salary:
-        return _fresh(seen)
+        return _fresh(seen, record)
     out = {f: record.get(f) for f in VALUES}
     out.update(destination_type=seen.destination_type, number=seen.number,
-               times_paid=cint(record.get("times_paid")) + 1, bank=1 if seen.bank else 0)
+               times_paid=cint(record.get("times_paid")) + 1, bank=1 if seen.bank else 0, employee_payee=employee,
+               mpesa_name=plain(out.get("mpesa_name")), received=plain(out.get("received")))
     first, last = _when(record.get("first_seen")), _when(record.get("last_seen"))
     if not first or seen.when < first:
         out["first_seen"] = seen.when
@@ -351,12 +414,14 @@ def record(seen) -> bool:
 
 def _safely(what: str, make) -> bool:
     """``record(make())`` under a savepoint: an error rolls back only the list's writes and is logged,
-    so the payout's own processing goes on; a deadlock or lock wait past MariaDB's limit is raised
-    (the transaction is gone; the payout's job runs again)."""
+    so the payout's own processing goes on. A lock wait past MariaDB's limit too (round 4.5 review):
+    MariaDB undoes only the statement and keeps the transaction, so the B2C Result that waited is
+    never lost for a name. A deadlock is raised (the transaction is gone; the payout's job runs
+    again)."""
     frappe.db.savepoint(SAVEPOINT)
     try:
         return record(make())
-    except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+    except frappe.QueryDeadlockError:
         raise
     except Exception:
         frappe.db.rollback(save_point=SAVEPOINT)
@@ -381,10 +446,11 @@ def observe(kind, number, received, when=None, payout_doctype=None, payout=None,
             salary=False) -> bool:
     """For later features: keep a name M-Pesa gave ``number`` (``kind`` Phone, Till or Paybill, or
     any of the suite's names for it), e.g. from a petty cash phone's M-Pesa SMS ("Confirmed. Ksh500
-    sent to JANE DOE 0712345678"). ``received`` may carry the number in front ("0712345678 - JANE
-    DOE"): another number's name is not kept. Name the payout (or the record the SMS was pasted on)
-    in ``payout_doctype`` and ``payout``: the same one again is not counted twice. Never raises (but
-    a deadlock)."""
+    sent to JANE DOE 0712345678"): only the name the SMS gave, never one typed. ``received`` may
+    carry the number in front ("0712345678 - JANE DOE"): another number's name is not kept. Name the
+    payout (or the record the SMS was pasted on) in ``payout_doctype`` and ``payout``: the same one
+    again is not counted twice. An SMS's name (source SMS) only starts a record where none exists,
+    unconfirmed (``merge``). Never raises (but a deadlock)."""
     return _safely(f"{kind} {number}", lambda: observation(kind, number, received, when, payout_doctype, payout,
                                                             source, salary))
 
@@ -443,48 +509,70 @@ def backfill() -> dict:
 
 
 # ---------------------------------------------------------------- reading
-def _known(row) -> frappe._dict:
-    return frappe._dict(key=row.name, name=row.mpesa_name, times_paid=cint(row.times_paid),
+def _known(row, banks) -> frappe._dict:
+    bank = row.destination_type == PAYBILL and cstr(row.number).strip() in banks
+    return frappe._dict(key=row.name, name=plain(row.mpesa_name), times_paid=cint(row.times_paid),
                         first_seen=row.first_seen, last_seen=row.last_seen, last_payout=row.last_payout,
                         last_payout_doctype=row.last_payout_doctype, salary_only=cint(row.salary_only),
-                        bank=cint(row.bank), received=row.received, source=row.source,
-                        destination_type=row.destination_type, number=row.number)
+                        bank=1 if bank else 0, received=plain(row.received), source=row.source,
+                        destination_type=row.destination_type, number=row.number,
+                        employee_payee=cint(row.get("employee_payee")), confirmed=1 if confirmed(row) else 0)
 
 
-def lookup(keys) -> dict:
+def lookup(keys, banks=None) -> dict:
     """{key: _dict(name, times_paid, first_seen, last_seen, last_payout, last_payout_doctype,
-    salary_only, bank, received, source, destination_type, number)} of the destinations M-Pesa paid
-    before, by the list's key (``known_key`` of each of ``keys``: 'PB:400200:ACC' answers as
-    'PAYBILL:400200'). A destination never paid is not in it. No permission check: callers show a
-    salary-only record only to who may see salaries (``visible``)."""
+    salary_only, bank, received, source, destination_type, number, employee_payee, confirmed)} of the
+    destinations M-Pesa paid before, by the list's key (``known_key`` of each of ``keys``:
+    'PB:400200:ACC' answers as 'PAYBILL:400200'). A destination never paid is not in it. ``bank`` is
+    read from the current M-Pesa Bank Paybill list (``banks``: that list, read once by the caller),
+    not the record's, so a bank added since counts. No permission check: callers show a salary-only
+    record only to who may see salaries, and an employee's phone only to who may read claims
+    (``visible``)."""
     wanted = sorted({k for k in (known_key(x) for x in keys or []) if k})
     if not wanted or not ready():
         return {}
     rows = frappe.get_all(KNOWN, filters={"name": ["in", wanted]}, fields=list(FIELDS))
-    return {r.name: _known(r) for r in rows}
+    if banks is None:
+        banks = bank_paybills() if any(r.destination_type == PAYBILL for r in rows) else set()
+    return {r.name: _known(r, banks) for r in rows}
+
+
+def _words(name) -> set:
+    return pa._tokens(name)
 
 
 def verdict(typed_name, known) -> str:
     """The name typed (or expected) against M-Pesa's (pure): "new" when M-Pesa never paid the
-    destination (``known`` None or nameless); "match" for a bank's paybill (M-Pesa shows the bank's
-    name, so there is nothing to compare), when nothing was typed, or when the names match
-    (party_accounts.names_match: every word of the shorter in the longer); else "differs"."""
+    destination (``known`` None or nameless) or only an SMS named it (``confirmed``: no payout
+    confirmed the name, so it is never a match); "match" for a bank's paybill (M-Pesa shows the
+    bank's name, so there is nothing to compare), when nothing was typed, or when the names match
+    (party_accounts.names_match: every word of the shorter in the longer); "partial" when one word
+    was typed and M-Pesa's name has more ("Jane" for JANE WANJIKU: the first name of anyone); else
+    "differs"."""
     if not known:
         return NEW
     if cint(known.get("bank")):
         return MATCH
     name = cstr(known.get("name")).strip()
-    if not name:
+    if not name or not confirmed(known):
         return NEW
     typed = cstr(typed_name).strip()
-    if not typed or pa.names_match(typed, name):
+    if not typed:
         return MATCH
+    if pa.names_match(typed, name):
+        return PARTIAL if len(_words(typed)) == 1 and len(_words(name)) > 1 else MATCH
     return DIFFERS
 
 
-def visible(known, can_see_salaries: bool) -> bool:
-    """Whether a reader may see this record's name: a salary-only one only who may see salaries."""
-    return not (known and cint(known.get("salary_only")) and not can_see_salaries)
+def visible(known, can_see_salaries: bool, can_see_employees: bool = True) -> bool:
+    """Whether a reader may see this record's name: a salary-only one only who may see salaries, a
+    phone paid to an Employee only who may read Expense Claims or see salaries (``can_see_employees``)."""
+    if not known:
+        return True
+    if cint(known.get("salary_only")) and not can_see_salaries:
+        return False
+    return not (cint(known.get("employee_payee")) and not can_see_employees
+                and cstr(known.get("destination_type") or PHONE) == PHONE)
 
 
 def _day(value) -> str:
@@ -503,14 +591,17 @@ def _paid(info) -> str:
 
 
 def badge(info) -> dict | None:
-    """What the badge says, and its colour (green, orange, blue, gray), for ``describe``'s answer:
+    """What the badge says, and its colour (green, amber, orange, blue, gray), for ``describe``'s
+    answer:
     - green "M-Pesa: NAME · paid N times, last 28 Oct" (the name matches, or nothing was typed);
+    - amber "M-Pesa: NAME · only one name given: check it is this person" (partial);
     - orange "M-Pesa knows this number as NAME" (the typed name differs);
-    - blue "New number: never paid; check it with the person";
+    - blue "New number: never paid; check it with the person", or "From SMS, not confirmed by a
+      payout: NAME" (only an SMS named it);
     - gray "M-Pesa shows the bank's name only" (a bank's paybill), or "Paid before" (a salary-only
-      name, to who may not see salaries).
-    None for a destination that is no phone, till or paybill."""
-    status, name = info.get("status"), cstr(info.get("name")).strip()
+      name, or an employee's phone, to who may not see it).
+    None for a destination that is no phone, till or paybill. The text is plain: screens escape it."""
+    status, name = info.get("status"), plain(info.get("name"))
     if status == INVALID:
         return None
     if cint(info.get("bank")):
@@ -524,28 +615,34 @@ def badge(info) -> dict | None:
         return {"colour": "gray", "text": "Paid before"}
     if status == NEW_STATUS:
         return {"colour": "blue", "text": "New number: never paid; check it with the person"}
+    if status == KNOWN_STATUS and not cint(info.get("confirmed", 1)):
+        return {"colour": "blue", "text": f"From SMS, not confirmed by a payout: {name}"}
     if info.get("verdict") == DIFFERS:
         return {"colour": "orange", "text": f"M-Pesa knows this number as {name}"}
+    if info.get("verdict") == PARTIAL:
+        return {"colour": "amber", "text": f"M-Pesa: {name} · only one name given: check it is this person"}
     return {"colour": "green", "text": f"M-Pesa: {name} · {_paid(info)}"}
 
 
-def describe(key, known=None, typed_name=None, can_see_salaries: bool = True, banks=None) -> dict:
+def describe(key, known=None, typed_name=None, can_see_salaries: bool = True, banks=None,
+             can_see_employees: bool = True) -> dict:
     """What a reader is shown about one destination: key, destination_type, number, typed_name, bank,
-    status (known, new, hidden, invalid), verdict, and for a known one they may see: name,
-    times_paid, first_seen, last_seen, last_payout_doctype, last_payout, salary_only; and the badge."""
+    status (known, new, hidden, invalid), verdict, and for a known one they may see (``visible``):
+    name, times_paid, first_seen, last_seen, last_payout_doctype, last_payout, salary_only, confirmed
+    (0: only an SMS named it); and the badge."""
     kind, number = split_key(key)
     typed = cstr(typed_name).strip() or None
     out = {"key": known_key(key), "destination_type": kind, "number": number, "typed_name": typed, "bank": 0}
     if not out["key"]:
         out.update(status=INVALID, verdict=None)
-    elif known and not visible(known, can_see_salaries):
+    elif known and not visible(known, can_see_salaries, can_see_employees):
         out.update(status=HIDDEN, verdict=None, bank=cint(known.get("bank")))
     elif known:
-        out.update(status=KNOWN_STATUS, name=known.get("name"), times_paid=cint(known.get("times_paid")),
+        out.update(status=KNOWN_STATUS, name=plain(known.get("name")), times_paid=cint(known.get("times_paid")),
                    first_seen=cstr(known.get("first_seen")) or None, last_seen=cstr(known.get("last_seen")) or None,
                    last_payout_doctype=known.get("last_payout_doctype"), last_payout=known.get("last_payout"),
                    salary_only=cint(known.get("salary_only")), bank=cint(known.get("bank")),
-                   verdict=verdict(typed, known))
+                   confirmed=1 if confirmed(known) else 0, verdict=verdict(typed, known))
     else:
         bank = kind == PAYBILL and is_bank_paybill(number, banks)
         out.update(status=NEW_STATUS, bank=1 if bank else 0, verdict=verdict(typed, {"bank": 1} if bank else None))
@@ -558,30 +655,33 @@ def _plural(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
 
-def summary(targets, acknowledge: bool = True, can_see_salaries: bool | None = None) -> dict | None:
-    """The names on a confirm screen (money_out.send_confirm). ``targets``: per row of the screen,
-    (key, typed or expected name), or None for a row that pays no phone, till or paybill. Returns
-    None when no row has one; else:
+def summary(targets, acknowledge: bool = True, can_see_salaries: bool | None = None,
+            can_see_employees: bool | None = None) -> dict | None:
+    """The names on a confirm screen (money_out.send_confirm, and Pay Selected: money_out.schedule).
+    ``targets``: per row of the screen, (key, typed or expected name), or None for a row that pays no
+    phone, till or paybill. Returns None when no row has one; else:
     - ``rows``: per row, ``describe``'s answer (None for a row without a destination);
-    - ``counts``: {match, differs, new, bank, hidden};
-    - ``header``: "60 known and matching · 4 under another name · 5 new";
-    - ``acknowledge``: when ``acknowledge`` and a row differs, is new or hides its name, what the
-      sender ticks before Confirm works ("I checked the 4 different names and 5 new numbers"), which
-      confirm_send requires too; else None."""
+    - ``counts``: {match, partial, differs, new, bank, hidden} (an SMS's name alone counts as new);
+    - ``header``: "60 known and matching · 2 matching one name only · 4 under another name · 5 new";
+    - ``acknowledge``: when ``acknowledge`` and a row differs (in part too), is new or hides its
+      name, what the sender ticks before Confirm works ("I checked the 4 different names and 5 new
+      numbers"), which confirm_send and confirm_payment require too; else None."""
     targets = list(targets or [])
     if not any(t and t[0] for t in targets):
         return None
     if can_see_salaries is None:
         can_see_salaries = salary_access.can_see_salaries()
-    found = lookup(t[0] for t in targets if t and t[0])
+    if can_see_employees is None:
+        can_see_employees = can_see_salaries or sees_employee_phones()
     banks = bank_paybills() if any(t and cstr(t[0]).upper().startswith(("PAYBILL", "PB")) for t in targets) else set()
-    rows, counts = [], {"match": 0, "differs": 0, "new": 0, "bank": 0, "hidden": 0}
+    found = lookup((t[0] for t in targets if t and t[0]), banks)
+    rows, counts = [], {"match": 0, "partial": 0, "differs": 0, "new": 0, "bank": 0, "hidden": 0}
     for target in targets:
         if not target or not target[0]:
             rows.append(None)
             continue
         key, typed = target[0], target[1] if len(target) > 1 else None
-        info = describe(key, found.get(known_key(key)), typed, can_see_salaries, banks)
+        info = describe(key, found.get(known_key(key)), typed, can_see_salaries, banks, can_see_employees)
         rows.append(info)
         if info["status"] == INVALID:
             counts["new"] += 1  # a number no destination reads as: nobody can vouch for it
@@ -594,6 +694,8 @@ def summary(targets, acknowledge: bool = True, can_see_salaries: bool | None = N
     parts = []
     if counts["match"]:
         parts.append(f"{counts['match']} known and matching")
+    if counts["partial"]:
+        parts.append(f"{counts['partial']} matching one name only")
     if counts["differs"]:
         parts.append(f"{counts['differs']} under another name")
     if counts["new"]:
@@ -604,8 +706,10 @@ def summary(targets, acknowledge: bool = True, can_see_salaries: bool | None = N
     if counts["hidden"]:
         parts.append(f"{counts['hidden']} paid before (name not shown to you)")
     checked = []
-    if counts["differs"]:
-        checked.append(_plural(counts["differs"], "different name", "different names"))
+    differ = counts["differs"] + counts["partial"]  # one name given is checked like a name that differs
+    if differ:
+        checked.append(_plural(differ, "different name", "different names") if not counts["partial"] else
+                       _plural(differ, "name that differs or matches in part", "names that differ or match in part"))
     if counts["new"]:
         checked.append(_plural(counts["new"], "new number", "new numbers"))
     if counts["hidden"]:
@@ -712,7 +816,8 @@ def for_destinations(destinations=None) -> dict:
     """The desk badges (public/js/mpsa_known_names.js): {id: ``describe``'s answer} for each of
     ``destinations`` (a list, or its JSON: key strings, or dicts with an ``id`` and what ``resolve``
     reads). For who may read M-Pesa Known Names: the roles that prepare, approve or send payouts. A
-    salary-only name is shown only to who may see salaries (salary_access): the others get "Paid
+    salary-only name is shown only to who may see salaries (salary_access), an employee's phone only
+    to who may read Expense Claims or see salaries (``sees_employee_phones``): the others get "Paid
     before" and no name."""
     if not frappe.has_permission(KNOWN, "read"):
         frappe.throw("You may not read M-Pesa Known Names.", frappe.PermissionError)
@@ -721,24 +826,35 @@ def for_destinations(destinations=None) -> dict:
         frappe.throw(f"Ask for at most {LIMIT} numbers at a time.")
     cache = {}
     resolved = [(item.id, *resolve(item, cache)) for item in items]
-    found = lookup(key for _id, key, _typed in resolved if key)
-    see = salary_access.can_see_salaries()
     banks = bank_paybills() if any(key and key.startswith("PAYBILL:") for _id, key, _typed in resolved) else set()
-    return {item_id: describe(key, found.get(key), typed, see, banks) for item_id, key, typed in resolved}
+    found = lookup((key for _id, key, _typed in resolved if key), banks)
+    see = salary_access.can_see_salaries()
+    employees = see or sees_employee_phones()
+    return {item_id: describe(key, found.get(key), typed, see, banks, employees) for item_id, key, typed in resolved}
 
 
 # ---------------------------------------------------------------- permission hooks (hooks.py)
 def query_conditions(user=None, doctype=None) -> str:
     """permission_query_conditions of M-Pesa Known Name: a salary-only record is listed only for who
-    may see salaries."""
+    may see salaries; a phone paid to an Employee (round 4.5 review) only for who may read Expense
+    Claims or see salaries. Tills and paybills are listed to all who read the list."""
     user = user or frappe.session.user
     if salary_access.can_see_salaries(user):
         return ""
-    return f"COALESCE(`tab{KNOWN}`.salary_only, 0) = 0"
+    conditions = [f"COALESCE(`tab{KNOWN}`.salary_only, 0) = 0"]
+    if not sees_employee_phones(user):
+        conditions.append(f"(COALESCE(`tab{KNOWN}`.employee_payee, 0) = 0 "
+                          f"OR COALESCE(`tab{KNOWN}`.destination_type, '') != '{PHONE}')")
+    return " AND ".join(conditions)
 
 
 def has_permission(doc, ptype=None, user=None, debug=False) -> bool:
-    """has_permission of M-Pesa Known Name: a salary-only record only for who may see salaries.
-    True leaves the role permissions as they are (v16 needs True, not None)."""
+    """has_permission of M-Pesa Known Name: a salary-only record only for who may see salaries, a
+    phone paid to an Employee only for who may read Expense Claims or see salaries. True leaves the
+    role permissions as they are (v16 needs True, not None)."""
     user = user or frappe.session.user
-    return not cint(doc.get("salary_only")) or salary_access.can_see_salaries(user)
+    if cint(doc.get("salary_only")) and not salary_access.can_see_salaries(user):
+        return False
+    if cint(doc.get("employee_payee")) and cstr(doc.get("destination_type") or PHONE) == PHONE:
+        return sees_employee_phones(user)
+    return True

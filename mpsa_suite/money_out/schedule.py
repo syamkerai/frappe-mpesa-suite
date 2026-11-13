@@ -5,7 +5,10 @@ may move a line's day until it is sent. On the day, an M-Pesa Payer or Manager t
 the "M-Pesa Payments Due" report and presses Pay Selected. prepare_payment shows a summary per
 payee and per shortcode with the balances; confirm_payment pays only with the token it issued,
 at least 5 seconds later, once, for the same user (the browser keeps Confirm disabled for those
-5 seconds too). Nothing is ever paid automatically.
+5 seconds too). Nothing is ever paid automatically. Round 4.5 review: the summary shows each
+payee's M-Pesa name (known_names), and a line whose number M-Pesa knows under another name (or by
+one name only), never paid, or hides from the payer is paid only once the payer ticked that they
+checked it (confirm_payment's ``acknowledged``, names_summary), as Send via M-Pesa does.
 
 Suppliers are paid by B2B (paybill, till or bank account; a supplier's phone is not paid from a
 schedule yet). Employees are paid to their approved Employee M-Pesa Account: a bank account,
@@ -950,6 +953,52 @@ def _age(as_of) -> str | None:
     return f"{minutes // 1440} days"
 
 
+def _name_target(line) -> tuple | None:
+    """(known-name key, expected name) of a line, for known_names.summary (round 4.5 review): where it
+    pays (its route and destination: '888880 / ACME-1' reads as paybill 888880) and the name M-Pesa
+    should show: the approved account's Expected Name, else the party's name, else the Payee Name (a
+    number not saved on a supplier). None for a line that pays no phone, till or paybill."""
+    from . import known_names
+
+    key = known_names.key_of(line.get("route"), cstr(line.get("destination")).split("/")[0].strip())
+    if not key:
+        return None
+    doctype, account = cstr(line.get("payee_account_doctype")).strip(), cstr(line.get("payee_account")).strip()
+    expected = frappe.db.get_value(doctype, account, "expected_name") if (
+        doctype in PARTY_ACCOUNT.values() and account) else None
+    field = send_confirm.PARTY_NAME.get(cstr(line.get("party_type")))
+    if not cstr(expected).strip() and field and line.get("party"):
+        expected = frappe.db.get_value(line.party_type, line.party, field)
+    return key, cstr(expected or line.get("payee_name")).strip() or None
+
+
+def names_summary(lines) -> dict | None:
+    """The M-Pesa names of the lines Pay Selected pays (known_names.summary, as Send via M-Pesa shows
+    them): each line's known name against its expected one, the counts, and what the payer ticks when
+    a number is new, known under another name (or by one name only) or hidden from them. None when
+    no line pays a phone, till or paybill."""
+    from . import known_names
+
+    return known_names.summary([_name_target(line) for line in lines], acknowledge=True)
+
+
+def _ticked(value) -> bool:
+    return cstr(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _check_names(items, acknowledged) -> None:
+    """Round 4.5 review: Pay Selected pays numbers whose M-Pesa name differs, matches in part, is new
+    or is hidden from the payer only once they ticked that they checked them (the names read again
+    now: a Result that came since counts), as confirm_send does."""
+    if _ticked(acknowledged):
+        return
+    lines = [line for line in (_line(cstr(i.get("line"))) for i in items or [] if i.get("line")) if line]
+    names = names_summary(lines)
+    if names and names.get("acknowledge"):
+        frappe.throw(f"These payments go to numbers whose M-Pesa names need checking ({names['header']}). Tick "
+                     f"\"{names['acknowledge']}\" and press Confirm again.", title="Check the M-Pesa names")
+
+
 def _shown(line, schedule) -> dict:
     """A line as the summary shows it."""
     dt, dn = _document(line)
@@ -965,15 +1014,18 @@ def prepare_payment(lines) -> dict:
     """The confirm step's summary for the ticked lines, and the token Confirm needs.
 
     Per payee and per shortcode and route, the grand total, each shortcode's balance with its age
-    and any shortfall, the lines left out and why. The token is bound to this user and the lines
-    as shown, used once, and works from 5 seconds to 10 minutes after this call."""
+    and any shortfall, the lines left out and why. Round 4.5 review: the M-Pesa names of the lines
+    (``known_names``: names_summary; each payee row's ``known_name``) and what the payer ticks
+    before Confirm works (``known_names.acknowledge``, which confirm_payment requires too). The
+    token is bound to this user and the lines as shown, used once, and works from 5 seconds to 10
+    minutes after this call."""
     require_named_user()
     require(PAYOUT_ROLES)
     names = _names(lines)
     if not names:
         frappe.throw("Tick the lines to pay.")
     user = frappe.session.user
-    headers, included, left_out, warnings, snapshot = {}, [], [], [], []
+    headers, included, left_out, warnings, snapshot, paying = {}, [], [], [], [], []
     for name in names:
         line = _line(name)
         if not line:
@@ -991,15 +1043,18 @@ def prepare_payment(lines) -> dict:
         warnings += [f"{item['payee']}: {w}" for w in check.warnings]
         earlier = sorted(e.name for e in owed.earlier_payouts(line.party)) if item["document_type"] == PI else []
         included.append(item)
+        paying.append(line)
         snapshot.append({"line": line.name, "amount": item["amount"], "planned_date": item["planned_date"],
                          "destination": cstr(line.destination), "modified": cstr(line.modified), "earlier": earlier})
+    known_names = names_summary(paying) if paying else None
+    known_of = dict(zip((line.name for line in paying), (known_names or {}).get("rows") or []))
     parties, routes = {}, {}
     for item in included:
         # one row per payee and paybill or till, so the payer reads where each amount goes
         key = (item["party_type"] or "", item["party"] or item["payee"], cstr(item["destination"]))
         p = parties.setdefault(key, {"payee": item["payee"], "party_type": item["party_type"], "party": item["party"],
                                      "route": item["route"], "destination": item["destination"], "lines": 0,
-                                     "amount": 0.0})
+                                     "amount": 0.0, "known_name": known_of.get(item["line"])})
         p["lines"] += 1
         p["amount"] = flt(p["amount"] + item["amount"], 2)
         key = (item["pay_from"], item["route"])
@@ -1027,6 +1082,7 @@ def prepare_payment(lines) -> dict:
         "balances": found_balances,
         "warnings": warnings,
         "not_included": left_out,
+        "known_names": known_names,
     }
 
 
@@ -1064,10 +1120,12 @@ class _Refused(Exception):
 
 
 @frappe.whitelist(methods=["POST"])
-def confirm_payment(token) -> dict:
+def confirm_payment(token, acknowledged=None) -> dict:
     """Pay the lines of a summary: once per token, by its user, no sooner than 5 seconds after it
-    was made. Each line is checked again under its locks and gets a submitted B2B request; the
-    requests are sent by send_batch after this commits."""
+    was made, and (round 4.5 review) with ``acknowledged`` when a line's M-Pesa name needs checking
+    (_check_names: refused before the token is used, so the payer ticks and confirms again). Each
+    line is checked again under its locks and gets a submitted B2B request; the requests are sent by
+    send_batch after this commits."""
     require_named_user()
     require(PAYOUT_ROLES)
     token = cstr(token).strip()
@@ -1082,6 +1140,7 @@ def confirm_payment(token) -> dict:
             frappe.throw("This summary was made for another user. Press Pay Selected yourself.")
         if _clock() - flt(data.get("issued_at")) < CONFIRM_DELAY:
             frappe.throw(f"Read the summary first: Confirm works {CONFIRM_DELAY} seconds after it opens.")
+        _check_names(data.get("lines"), acknowledged)
         get_cache().delete_value(_token_key(token))  # used once, whatever happens next
     batch = f"{now_datetime():%y%m%d%H%M%S}-{frappe.generate_hash(length=4)}"
     sent, refused, touched, requests, groups = [], [], set(), [], {}
