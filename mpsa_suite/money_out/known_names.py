@@ -264,14 +264,19 @@ def observation(kind, number, received, when=None, payout_doctype=None, payout=N
 
 def b2c_observation(request, source=B2C_RESULT):
     """What a Paid B2C Disbursement Request says (``receiver_public_name`` for its phone), or None.
-    A payout whose party is an Employee marks the phone ``employee_payee``."""
+    A payout whose party is an Employee marks the phone ``employee_payee``; so does a party-less one
+    whose row names the Employee it pays (a bulk sheet's: partyless.payee_employee)."""
     if _get(request, "status") != "Paid":
         return None
+    employee = cstr(_get(request, "party_type")).strip() == EMPLOYEE
+    if not employee and not cstr(_get(request, "party_type")).strip() and _get(request, "reference_doctype"):
+        from . import partyless
+
+        employee = bool(partyless.payee_employee(request))
     return observation(PHONE, _get(request, "phone_number"), _get(request, "receiver_public_name"),
                        when=_get(request, "transaction_completed_datetime") or _get(request, "creation"),
                        payout_doctype=B2C_REQUEST, payout=_get(request, "name"), source=source,
-                       salary=salary_access.is_salary_line(request),
-                       employee=cstr(_get(request, "party_type")).strip() == EMPLOYEE)
+                       salary=salary_access.is_salary_line(request), employee=employee)
 
 
 def b2b_kind(command_id) -> str | None:

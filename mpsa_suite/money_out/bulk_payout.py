@@ -338,7 +338,10 @@ def clean_row(row, doc, ctx, warnings) -> None:
     else:
         if stale and row.payee_name == stale:
             row.payee_name = given  # the name filled in for the row's earlier number, not this one
-        row.known_flag = KNOWN if f"B2C:{msisdn}" in ctx.records else NEW
+        # a name only an SMS gave is no payout's: the number counts as new (known_names.confirmed)
+        from . import known_names
+
+        row.known_flag = KNOWN if known_names.confirmed(ctx.records.get(f"B2C:{msisdn}")) else NEW
     if not row.payee_name:
         frappe.throw(f"Row #{idx}: enter the Payee Name.")
     if not is_safaricom(msisdn):
@@ -913,11 +916,12 @@ def retry_failed(sheet: str, b2c_settings: str | None = None) -> dict:
 
 
 def _new_numbers(rows) -> set:
-    """The phones of ``rows`` M-Pesa never paid (no M-Pesa Known Name record at all)."""
+    """The phones of ``rows`` M-Pesa never paid: no M-Pesa Known Name record, or only one an SMS gave
+    (no payout's result has named the number: known_names.confirmed)."""
     from . import known_names
 
     found = known_names.lookup(f"B2C:{r.phone}" for r in rows)
-    return {r.phone for r in rows if f"B2C:{r.phone}" not in found}
+    return {r.phone for r in rows if not known_names.confirmed(found.get(f"B2C:{r.phone}"))}
 
 
 def _test_paid(row, payouts) -> float:
@@ -1416,7 +1420,7 @@ def _sheet_row(reference_row, sheet=None):
         return None, is_test
     row = frappe.db.get_value(ROW, name, ["name", "idx", "parent", "parenttype", "payee_name", "typed_name",
                                           "mpesa_name", "phone", "amount", "status", "verification", "project",
-                                          "expense_type", "bookings"], as_dict=True)
+                                          "expense_type", "bookings", "employee"], as_dict=True)
     if row and (row.parenttype != SHEET or (sheet and row.parent != sheet)):
         row = None
     return row, is_test
@@ -1529,6 +1533,12 @@ class BulkPayoutHandler(partyless.Handler):
         if status != 1:
             return None  # not booked yet; or booked by an entry carrying the receipt, found as usual
         return JE, journal, flt(request.amount, 2)
+
+    def employee(self, request) -> str | None:
+        """The Employee whose phone the row pays (filled from the phone at save), for known_names: such a
+        phone's M-Pesa name is shown only to who may see an employee's (round 4.5 review)."""
+        found, _is_test = _sheet_row(request.get("reference_row"), request.get("reference_name"))
+        return (cstr(found.get("employee")).strip() or None) if found else None
 
     def describe(self, row) -> dict:
         found, is_test = _sheet_row(row.get("reference_row"), row.get("reference_name"))

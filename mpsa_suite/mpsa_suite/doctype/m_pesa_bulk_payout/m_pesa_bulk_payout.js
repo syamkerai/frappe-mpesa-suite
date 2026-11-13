@@ -303,7 +303,14 @@ const mpsa_bulk = {
 					const rows = (frm.doc.rows || []).map((row, i) => [row, (names.rows || [])[i]]);
 					const listed = (verdict) =>
 						rows
-							.filter(([, info]) => info && (info.verdict === verdict || (verdict === "new" && info.status === "new")))
+							// a partial match (one word of M-Pesa's name) is listed with the other names
+							.filter(
+								([, info]) =>
+									info &&
+									(info.verdict === verdict ||
+										(verdict === "differs" && info.verdict === "partial") ||
+										(verdict === "new" && info.status === "new"))
+							)
 							.map(([row, info]) => `<li>#${row.idx} ${e(row.typed_name || row.payee_name || "")} ${e(row.phone || "")}: ${mpsa_known_names.badge_html(info)}</li>`)
 							.join("");
 					let done = false;
@@ -315,7 +322,7 @@ const mpsa_bulk = {
 								fieldname: "names",
 								options:
 									`<p>${e(names.header || "")}</p>` +
-									`<details open><summary>${__("Known under another name")}</summary><ul>${listed("differs")}</ul></details>` +
+									`<details open><summary>${__("Known under another name, or only partly")}</summary><ul>${listed("differs")}</ul></details>` +
 									`<details open><summary>${__("New numbers")}</summary><ul>${listed("new")}</ul></details>`,
 							},
 							{ fieldtype: "Check", fieldname: "checked", label: names.acknowledge },

@@ -71,7 +71,9 @@ BANK_FIELDS = ["name", "institution_name", "paybill", "bank", "enabled", "receiv
                "account_number_pattern", "observed_receiver_name"]
 # The number M-Pesa puts before a name: "522522 - KCB Paybill AC", "2547****0111 - JANE", and with an
 # en-dash or em-dash as in one of Safaricom's own samples
-_NUMBER_PREFIX = re.compile(r"^\s*([0-9][0-9*xX]*)\s*[-\u2013\u2014]\s*")
+# a number in front of the name: "254711000999 - JANE DOE" (any length, with a dash), or with no dash
+# "254711000999 JANE DOE" / "+254711000999 JANE" (5 digits or more, so "24 HOUR SHOP" keeps its 24)
+_NUMBER_PREFIX = re.compile(r"^\s*\+?(?:([0-9][0-9*xX]*)\s*[-\u2013\u2014]\s*|([0-9][0-9*xX]{4,})\s+(?=[^\W\d_]))")
 
 
 class Profile(frappe._dict):
@@ -691,7 +693,7 @@ def number_prefix(name) -> str | None:
     """The number M-Pesa puts before the name ("522522 - KCB Paybill AC" gives 522522; a masked
     phone keeps its stars), or None."""
     found = _NUMBER_PREFIX.match(cstr(name))
-    return found.group(1) if found else None
+    return (found.group(1) or found.group(2)) if found else None
 
 
 def without_number(name) -> str:

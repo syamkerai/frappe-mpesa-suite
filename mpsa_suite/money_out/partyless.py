@@ -157,6 +157,11 @@ class Handler:
     def booked(self, row) -> int | None:
         raise NotImplementedError
 
+    def employee(self, request) -> str | None:
+        """The Employee a payout pays, when its row says so (a bulk sheet's row filled from the phone);
+        known_names marks such a phone as an employee's. ``request`` carries ``reference_row``."""
+        return None
+
     def statement_entry(self, request):
         return None
 
@@ -244,6 +249,23 @@ def handlers() -> dict:
             out[doctype] = handler
     out.update(_REGISTERED)
     return out
+
+
+def payee_employee(request) -> str | None:
+    """The Employee a party-less payout pays, as its handler says (Handler.employee), or None: for a
+    payout of an unregistered DocType, a row with no Employee, or a handler that cannot tell."""
+    handler = handler_for(cstr(_value(request, "reference_doctype")).strip())
+    if not handler:
+        return None
+    ref = cstr(_value(request, "b2c_payment_disbursement_reference")).strip()
+    paying = frappe._dict(request.as_dict() if hasattr(request, "as_dict") else dict(request))
+    paying.reference_row = frappe.db.get_value(ROW, ref, "reference_row") if ref else None
+    try:
+        return cstr(_call(handler, "employee", paying)).strip() or None
+    except Exception:
+        frappe.log_error(title=f"M-Pesa party-less payee's employee not read: {_value(request, 'name')}"[:140],
+                         message=frappe.get_traceback())
+        return None
 
 
 def handler_for(doctype):

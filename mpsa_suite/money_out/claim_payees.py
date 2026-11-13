@@ -115,7 +115,9 @@ LINE_FIELDS = ("name", "idx", "parent", "parenttype", "payee_type", "payee_name"
 PASTE_LIMIT = 1000
 # The number M-Pesa puts before a name: "522522 - KCB Paybill AC", "2547****0111 - JANE" (also after
 # an en-dash or em-dash); party_accounts.number_prefix after round 4's payee accounts
-_NUMBER_PREFIX = re.compile(r"^\s*([0-9][0-9*xX]*)\s*[-–—]\s*")
+# a number in front of the name: "254711000999 - JANE DOE" (any length, with a dash), or with no dash
+# "254711000999 JANE DOE" / "+254711000999 JANE" (5 digits or more, so "24 HOUR SHOP" keeps its 24)
+_NUMBER_PREFIX = re.compile(r"^\s*\+?(?:([0-9][0-9*xX]*)\s*[-–—]\s*|([0-9][0-9*xX]{4,})\s+(?=[^\W\d_]))")
 
 
 def settings() -> frappe._dict:
@@ -917,7 +919,7 @@ def _line_of(doctype: str, name: str) -> str | None:
 # ---------------------------------------------------------------- the name M-Pesa paid
 def number_prefix(name) -> str | None:
     found = _NUMBER_PREFIX.match(cstr(name))
-    return found.group(1) if found else None
+    return (found.group(1) or found.group(2)) if found else None
 
 
 def _same_number(prefix: str, line) -> bool:
