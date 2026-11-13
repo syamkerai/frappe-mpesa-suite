@@ -587,6 +587,10 @@ def _warnings(doc) -> list:
     if doc.doctype == B2B:
         refused = b2b.refused_warning(doc.get("receiver_shortcode"), doc.get("command_id"), exclude=doc.name)
         return [refused] if refused else []
+    if doc.doctype == B2C:
+        from . import partyless
+
+        return partyless.send_warnings(doc)  # rows no party names: their document's (a short balance)
     if doc.doctype not in ACCOUNTS:
         return []
     p = pa.profile(doc)

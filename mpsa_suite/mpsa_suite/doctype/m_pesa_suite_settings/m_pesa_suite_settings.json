@@ -99,6 +99,7 @@
   "claim_payee_employee_names",
   "bulk_payouts_section",
   "bulk_payout_book_after_hours",
+  "verify_new_numbers",
   "staff_advance_settle_days",
   "column_break_bulk_payouts",
   "pay_via_staff_users",
@@ -579,6 +580,13 @@
    "label": "Book a Bulk Payout's Paid Rows While One Waits After (Hours)",
    "default": "2",
    "description": "A bulk payout sheet books its paid rows in one Journal Entry once no row waits for M-Pesa's answer. A row still waiting this many hours after the send no longer holds the others back: the paid rows are booked, and the late row gets a small Journal Entry of its own when it is paid."
+  },
+  {
+   "fieldname": "verify_new_numbers",
+   "fieldtype": "Check",
+   "label": "Pay New Numbers KES 10 First",
+   "default": "0",
+   "description": "What a new bulk payout sheet starts with (each sheet can change it before its approval). A number M-Pesa never paid first gets KES 10; the rest is paid only after the Result's name matches the name given, and on a mismatch the row stops for an M-Pesa Manager. Costs KES 10 and one M-Pesa charge more per new number."
   },
   {
    "fieldname": "staff_advance_settle_days",

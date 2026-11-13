@@ -218,6 +218,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | B2C Payment Disbursement | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` | `rwcadRepmh` | `rwcadRepmh` |  |  |  |
 | Employee M-Pesa Account |  | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |  |
 | M-Pesa Bank Paybill | `rwcdRe` | `rwcdRe` | `rRe` |  | `rRe` | `rRe` | `rRe` | `rRe` | `rRe` |  |  | `rRe` |  |
+| M-Pesa Bulk Payout | `rRep` | `rwcsxadRepmh` | `rRp` |  | `rRep` | `rwcsxadRepmh` | `rwcdRepmh` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |
 | M-Pesa Known Name |  | `rRe` | `r` |  |  | `r` | `r` | `r` | `r` | `r` |  | `r` |  |
 | M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |  |
@@ -312,6 +313,16 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.b2b_entries.entry_facts` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.make_entry` | FINANCE_ROLES + create and submit PE/JE (posted at once) + read request | roles:FINANCE_ROLES, perm |
 | `money_out.b2b_entries.refresh_entry_now` | FINANCE_ROLES + read request | roles:FINANCE_ROLES, perm |
+| `money_out.bulk_payout.book_now` | M-Pesa Manager or Accounts Manager + read the sheet | roles:M-Pesa Manager, roles:Accounts Manager, perm |
+| `money_out.bulk_payout.check_now` | PAYOUT_ROLES + read the sheet | roles:PAYOUT_ROLES, perm |
+| `money_out.bulk_payout.correct_phone` | ADMIN_ROLES, a named login + read the sheet | via:_manager_row |
+| `money_out.bulk_payout.mark_not_paid` | ADMIN_ROLES, a named login + read the sheet | via:_manager_row |
+| `money_out.bulk_payout.parse_rows` | Write the sheet (create one, before its first save) | perm |
+| `money_out.bulk_payout.pay` | PREPARE_ROLES + read the sheet | roles:PREPARE_ROLES, perm |
+| `money_out.bulk_payout.release_row` | ADMIN_ROLES, a named login + read the sheet | via:_manager_row |
+| `money_out.bulk_payout.retry_failed` | PREPARE_ROLES + read the sheet | roles:PREPARE_ROLES, perm |
+| `money_out.bulk_payout.settle_row` | ADMIN_ROLES, a named login + read the sheet | via:_manager_row |
+| `money_out.bulk_payout.sheet_state` | Read the sheet (create one, before its first save) | perm |
 | `money_out.claim_payees.claim_state` | Read the Expense Claim | perm |
 | `money_out.claim_payees.clear_staff_flag` | ADMIN_ROLES, a named login + read the Expense Claim | roles:ADMIN_ROLES, via:require_named_user, perm |
 | `money_out.claim_payees.mpesa_name` | Create or write Expense Claims | perm |

@@ -78,7 +78,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "Disbursements",
-   "link_count": 7,
+   "link_count": 8,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
@@ -149,6 +149,16 @@
    "label": "Payment Schedule",
    "link_count": 0,
    "link_to": "M-Pesa Payment Schedule",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Bulk Payout",
+   "link_count": 0,
+   "link_to": "M-Pesa Bulk Payout",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"

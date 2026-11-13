@@ -99,6 +99,14 @@ DOCTYPES = {
         MM: "rRe",
         MP: "r", AM: "r", AU: "r", HM: "r", HU: "r", EA: "r", PM: "r",
     },
+    # Round 4.5: casual wages and overtime paid in bulk (money_out.bulk_payout). Prepared by Accounts and HR
+    # (and M-Pesa Manager); submitted (approved), cancelled and amended by a named M-Pesa Manager or Accounts
+    # Manager; read by the M-Pesa Payer who sends its batches. Its rows' payouts follow the B2C rights.
+    "M-Pesa Bulk Payout": {
+        SM: "rRep", MM: ALL, AM: ALL,
+        AU: "rwcdRepmh", HM: "rwcdRepmh", HU: "rwcdRepmh",
+        MP: "rRp", MV: "rRep",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -354,6 +362,24 @@ ENDPOINTS = {
     # round 4.1: a destination flagged as a staff or self payment, cleared by a manager who was not involved
     "mpsa_suite.money_out.claim_payees.clear_staff_flag": (
         "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
+    # round 4.5: the bulk payout sheet (drafts only; an M-Pesa Payer sends each batch with Send via M-Pesa)
+    "mpsa_suite.money_out.bulk_payout.parse_rows": ("Write the sheet (create one, before its first save)", ("perm",)),
+    "mpsa_suite.money_out.bulk_payout.sheet_state": ("Read the sheet (create one, before its first save)", ("perm",)),
+    "mpsa_suite.money_out.bulk_payout.pay": ("PREPARE_ROLES + read the sheet", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.bulk_payout.retry_failed": (
+        "PREPARE_ROLES + read the sheet", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.bulk_payout.check_now": ("PAYOUT_ROLES + read the sheet", ("roles:PAYOUT_ROLES", "perm")),
+    "mpsa_suite.money_out.bulk_payout.book_now": (
+        "M-Pesa Manager or Accounts Manager + read the sheet",
+        ("roles:M-Pesa Manager", "roles:Accounts Manager", "perm")),
+    "mpsa_suite.money_out.bulk_payout.settle_row": (
+        "ADMIN_ROLES, a named login + read the sheet", ("via:_manager_row",)),
+    "mpsa_suite.money_out.bulk_payout.release_row": (
+        "ADMIN_ROLES, a named login + read the sheet", ("via:_manager_row",)),
+    "mpsa_suite.money_out.bulk_payout.correct_phone": (
+        "ADMIN_ROLES, a named login + read the sheet", ("via:_manager_row",)),
+    "mpsa_suite.money_out.bulk_payout.mark_not_paid": (
+        "ADMIN_ROLES, a named login + read the sheet", ("via:_manager_row",)),
     _D + "b2c_disbursement_request.b2c_disbursement_request.B2CDisbursementRequest.retry_failed_payment": (
         "PAYOUT_ROLES", ("roles:PAYOUT_ROLES",)),
     _D + "b2c_payment_disbursement.b2c_payment_disbursement.B2CPaymentDisbursement.retry_failed_payments": (
@@ -420,6 +446,8 @@ HELPERS = {
     "make_default": ("mpsa_suite.money_out.party_accounts", ("roles:default_roles", "perm")),
     "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:PREPARE_ROLES", "perm")),
     "_sendable": ("mpsa_suite.money_out.send_confirm", ("roles:PAYOUT_ROLES", "roles:ADMIN_ROLES", "perm")),
+    # round 4.5: a manager's action on a bulk payout row
+    "_manager_row": ("mpsa_suite.money_out.bulk_payout", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
 }
 
 GUEST_EVIDENCE = ("callback", "api", "page")

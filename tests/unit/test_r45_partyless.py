@@ -211,7 +211,9 @@ def test_the_hook_is_in_hooks_py_and_empty_until_a_feature_fills_it():
     tree = ast.parse((APP / "hooks.py").read_text(encoding="utf-8"))
     hooks = {n.targets[0].id: n.value for n in tree.body
              if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
-    assert ast.literal_eval(hooks["mpsa_partyless_payouts"]) == {}
+    # each feature adds its line (the bulk payout sheet first: tests/unit/test_r45_bulk_payout.py)
+    registered = ast.literal_eval(hooks["mpsa_partyless_payouts"])
+    assert all(isinstance(path, str) and path.startswith("mpsa_suite.money_out.") for path in registered.values())
 
 
 # ---------------------------------------------------------------- the disbursement and its rows

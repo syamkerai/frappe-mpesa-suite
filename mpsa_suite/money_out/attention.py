@@ -12,7 +12,9 @@ Sections, in hooks.py (read with ``frappe.get_hooks``, every app's in turn):
 
 Each path names a function taking no argument and returning ``(title, [lines])``: a short title
 ("Bulk payout sheets") and one line per item ("MBP-26-11-0003: 64 paid, 3 failed, KES 12,400 left").
-No lines (or None): the section has nothing to say today. ``register(section)`` adds a function
+No lines (or None): the section has nothing to say today. ``(title, [lines], link)``: also where the
+section's items are listed (a URL, e.g. the sheets' list): its title links there in the email, and
+the alert opens the first such link instead of M-Pesa Suite Settings. ``register(section)`` adds a function
 (or a path) in-process. A section that raises is logged and left out: it never stops the others.
 """
 
@@ -80,25 +82,35 @@ def collect() -> list:
             continue
         if not found:
             continue
-        title, lines = found
+        title, lines, *link = found
         lines = [cstr(line).strip() for line in lines or [] if cstr(line).strip()]
+        link = cstr(link[0]).strip() if link else ""
         if lines:
-            out.append((cstr(title).strip() or _name(section), lines))
+            title = cstr(title).strip() or _name(section)
+            out.append((title, lines, link) if link else (title, lines))
     return out
 
 
 def subject(collected) -> str:
     """The notification's subject: each section's title and how many lines it has."""
-    return f"{SUBJECT}: " + "; ".join(f"{title} ({len(lines)})" for title, lines in collected)
+    return f"{SUBJECT}: " + "; ".join(f"{title} ({len(lines)})" for title, lines, *_link in collected)
 
 
 def details(collected) -> str:
     """The email: each section's title and its lines, as HTML (the lines are escaped)."""
     parts = []
-    for title, lines in collected:
+    for title, lines, *link in collected:
         items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
-        parts.append(f"<p><b>{html.escape(title)}</b></p><ul>{items}</ul>")
+        heading = html.escape(title)
+        if link and link[0]:
+            heading = f'<a href="{html.escape(link[0], quote=True)}">{heading}</a>'
+        parts.append(f"<p><b>{heading}</b></p><ul>{items}</ul>")
     return "".join(parts)
+
+
+def link_of(collected) -> str | None:
+    """The first section's link (the alert opens it), or None."""
+    return next((link[0] for _title, _lines, *link in collected if link and link[0]), None)
 
 
 def daily_attention() -> None:
@@ -109,4 +121,6 @@ def daily_attention() -> None:
         return
     from .party_accounts import alert
 
-    alert(subject(collected), frappe._dict(doctype=SUITE, name=SUITE), details=details(collected))
+    link = link_of(collected)
+    extra = {"link": link} if link else {}
+    alert(subject(collected), frappe._dict(doctype=SUITE, name=SUITE), details=details(collected), **extra)

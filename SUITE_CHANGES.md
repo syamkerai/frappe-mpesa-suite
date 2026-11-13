@@ -7,6 +7,58 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## M-Pesa Bulk Payout: casual wages and overtime in bulk (2026-11-13, branch r4-5-bulk-payout)
+
+A sheet for paying many people by B2C at once, casuals and employees alike, each row with its own expense
+type, cost center, project and accounting dimensions, booked in one Journal Entry. Plan:
+[docs/BULK_PAYOUT_PLAN.md](docs/BULK_PAYOUT_PLAN.md). **`bench migrate` is needed** (two DocTypes, a setting,
+the rows' accounting dimension fields); then clear the cache.
+
+- **New DocTypes M-Pesa Bulk Payout** (`MBP-.YY.-.MM.-.####`, submittable) **and M-Pesa Bulk Payout Row**
+  (`money_out.bulk_payout`). Rows: name, phone, amount, Expense Claim Type (its account for the company,
+  shown read-only), cost center, project, the Employee whose phone it is (informational, for PAYE; the payout
+  names no party), M-Pesa's name for the number (round 4.3, locked; what was typed kept as Name Given), and the
+  results (status, progress, batch, receipt, paid, name check, journal). The sheet's Expense Type, Cost Center
+  and Project fill empty rows. hooks.py `accounting_dimension_doctypes` lists the row, and the migrate adds a
+  site's existing dimensions to it (Astral: Department).
+- **Draft**: Paste Rows (Excel, CSV or XLSX, and a template): claim payees' reader, with optional Expense
+  Type, Project and Cost Center columns (`claim_payees.read_rows(extra=...)`, unchanged without them; a
+  "Project Name" column is no payee's name). Each save checks a payable Safaricom number, whole shillings 10
+  to 250,000, an expense type with an account for the company, a cost center of the company that is no group,
+  an open project; warns of the same phone twice for one expense type.
+- **Nobody pays themselves** (`money_out.self_pay`): whoever saves, approves, prepares the batch of, or sends
+  a sheet is refused when a row pays their phone or their name.
+- **Approval = Submit** by a named M-Pesa Manager or Accounts Manager. When a number is new to M-Pesa or known
+  under another name, the form asks the approver to tick that they checked them; the server refuses the
+  submit without it (`names_checked`).
+- **Pay by M-Pesa** (preparers): one draft party-less B2C Payment Disbursement of the Draft rows
+  (`money_out.partyless`, its handler `bulk_payout.HANDLER`); an M-Pesa Payer sends it with Send via M-Pesa,
+  which shows each row, its M-Pesa name, and warns when the Utility balance looks short
+  (`partyless.send_warnings`, new). **Retry Failed** makes a new batch of the rows M-Pesa failed, never of a
+  row in doubt; **Check with M-Pesa Now** asks Transaction Status for the waiting ones (cooldown kept).
+  Managers: **Settle Outside M-Pesa**, **Correct Phone and Retry**, **Mark as Not Paid** (only after a status
+  query), **Release Held Row**.
+- **Pay new numbers KES 10 first**: M-Pesa Suite Settings `verify_new_numbers` (off; Bulk Payouts and Tills,
+  backfilled on upgraded sites) and the sheet's own tick. A number M-Pesa never paid gets KES 10 (paying row
+  `<row>/test`); when the Result's name matches, the next Pay by M-Pesa pays the rest; when not, the row is On
+  Hold for an M-Pesa Manager. The journal books the total; each payout's statement line takes its own part.
+- **One Journal Entry per sheet** (`book_sheet`, under the sheet's lock): once no row waits for M-Pesa, every
+  Paid payout not booked yet, debit lines grouped by expense account, cost center, project and dimensions,
+  credited to the shortcode's Utility GL, the sheet's name as Reference No. A row waiting longer than
+  `bulk_payout_book_after_hours` after its send no longer holds it; a payout paid later gets a small journal
+  of its own; a journal is never posted twice; when the last row to answer failed, a job books the rest.
+  A refused journal (closed period...) stays unbooked with the reason; the 15-minute sweep and **Book Now**
+  (M-Pesa Manager, Accounts Manager; a later posting date allowed) post it. Each statement line is reconciled
+  with its payout's part of the journal (partial allocation).
+- **Cancel** only while no row is queued, on its way or paid.
+- **Daily alert**: a "Bulk payout sheets" section (part paid, failed or held rows, a row waiting over 24
+  hours), linking the sheets' list; `money_out.attention` sections may now return a link, and
+  `party_accounts.alert` takes `link` (Notification Log's Link: the bell and the email open it).
+- M-Pesa workspace and sidebar: Bulk Payout. Permissions: preparers (Accounts User, HR User, HR Manager)
+  create and change drafts; M-Pesa Manager and Accounts Manager submit, cancel and amend; M-Pesa Payer reads.
+
+Tests: `tests/unit/test_r45_bulk_payout.py`; bench `mpsa_suite/money_out/test_bulk_payout.py` (v15 and v16).
+
 ## Know who you pay: the M-Pesa name at every step (2026-11-13, branch r4-5-bulk-payout)
 
 Daraja has no Hakikisha: nothing names the receiver before the money leaves. Every Result does, so

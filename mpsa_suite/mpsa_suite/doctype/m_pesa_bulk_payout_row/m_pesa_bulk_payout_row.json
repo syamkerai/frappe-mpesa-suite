@@ -1,0 +1,364 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 18:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "payee_name",
+  "phone",
+  "amount",
+  "expense_type",
+  "project",
+  "status",
+  "column_break_who",
+  "cost_center",
+  "expense_account",
+  "employee",
+  "remarks",
+  "names_section",
+  "mpesa_name",
+  "mpesa_name_from",
+  "column_break_names",
+  "typed_name",
+  "known_flag",
+  "accounting_dimensions_section",
+  "dimension_col_break",
+  "results_section",
+  "progress",
+  "payout",
+  "payout_request",
+  "sent_on",
+  "attempts",
+  "receipt",
+  "paid_on",
+  "paid_amount",
+  "column_break_results",
+  "receiver_name",
+  "name_verdict",
+  "name_note",
+  "error_message",
+  "journal_entry",
+  "bookings",
+  "verification_section",
+  "verification",
+  "test_request",
+  "column_break_test",
+  "test_receipt"
+ ],
+ "fields": [
+  {
+   "fieldname": "payee_name",
+   "fieldtype": "Data",
+   "label": "Payee Name",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "As the preparer gives it. A phone M-Pesa paid before takes the name M-Pesa paid it under (locked); what was typed is kept as Name Given when it differs."
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "Phone",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "A Safaricom M-Pesa number, kept as 2547..."
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount",
+   "reqd": 1,
+   "in_list_view": 1,
+   "columns": 1,
+   "description": "Whole shillings, 10 to 250,000."
+  },
+  {
+   "fieldname": "expense_type",
+   "fieldtype": "Link",
+   "label": "Expense Type",
+   "options": "Expense Claim Type",
+   "in_list_view": 1,
+   "columns": 2,
+   "description": "What the payment is for (Casual Salaries, Overtime): its account for the company is debited. Empty: the sheet's default."
+  },
+  {
+   "fieldname": "project",
+   "fieldtype": "Link",
+   "label": "Project",
+   "options": "Project",
+   "in_list_view": 1,
+   "columns": 1,
+   "description": "Empty: the sheet's default."
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nQueued\nIn Flight\nPaid\nFailed\nOn Hold\nCancelled",
+   "default": "Draft",
+   "in_list_view": 1,
+   "columns": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_who",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center",
+   "options": "Cost Center",
+   "description": "Empty: the sheet's default, else the company's."
+  },
+  {
+   "fieldname": "expense_account",
+   "fieldtype": "Link",
+   "label": "Expense Account",
+   "options": "Account",
+   "read_only": 1,
+   "description": "The Expense Type's account for the company, set when the sheet is saved."
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "read_only": 1,
+   "description": "Filled when the phone is an employee's, for reporting (overtime outside payroll: PAYE). It is informational: the payout names no party."
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Data",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "names_section",
+   "fieldtype": "Section Break",
+   "label": "Name on M-Pesa",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "mpesa_name",
+   "fieldtype": "Data",
+   "label": "Name on M-Pesa",
+   "read_only": 1,
+   "description": "The name M-Pesa paid this phone under before (M-Pesa Known Name)."
+  },
+  {
+   "fieldname": "mpesa_name_from",
+   "fieldtype": "Data",
+   "label": "Name From",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_names",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "typed_name",
+   "fieldtype": "Data",
+   "label": "Name Given",
+   "read_only": 1,
+   "description": "What was typed, when it is not M-Pesa's name for the phone."
+  },
+  {
+   "fieldname": "known_flag",
+   "fieldtype": "Select",
+   "label": "Number",
+   "options": "\nKnown\nDiffers\nNew",
+   "read_only": 1,
+   "description": "Known: M-Pesa paid it under this name; Differs: under another name; New: never paid, nobody can vouch for the name."
+  },
+  {
+   "fieldname": "accounting_dimensions_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting Dimensions",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "dimension_col_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "results_section",
+   "fieldtype": "Section Break",
+   "label": "Payout",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "progress",
+   "fieldtype": "Data",
+   "label": "Progress",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "payout",
+   "fieldtype": "Data",
+   "label": "B2C Payment Disbursement",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "The batch paying it now (not a link: the batch can still be cancelled or deleted)."
+  },
+  {
+   "fieldname": "payout_request",
+   "fieldtype": "Data",
+   "label": "B2C Disbursement Request",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "sent_on",
+   "fieldtype": "Datetime",
+   "label": "Sent On",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "receipt",
+   "fieldtype": "Data",
+   "label": "M-Pesa Receipt",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "paid_on",
+   "fieldtype": "Datetime",
+   "label": "Paid On",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "paid_amount",
+   "fieldtype": "Currency",
+   "label": "Paid by M-Pesa",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "What M-Pesa paid for this row in all (a KES 10 test included)."
+  },
+  {
+   "fieldname": "column_break_results",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "receiver_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Paid",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "name_verdict",
+   "fieldtype": "Select",
+   "label": "Name Check",
+   "options": "\nMatches\nDoes Not Match\nNot Verified",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "name_note",
+   "fieldtype": "Small Text",
+   "label": "Name Note",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Last Error or Note",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "journal_entry",
+   "fieldtype": "Data",
+   "label": "Journal Entry",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "The bulk Journal Entry that books this row (not a link, so the entry can be cancelled)."
+  },
+  {
+   "fieldname": "bookings",
+   "fieldtype": "Small Text",
+   "label": "Bookings",
+   "hidden": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "Which Journal Entry books each of the row's paid payouts (by B2C Disbursement Request)."
+  },
+  {
+   "fieldname": "verification_section",
+   "fieldtype": "Section Break",
+   "label": "KES 10 Test of a New Number",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "verification",
+   "fieldtype": "Select",
+   "label": "Test",
+   "options": "\nTesting\nVerified\nName Differs\nReleased",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "Testing: KES 10 sent first. Verified: M-Pesa paid the given name, the rest is paid next. Name Differs: the rest is held for an M-Pesa Manager. Released: a manager checked it and released the rest."
+  },
+  {
+   "fieldname": "test_request",
+   "fieldtype": "Data",
+   "label": "Test Payout",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_test",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "test_receipt",
+   "fieldtype": "Data",
+   "label": "Test Receipt",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-11-13 18:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "M-Pesa Bulk Payout Row",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

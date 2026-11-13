@@ -27,11 +27,28 @@ def after_migrate():
         create_erpnext_property_setters()
         create_payment_entry_mpesa_fields()
         backfill_b2b_entry_status()
+        create_bulk_payout_dimensions()  # round 4.5: the bulk payout rows' dimensions
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
         create_claim_payee_fields()
 
+
+def create_bulk_payout_dimensions():
+    """The accounting dimensions a site has (Astral: Department) on M-Pesa Bulk Payout Row, which
+    hooks.py lists in accounting_dimension_doctypes: ERPNext adds a dimension to those DocTypes when
+    the dimension is made, not to a DocType that comes later. Idempotent; never stops the migrate."""
+    if not frappe.db.exists("DocType", "M-Pesa Bulk Payout Row") or not frappe.db.exists("DocType",
+                                                                                      "Accounting Dimension"):
+        return
+    try:
+        from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+            create_accounting_dimensions_for_doctype,
+        )
+
+        create_accounting_dimensions_for_doctype("M-Pesa Bulk Payout Row")
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "M-Pesa Suite: accounting dimensions not added to bulk payout rows")
 
 
 def post_entries_at_once():

@@ -2230,13 +2230,24 @@ def _names(word: str, text: str) -> bool:
     return word in text
 
 
-def _header(cells) -> dict | None:
+def _header(cells, extra=None) -> dict | None:
     """{field: column} when the row names the columns (in any order). Each field takes the column
     its strongest word names, a column serving one field: 'Amount' is the amount before 'Pay To'
     or 'Payment Status', 'Phone' the phone before 'M-Pesa No.', 'Net Pay' before 'Rate (Kshs)'.
-    A Status, Receipt or Payout column is noted too, when there is one (_paid_already)."""
+    A Status, Receipt or Payout column is noted too, when there is one (_paid_already).
+    ``extra``: optional columns ({field: words, strongest first}: a bulk payout sheet's Expense
+    Type, Project, Cost Center). A column its strongest word names is theirs before the name, phone
+    and amount are looked for ('Project Name' is no payee's name); their other words come after."""
     texts = {i: cstr(cell).strip().lower() for i, cell in enumerate(cells)
              if cstr(cell).strip() and parse_amount(cell) is None and not _phone_cell(cell)}
+    reserved = {}
+    for field, words in (extra or {}).items():
+        column = next((i for i, text in texts.items() if _names(words[0], text) and i not in reserved.values()),
+                      None)
+        if column is not None:
+            reserved[field] = column
+    if reserved:
+        texts = {i: text for i, text in texts.items() if i not in reserved.values()}
     found = {}
     for rank in range(max(len(words) for words in _HEADERS.values())):
         for field, words in _HEADERS.items():
@@ -2250,6 +2261,14 @@ def _header(cells) -> dict | None:
         return None
     for field, word in _PAID_COLUMNS.items():
         column = next((i for i, text in texts.items() if word in text and i not in found.values()), None)
+        if column is not None:
+            found[field] = column
+    for field, words in (extra or {}).items():
+        column = reserved.get(field)
+        for word in words[1:] if column is None else ():
+            column = next((i for i, text in texts.items() if _names(word, text) and i not in found.values()), None)
+            if column is not None:
+                break
         if column is not None:
             found[field] = column
     return found
@@ -2349,14 +2368,15 @@ def _paid_already(cells, order) -> str | None:
     return None
 
 
-def read_rows(table) -> tuple:
+def read_rows(table, extra=None) -> tuple:
     """([{row, payee_name, phone, amount_text, problem}], [row numbers left out]) of a pasted or
     uploaded table of name, phone, amount. A row naming the columns (in any order) may come first
     or under title rows. What comes before the first payee row (a sheet's title, the column names,
     the notes a payee table's Download writes) is left out, and so are TOTAL rows and blank rows
     (blank ones are not listed); every other row is shown, a wrong one with its problem. A row
     marked paid (a Status, Receipt or Payout column, or such a cell) and a row whose amount is not
-    clear carry a problem."""
+    clear carry a problem. ``extra``: optional columns ({field: words}, _header); each row then
+    has those fields too: its cell, or "" (a table without column names has none)."""
     comma = [isinstance(row, _CommaRow) for row in table or []]
     table = [[_cell(c) for c in row or []] for row in table or []]
     table = [(n, row, comma[n - 1]) for n, row in enumerate(table, start=1) if any(row)]
@@ -2364,7 +2384,7 @@ def read_rows(table) -> tuple:
     for k, (_n, cells, _comma) in enumerate(table[:_HEADER_WITHIN]):
         if _payee_row(cells):
             break  # a payee row: no title above it, so no header below it either
-        order = _header(cells)
+        order = _header(cells, extra)
         if order:
             width = len(cells)
             left_out = [n for n, _cells, _comma in table[:k + 1]]
@@ -2387,7 +2407,11 @@ def read_rows(table) -> tuple:
             continue
         started = True
         problem = _paid_already(cells, order) if order else unclear
-        rows.append(frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount, problem=problem))
+        row = frappe._dict(row=n, payee_name=name, phone=phone, amount_text=amount, problem=problem)
+        for field in extra or {}:
+            column = (order or {}).get(field)
+            row[field] = cells[column] if column is not None and column < len(cells) else ""
+        rows.append(row)
     return rows, left_out
 
 
@@ -2396,11 +2420,13 @@ def table_rows(table) -> list:
     return read_rows(table)[0]
 
 
-def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
+def check_pasted(rows, claimant=None, existing=(), found=None, twice_ok: bool = False) -> list:
     """Each pasted row checked: a name, a number B2C may pay that is not another network's (B2C pays
     M-Pesa lines only; a number moved from another network is added by hand; a number of a block no
     network list names yet is taken, and the claim's save warns), whole shillings B2C may pay, never
-    an employee's phone, and no phone twice (in the list, or on the claim already)."""
+    an employee's phone, and no phone twice (in the list, or on the claim already). ``twice_ok``: a
+    phone may come twice (a bulk payout sheet pays one person's wages and overtime, and warns of a
+    phone twice for one expense type itself)."""
     found = found or frappe._dict(destinations={}, bank_numbers={})
     seen = {normalize_msisdn(p) for p in existing or [] if normalize_msisdn(p)}
     checked = []
@@ -2437,7 +2463,7 @@ def check_pasted(rows, claimant=None, existing=(), found=None) -> list:
                 flagged = found.blocked[f"B2C:{msisdn}"]
                 errors.append(f"blocked for claim payees: M-Pesa paid it under a staff member's name ({flagged.parent}, "
                               f"payee row #{flagged.idx})")
-            if msisdn in seen:
+            if msisdn in seen and not twice_ok:
                 errors.append("this phone is on the claim already, or earlier in the list")
             seen.add(msisdn)
         checked.append({"row": r.row, "payee_name": cstr(r.payee_name).strip(), "phone": msisdn or cstr(r.phone),

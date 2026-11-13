@@ -1,0 +1,364 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "MBP-.YY.-.MM.-.####",
+ "creation": "2026-11-13 18:00:00.000000",
+ "description": "Casual wages and overtime paid by M-Pesa B2C in bulk, to casuals and employees alike: a project, cost center and expense type per row, one Journal Entry after the payouts finish.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "company",
+  "posting_date",
+  "mpesa_settings",
+  "column_break_head",
+  "status",
+  "progress",
+  "verify_new_numbers",
+  "amended_from",
+  "defaults_section",
+  "expense_type",
+  "column_break_defaults",
+  "cost_center",
+  "column_break_defaults_2",
+  "project",
+  "rows_section",
+  "summary",
+  "rows",
+  "totals_section",
+  "total_rows",
+  "total_amount",
+  "column_break_totals",
+  "paid_amount",
+  "failed_amount",
+  "column_break_totals_2",
+  "left_amount",
+  "approval_section",
+  "names_checked",
+  "names_summary",
+  "column_break_approval",
+  "approved_by",
+  "approved_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Purpose",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "What these payments are, e.g. Casuals Site A week 45, or Overtime October."
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Posting Date",
+   "reqd": 1,
+   "default": "Today"
+  },
+  {
+   "fieldname": "mpesa_settings",
+   "fieldtype": "Link",
+   "label": "Pay From (B2C)",
+   "options": "Mpesa Settings",
+   "description": "The shortcode the rows are paid from (its Utility account). Empty: the company's only B2C shortcode."
+  },
+  {
+   "fieldname": "column_break_head",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nTo Pay\nPaying\nPartly Paid\nPaid\nCancelled",
+   "default": "Draft",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "progress",
+   "fieldtype": "Data",
+   "label": "Progress",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "verify_new_numbers",
+   "fieldtype": "Check",
+   "label": "Pay New Numbers KES 10 First",
+   "default": "0",
+   "description": "A number M-Pesa never paid gets KES 10 first; the rest is paid only after the Result's name matches the name given. On a mismatch the row stops for an M-Pesa Manager. Costs KES 10 and one M-Pesa charge more per new number. Defaults from M-Pesa Suite Settings."
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "options": "M-Pesa Bulk Payout",
+   "read_only": 1,
+   "no_copy": 1,
+   "print_hide": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "defaults_section",
+   "fieldtype": "Section Break",
+   "label": "Defaults for the Rows",
+   "description": "Each row takes these when its own is empty; any row can change them."
+  },
+  {
+   "fieldname": "expense_type",
+   "fieldtype": "Link",
+   "label": "Expense Type",
+   "options": "Expense Claim Type",
+   "description": "e.g. Casual Salaries, or Overtime Expense: its account for the company is debited."
+  },
+  {
+   "fieldname": "column_break_defaults",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "column_break_defaults_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "project",
+   "fieldtype": "Link",
+   "label": "Project",
+   "options": "Project"
+  },
+  {
+   "fieldname": "rows_section",
+   "fieldtype": "Section Break",
+   "label": "Payees",
+   "description": "Paste many at once (M-Pesa > Paste Rows: from Excel, or a CSV / XLSX file). Employees and casuals are all paid here; whoever prepares, approves or sends the sheet is never paid on it."
+  },
+  {
+   "fieldname": "summary",
+   "fieldtype": "HTML",
+   "label": "Summary"
+  },
+  {
+   "fieldname": "rows",
+   "fieldtype": "Table",
+   "label": "Rows",
+   "options": "M-Pesa Bulk Payout Row",
+   "reqd": 1
+  },
+  {
+   "fieldname": "totals_section",
+   "fieldtype": "Section Break",
+   "label": "Totals"
+  },
+  {
+   "fieldname": "total_rows",
+   "fieldtype": "Int",
+   "label": "Rows",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Total",
+   "read_only": 1,
+   "no_copy": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "paid_amount",
+   "fieldtype": "Currency",
+   "label": "Paid",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "failed_amount",
+   "fieldtype": "Currency",
+   "label": "Failed",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_totals_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "left_amount",
+   "fieldtype": "Currency",
+   "label": "Left to Pay",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "approval_section",
+   "fieldtype": "Section Break",
+   "label": "Approval",
+   "collapsible": 1,
+   "description": "Submitting the sheet is its approval, by a named M-Pesa Manager or Accounts Manager."
+  },
+  {
+   "fieldname": "names_checked",
+   "fieldtype": "Check",
+   "label": "Names Checked",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The approver ticked that they checked the numbers M-Pesa knows under another name and the new numbers (asked at Submit, checked on the server)."
+  },
+  {
+   "fieldname": "names_summary",
+   "fieldtype": "Small Text",
+   "label": "Names at Approval",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_approval",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1,
+   "no_copy": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-11-13 18:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "M-Pesa Bulk Payout",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "HR Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "HR User",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "M-Pesa Payer",
+   "read": 1,
+   "report": 1,
+   "print": 1
+  },
+  {
+   "role": "M-Pesa Viewer",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "search_fields": "title,company,status",
+ "show_title_field_in_link": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

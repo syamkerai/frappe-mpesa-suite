@@ -309,10 +309,19 @@ scheduler_events = {
 # DocTypes whose B2C payouts pay people no ERPNext party names (a bulk payout sheet's rows, a
 # petty cash phone's top-ups): {DocType: dotted path of its handler}. The handler checks, books
 # and reconciles its own rows (money_out.partyless); each feature adds its line.
-mpsa_partyless_payouts = {}
+mpsa_partyless_payouts = {
+    # round 4.5: casual wages and overtime paid in bulk (money_out.bulk_payout)
+    "M-Pesa Bulk Payout": "mpsa_suite.money_out.bulk_payout.HANDLER",
+}
 # The daily "needs attention" alert's sections: dotted paths of functions returning (title, [lines])
 # (money_out.attention); each feature adds its own.
-mpsa_attention_sections = []
+mpsa_attention_sections = [
+    "mpsa_suite.money_out.bulk_payout.attention_section",  # bulk payout sheets part paid, failed or waiting
+]
+
+# ERPNext adds the active accounting dimensions to these DocTypes (and to new ones as they are made):
+# a bulk payout row's dimensions go to its Journal Entry line (money_out.bulk_payout)
+accounting_dimension_doctypes = ["M-Pesa Bulk Payout Row"]
 
 # Testing
 # -------

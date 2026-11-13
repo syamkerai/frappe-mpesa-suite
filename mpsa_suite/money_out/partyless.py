@@ -75,6 +75,8 @@ The handler (``h`` below; ``row`` is the B2C Payment Disbursement Reference: the
   on its way and that the person retrying is not paid. Default: ``h.check_row(row, parent)``.
 - ``h.closed_period_hint(row, receipt)`` (optional): what staff do when ERPNext refuses the
   entry's date (a closed period). Default: a generic sentence.
+- ``h.send_warnings(parent)`` (optional): what the Send via M-Pesa summary warns of, which does
+  not stop the send (a short Utility balance): a list of sentences. Default: none.
 """
 
 import importlib
@@ -153,6 +155,9 @@ class Handler:
 
     def closed_period_hint(self, row, receipt: str) -> str | None:
         return None
+
+    def send_warnings(self, parent) -> list:
+        return []
 
 
 # ---------------------------------------------------------------- the registry
@@ -424,6 +429,20 @@ def self_pay_problem(parent, user: str | None = None, action: str = "send") -> s
     from .self_pay import self_pay_problem as problem
 
     return problem(user or frappe.session.user, rows, action)
+
+
+def send_warnings(parent) -> list:
+    """What the Send via M-Pesa summary warns of for the parent's party-less rows (its handler's
+    ``send_warnings``); [] for any other payout, or when the handler fails (logged)."""
+    rows = _partyless_rows(parent)
+    if not rows:
+        return []
+    try:
+        found = _call(handler_for(_value(rows[0], "reference_doctype")), "send_warnings", parent, default=[]) or []
+    except Exception:
+        frappe.log_error(title="M-Pesa party-less payout warnings failed", message=frappe.get_traceback())
+        return []
+    return [cstr(w).strip() for w in found if cstr(w).strip()]
 
 
 def check_not_own(parent) -> None:

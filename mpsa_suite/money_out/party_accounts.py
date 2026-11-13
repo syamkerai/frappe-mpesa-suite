@@ -808,13 +808,14 @@ def confirm_receiver_name(doc, adopt_name: bool = False) -> None:
 
 
 def alert(message, doc, roles=None, exclude=(), now: bool = False, rolled_back: bool = False,
-          details: str | None = None) -> None:
+          details: str | None = None, link: str | None = None) -> None:
     """A notification to the Notify Role (M-Pesa Suite Settings), or to the users holding one of
     ``roles``, but ``exclude`` (whoever the alert is about); the Notify Role's users when that
     leaves no one. Once this commits, as Frappe sends them; ``now``: made in this transaction (a
     migrate, whose queued alerts were never delivered); ``rolled_back``: queued straight away,
     for a refusal whose transaction is rolled back; ``details``: the email's body (HTML), when
-    there is more to say than the subject (money_out.attention's daily list). Never raises."""
+    there is more to say than the subject (money_out.attention's daily list); ``link``: where the
+    notification opens instead of ``doc`` (a list). Never raises."""
     try:
         from frappe.desk.doctype.notification_log.notification_log import (
             enqueue_create_notification,
@@ -831,6 +832,8 @@ def alert(message, doc, roles=None, exclude=(), now: bool = False, rolled_back: 
         content = {"type": "Alert", "subject": message, "document_type": doc.doctype, "document_name": doc.name}
         if details:
             content["email_content"] = details
+        if link:
+            content["link"] = link  # Notification Log's Link: the bell and the email open it
         if now:
             make_notification_logs(frappe._dict(content), users)
         elif rolled_back:
