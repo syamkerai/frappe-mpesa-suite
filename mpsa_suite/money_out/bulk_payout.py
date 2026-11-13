@@ -328,7 +328,9 @@ def clean_row(row, doc, ctx, warnings) -> None:
     if known:
         if row.payee_name and row.payee_name not in (known.name, stale):
             given = row.payee_name  # typed (by hand, a paste or the API), not a name M-Pesa filled in
-        row.typed_name = given if given and not pa.names_match(given, known.name) else None
+        from . import known_names  # a partial name is no match (round 4.5)
+
+        row.typed_name = given if given and not known_names.agrees(given, known.name) else None
         row.payee_name = row.mpesa_name = known.name
         row.mpesa_name_from = cp.name_from(known)
         row.known_flag = NAME_DIFFERS if row.typed_name else KNOWN
@@ -1138,7 +1140,9 @@ def correct_phone(sheet: str, row: str, phone: str | None = None, reason: str | 
                   "known_flag": NEW}
         known = cp.mpesa_names([msisdn]).get(msisdn)
         if known:
-            differs = not pa.names_match(given, known.name)
+            from . import known_names  # a partial name is no match (round 4.5)
+
+            differs = not known_names.agrees(given, known.name)
             values.update(payee_name=known.name, mpesa_name=known.name, mpesa_name_from=cp.name_from(known),
                           typed_name=given if differs else None, known_flag=NAME_DIFFERS if differs else KNOWN)
         if found.get("verification") == TESTING:

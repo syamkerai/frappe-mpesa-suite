@@ -83,3 +83,57 @@ def test_a_long_mpesa_error_never_overflows_the_rows_progress(claims_env):
     text = bulk._progress(bulk.FAILED, current, None)
     assert len(text) == bulk.PROGRESS_LENGTH and text.startswith("Payout failed: xxx") and text.endswith("…")
     assert bulk._fit("short") == "short" and bulk._fit(None) is None and bulk._fit("") is None
+
+
+# ---------------------------------------------------------------- the verification's last findings
+@pytest.mark.parametrize("header, row, amount", [
+    (["Name", "Phone", "Total", "Deductions", "Amount Payable"], ["Jane", "0711000333", "3000", "500", "2500"], "2500"),
+    (["Name", "Phone", "Total", "Advance", "Amount Due"], ["Jane", "0711000333", "3000", "500", "2500"], "2500"),
+    (["Name", "Phone", "Gross", "NSSF", "Net Pay"], ["Jane", "0711000333", "3000", "200", "2800"], "2800"),
+    (["Name", "Phone", "Days", "Rate", "Total"], ["Jane", "0711000333", "5", "600", "3000"], "3000"),
+])
+def test_what_is_paid_in_the_end_is_the_amount(claims_env, header, row, amount):
+    (got,) = claims_env.cp.table_rows([header, row])
+    assert got.amount_text == amount and not got.problem
+
+
+@pytest.mark.parametrize("header", [
+    ["Name", "Phone", "Gross", "Advance", "Balance"],
+    ["Name", "Phone", "Grand Total", "Loan"],
+])
+def test_past_a_deduction_a_total_or_gross_is_never_taken_as_the_amount(claims_env, header):
+    read = claims_env.cp.read_rows([header, ["Jane", "0711000333", "3000", "500", "2500"][:len(header)]])
+    assert read.columns["amount_column"] is None  # the user picks the column; nobody is paid the gross
+
+
+def test_a_paid_by_column_is_no_paid_mark_but_a_paid_remark_is(claims_env):
+    cp = claims_env.cp
+    (row,) = cp.table_rows([["Name", "Phone", "Amount", "Paid By"], ["Jane", "0711000333", "1500", "John Kamau"]])
+    assert not row.problem
+    for remark in ("Paid.", "paid on 3/11", "PAID via M-Pesa"):
+        (row,) = cp.table_rows([["Name", "Phone", "Amount", "Remarks"], ["Jane", "0711000333", "1500", remark]])
+        assert row.problem and "already" in row.problem, remark
+
+
+def test_column_names_are_plain_text_in_the_amount_picker(claims_env):
+    read = claims_env.cp.read_rows([["Name", "Phone", "Amount", "<img src=x onerror=alert(1)> Remarks"],
+                                    ["Jane", "0711000333", "1500", "ok"]])
+    labels = [c["label"] for c in read.columns["amount_choices"]]
+    assert len(labels) == 2 and all("<" not in label and ">" not in label for label in labels)
+
+
+def test_one_typed_word_is_no_full_agreement_with_mpesas_name(claims_env):
+    known_names = importlib.import_module("mpsa_suite.money_out.known_names")
+    assert not known_names.agrees("Otieno", "OTIENO OUMA")
+    assert known_names.agrees("Otieno Ouma", "OTIENO OUMA") and known_names.agrees("Jane Wanjiku", "JANE WANJIKU")
+    assert not known_names.agrees("Peter Kamau", "OTIENO OUMA")
+
+
+def test_a_claim_payees_payout_never_marks_the_phone_an_employees(claims_env):
+    known_names = importlib.import_module("mpsa_suite.money_out.known_names")
+    base = dict(status="Paid", phone_number="254711000333", receiver_public_name="254711000333 - JANE DOE",
+                name="B2C-9", party_type="Employee", reference_doctype="Expense Claim")
+    payee = known_names.b2c_observation(claims_env.frappe._dict(base, claim_payee="LN-1"))
+    own = known_names.b2c_observation(claims_env.frappe._dict(base, claim_payee=""))
+    assert payee and not payee.get("employee")  # a casual paid on the claim: the claimant is only the party
+    assert own and own.get("employee")  # the claimant reimbursed to their own phone

@@ -92,6 +92,7 @@ _TYPES = {
     "bank account (via bank paybill)": PAYBILL, "bank paybill (b2b)": PAYBILL,
 }
 # Where the name came from (source); an SMS's is confirmed by no payout
+B2C_ROW = "B2C Payment Disbursement Reference"
 B2C_RESULT, B2B_RESULT, SMS, HISTORY = "B2C Result", "B2B Result", "SMS", "History"
 # verdict(): the name typed (or expected) against M-Pesa's; "partial": one typed word in a longer name
 MATCH, DIFFERS, NEW, PARTIAL = "match", "differs", "new", "partial"
@@ -262,6 +263,17 @@ def observation(kind, number, received, when=None, payout_doctype=None, payout=N
                         employee=bool(employee) and kind == PHONE)
 
 
+def _paid_a_claim_payee(request) -> bool:
+    """The payout paid an Expense Claim's payee line (its batch row's ``claim_payee``, or the
+    ``claim_payee`` the history read put on it), not the claimant."""
+    if _get(request, "claim_payee") is not None:
+        return bool(cstr(_get(request, "claim_payee")).strip())
+    ref = cstr(_get(request, "b2c_payment_disbursement_reference")).strip()
+    if not ref:
+        return False
+    return bool(cstr(frappe.db.get_value(B2C_ROW, ref, "claim_payee")).strip())
+
+
 def b2c_observation(request, source=B2C_RESULT):
     """What a Paid B2C Disbursement Request says (``receiver_public_name`` for its phone), or None.
     A payout whose party is an Employee marks the phone ``employee_payee``; so does a party-less one
@@ -269,6 +281,9 @@ def b2c_observation(request, source=B2C_RESULT):
     if _get(request, "status") != "Paid":
         return None
     employee = cstr(_get(request, "party_type")).strip() == EMPLOYEE
+    if employee and _paid_a_claim_payee(request):
+        # a claim payee's payout names the claimant as its party: the phone is the payee's, no employee's
+        employee = False
     if not employee and not cstr(_get(request, "party_type")).strip() and _get(request, "reference_doctype"):
         from . import partyless
 
@@ -466,7 +481,14 @@ def _history(banks) -> list:
     seen = []
     b2c = frappe.get_all(B2C_REQUEST, filters={"status": "Paid", "receiver_public_name": ["is", "set"]},
                          fields=["name", "status", "phone_number", "receiver_public_name",
-                                 "transaction_completed_datetime", "creation", "reference_doctype", "party_type"])
+                                 "transaction_completed_datetime", "creation", "reference_doctype", "party_type",
+                                 "b2c_payment_disbursement_reference"])
+    # which payouts paid a claim's payee line (their party is the claimant): one read for all of them
+    refs = [r.b2c_payment_disbursement_reference for r in b2c if r.get("b2c_payment_disbursement_reference")]
+    payees = dict(frappe.get_all(B2C_ROW, filters={"name": ["in", refs], "claim_payee": ["is", "set"]},
+                                 fields=["name", "claim_payee"], as_list=True)) if refs else {}
+    for r in b2c:
+        r.claim_payee = payees.get(r.get("b2c_payment_disbursement_reference")) or ""
     seen += [b2c_observation(r, source=HISTORY) for r in b2c]
     links = [f for f in salary_access.B2B_DOCUMENT_FIELDS if frappe.db.has_column(B2B, f)]
     b2b = frappe.get_all(B2B, filters={"status": "Paid", "receiver_public_name": ["is", "set"]},
@@ -567,6 +589,13 @@ def verdict(typed_name, known) -> str:
     if pa.names_match(typed, name):
         return PARTIAL if len(_words(typed)) == 1 and len(_words(name)) > 1 else MATCH
     return DIFFERS
+
+
+def agrees(typed_name, name) -> bool:
+    """The typed name is M-Pesa's (a payout's) name, fully: "match", never "partial" ("Otieno" for
+    OTIENO OUMA) nor "differs". What the save paths use to keep a name given apart from M-Pesa's, so
+    a partial name is shown and acknowledged like a different one (round 4.5 verification)."""
+    return verdict(typed_name, {"name": name, "source": B2C_RESULT}) == MATCH
 
 
 def visible(known, can_see_salaries: bool, can_see_employees: bool = True) -> bool:

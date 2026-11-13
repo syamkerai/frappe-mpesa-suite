@@ -325,7 +325,9 @@ def clean_line(row, own=None, warnings=None, names=None) -> None:
             # what the claimant gave is kept when it is not M-Pesa's name: a wrong number, or one with a new owner
             if row.payee_name and row.payee_name not in (known.name, stale):
                 given = row.payee_name  # typed (by hand or the API), not a name M-Pesa filled in
-            row.typed_name = given if given and not pa.names_match(given, known.name) else None
+            from . import known_names  # a partial name is no match (round 4.5)
+
+            row.typed_name = given if given and not known_names.agrees(given, known.name) else None
             row.payee_name = row.mpesa_name = known.name
             row.mpesa_name_from = name_from(known)
             if row.typed_name and warnings is not None:
@@ -2177,11 +2179,11 @@ _CURRENCY = r"(\s*[(\[]?\s*k(es|shs?)\.?\s*[)\]]?)?\s*"
 _TOTAL_HEADER = re.compile(r"total(\s+(pay|amount|wages?|due|payable|kes|kshs?))?(\s*\(k(es|shs?)\))?")
 _AMOUNT_WORDS = tuple(re.compile(p) for p in (
     r"\bnet\b",  # Net Pay, Net Amount, Net Salary
+    r"\bamount\s+payable\b|\bpayable\b|\bto\s+(be\s+)?pa(y|id)\b",
+    r"\bamount\s+due\b|\bbalance\s+due\b",
     r"\btotal\s+amount\b",
     r"\bgrand\s+total\b",
     rf"^{_TOTAL_HEADER.pattern}$",  # "Total", "Total Pay", "Total (KES)": never "Total Days"
-    r"\bamount\s+payable\b|\bpayable\b|\bto\s+(be\s+)?pa(y|id)\b",
-    r"\bamount\s+due\b",
     r"\bgross\s+pay\b",
     r"\bgross\b",
     r"\bwages?\b",
@@ -2193,10 +2195,16 @@ _AMOUNT_WORDS = tuple(re.compile(p) for p in (
 ))
 # A rate or a part of the pay is never the amount, whatever its "(KES)" says
 _RATE_OR_PART = re.compile(r"\brates?\b|per\s*(day|hour|hr)\b|/\s*(day|hour|hr|h)\b|\bdaily\b|\bhourly\b|\badvances?\b|"
-                           r"\bdeductions?\b|\bbalance\b|\bdays?\b|\bhours?\b|\bhrs?\b|\bqty\b|\bquantity\b|\bunits?\b")
+                           r"\bdeductions?\b|\bbalance\b(?!\s+due)|\bdays?\b|\bhours?\b|\bhrs?\b|\bqty\b|\bquantity\b|"
+                           r"\bunits?\b|\bloans?\b|\bfines?\b|\bnssf\b|\bnhif\b|\bshif\b|\bpaye\b|\blevy\b|\bless\b")
+# Something taken off the pay: past such a column, a total or a gross is no longer what is paid
+_DEDUCTION = re.compile(r"\badvances?\b|\bdeductions?\b|\bloans?\b|\bfines?\b|\bnssf\b|\bnhif\b|\bshif\b|\bpaye\b|"
+                        r"\blevy\b|\bless\b|\brecover(y|ed)\b")
+# The tiers of what is paid in the end (_AMOUNT_WORDS: net, payable, due): the only ones taken past a deduction
+_NET_TIERS = 3
 # A column that says it was paid ("Amount Paid", "Paid On"; not "To Be Paid")
 _PAID_HEADER = re.compile(r"\bpaid\b")
-_UNPAID_HEADER = re.compile(r"\b(to\s+be|be|not)\s+paid\b")
+_UNPAID_HEADER = re.compile(r"\b(to\s+be|be|not)\s+paid\b|\bpaid\s+(by|to)\b")
 # The columns that say a row was paid, or is being paid, already (a payee table's Download, a sheet marked
 # after paying): never added again. Round 4.5: an M-Pesa code, a transaction or reference column, a Paid one.
 _PAID_COLUMNS = (
@@ -2212,6 +2220,8 @@ _NOT_REFERENCE = re.compile(r"cost|fee|charge|type")
 _PAID_STATUSES = {"paid", "success", "successful", "completed", "in flight", "queued", "initiated", "sent",
                   "processing", "cancelled", "settled", "settled outside m-pesa"}
 # What a Paid column says of a row not paid
+# A remark that says the row was paid: "Paid.", "paid on 3/11", "Paid via M-Pesa" (never "Paid By ...")
+_PAID_REMARK = re.compile(r"^paid\b(?!\s+(by|to)\b)")
 _NOT_PAID = {"no", "n", "false", "unpaid", "not paid", "pending", "-", "--", "none", "nil", "n/a", "na"}
 _RECEIPT = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{10}")  # an M-Pesa receipt: UKD1A2B3C4
 # A payment reference: letters and digits, 8 characters or more (a payout's name, a bank's reference)
@@ -2313,10 +2323,17 @@ def _may_take(field: str, text: str) -> bool:
 
 def _amount_column(texts: dict, taken) -> int | None:
     """The column of the amount: the strongest total (_AMOUNT_WORDS), the leftmost of equals, a column
-    saying it was paid last; never a rate or a part ('Rate (KES)', 'Advance Amount', 'Days')."""
+    saying it was paid last; never a rate or a part ('Rate (KES)', 'Advance Amount', 'Days'). When
+    the sheet takes something off the pay (an Advance, Deductions, a Loan column: _DEDUCTION), only
+    what is paid in the end counts (Net, Payable, Amount Due): a Total or a Gross would pay the
+    deduction too, so none is taken and the user picks the amount column (round 4.5 verification)."""
     scored = [(tier, _reads_paid(text), i) for i, text in texts.items()
               if i not in taken and (tier := _amount_tier(text)) is not None]
-    return min(scored)[2] if scored else None
+    if not scored:
+        return None
+    best = min(scored)
+    deducted = any(_DEDUCTION.search(text) for i, text in texts.items() if i not in taken)
+    return best[2] if best[0] < _NET_TIERS or not deducted else None
 
 
 def _header(cells, extra=None) -> dict | None:
@@ -2398,8 +2415,11 @@ def _columns(order, labels, row=None, extra=None, picked: bool = False) -> dict:
     if not order:
         return {"header_row": None, "fields": {}, "amount_column": None, "amount_choices": [], "picked": False}
 
+    from .known_names import plain
+
     def label(i):
-        return cstr(labels[i]).strip() if i is not None and i < len(labels) else None
+        # a sheet's column names are its author's text: plain text only (the dialogs escape them too)
+        return plain(labels[i]) if i is not None and i < len(labels) else None
 
     taken = {order.get(f) for f in ("payee_name", "phone", *(extra or {}))}
     return {"header_row": row, "fields": {f: label(c) for f, c in order.items() if c is not None},
@@ -2516,7 +2536,8 @@ def _paid_word(cells, used) -> str | None:
     for i, cell in enumerate(cells):
         if i in used or not cell:
             continue
-        if cell.strip().lower() in _PAID_STATUSES:
+        word = cell.strip().lower().rstrip(".!;:")
+        if word in _PAID_STATUSES or _PAID_REMARK.match(word):
             return f"marked {cell.strip()} already: not added, so it is never paid twice"
         if _RECEIPT.fullmatch(cell.strip().upper()):
             return f"has an M-Pesa receipt ({cell.strip()}): not added, so it is never paid twice"

@@ -77,6 +77,17 @@ the rows' accounting dimension fields); then clear the cache.
     P&L, filled from the company default when set; the value's company; Accounting Dimension Filters); a
     dimension mandatory for Balance Sheet needs a company default, which the credit line carries.
   - The retry's self-pay check knows M-Pesa's name for the phone (`describe()` gives `mpesa_name`).
+- **The final verification's fixes** (`tests/unit/test_r45_followups.py`):
+  - What is paid in the end is the amount: Net, Amount Payable or Amount Due before any Total or Gross;
+    past a deduction column (Advance, Deductions, Loan, NSSF, PAYE...) no Total or Gross is taken, and the
+    user picks the amount column.
+  - A "Paid By"/"Paid To" column is no paid mark; a remark reading "Paid." or "paid on 3/11" is.
+  - The Amount Column picker shows column names as plain text, escaped.
+  - A one-word typed name is no full agreement on save either (`known_names.agrees`): it is kept as Name
+    Given and acknowledged with the differing names.
+  - A claim payee's payout (whose party is the claimant) never marks the phone an employee's; a bulk row's
+    payout to an Employee's phone does (`partyless.Handler.employee`).
+  - A number in front of an M-Pesa name is found without a dash too; a row's progress fits its column.
 
 Tests: `tests/unit/test_r45_bulk_payout.py`, `tests/unit/test_r45_review_bulk.py`; bench
 `mpsa_suite/money_out/test_bulk_payout.py` (v15 and v16).

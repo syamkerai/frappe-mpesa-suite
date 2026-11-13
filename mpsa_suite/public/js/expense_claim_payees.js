@@ -636,7 +636,8 @@ const mpsa_payees = {
 			const choices = named ? c.amount_choices || [] : [];
 			shown_amount = named && c.amount_column !== null && c.amount_column !== undefined ? String(c.amount_column) : "";
 			if (choices.length) {
-				const options = choices.map((x) => ({ value: String(x.column), label: x.label }));
+				// a sheet's column names are its author's text: escaped, as Frappe draws a Select's options as HTML
+				const options = choices.map((x) => ({ value: String(x.column), label: frappe.utils.escape_html(x.label || "") }));
 				if (!shown_amount) options.unshift({ value: "", label: __("Pick the amount column") });
 				d.set_df_property("amount_column", "options", options);
 				d.set_df_property("amount_column", "hidden", 0);
