@@ -7,6 +7,74 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## Paying supplier tills: the Petty Cash Phone and strict Pay via Staff (2026-11-13, branch r4-5-tills)
+
+Some suppliers take money only at their till (petrol stations, hardware shops). The plan is
+[docs/PAY_VIA_STAFF_PLAN.md](docs/PAY_VIA_STAFF_PLAN.md). **`bench migrate` is needed** (two new DocTypes,
+custom fields on Payment Entry, Employee Advance, Purchase Order and Purchase Invoice); then clear the cache (a
+new form script). No patch.
+
+- **New DocType M-Pesa Petty Cash Phone** (`money_out.petty_cash`), submittable, with its child table M-Pesa
+  Petty Cash Top Up. Company, the number (2547…; one live phone per number), the name M-Pesa should show for
+  it, the holder (an active Employee with a User ID), a Cash account of its own (one live phone per account:
+  its balance is the phone's book balance), a default cost center, a charges account, the top-up limit and
+  the float ceiling.
+  - **Approve** (in place of Submit; every other submit is refused): a named M-Pesa Manager or Accounts
+    Manager who did not create or last save it and does not hold it. Approved, the number, account and
+    expected name are locked (cancel and amend, approved again); the holder, limits, cost center, charges
+    account and Enabled may change, not by the holder. A save from a stale form keeps the top-up rows and
+    the name check as the database has them.
+  - **Top Up by M-Pesa** (preparer roles who may make B2C payouts, never the holder): a top-up row and a
+    draft party-less B2C Payment Disbursement (`money_out.partyless`, hook `mpsa_partyless_payouts`). The
+    amount defaults to the ceiling less the book balance and what is on its way; refused above the top-up
+    limit or past the ceiling, checked again at the send; one top-up at a time. An M-Pesa Payer sends it
+    with Send via M-Pesa; the holder cannot send it (nor anyone whose phone or name it is: `self_pay`).
+  - **Booking:** one Journal Entry per paid top-up: debit the petty cash account, credit the shortcode's
+    Utility GL, the receipt as Cheque No, on M-Pesa's date; the statement line reconciles one to one
+    (`statement.entries_for`). An entry made by hand with the receipt (a closed period) counts as the
+    top-up's. Late Results, status queries, Retry after a failure and the unbooked sweep are the B2C ones.
+  - **The M-Pesa name** is checked on the first top-up (against the expected name; later top-ups against
+    that first name). A mismatch, or another number in front of the name, holds top-ups (a Comment and an
+    alert) until a manager presses **Name Confirmed**.
+- **Paid from Petty Cash Phone** on a submitted Purchase Order and an unpaid Purchase Invoice
+  (`public/js/purchase_mpesa_tills.js`): paste the phone's SMS (`petty_cash.parse_sms` reads Buy Goods,
+  Paybill with its account, and send money with the person's phone; the receipt, amount, date and time,
+  the new balance and the transaction cost), or type the fields (they must agree with a pasted SMS). The
+  till's name on the SMS is shown next to the supplier's. It posts a submitted Payment Entry: Pay, to the
+  supplier, from the petty cash account, Reference No the receipt and Reference Date the SMS's date,
+  against the order (an advance) or the invoice, the charge a deduction on the charges account. Refused:
+  for anyone but the holder and the Accounts roles; a receipt on any live entry already; more than the
+  document still owes (`owed.left_to_pay`); more than the phone's book balance (record its top-ups first).
+  The name on the SMS is kept with the known M-Pesa names (source SMS: a person by phone, a till or
+  paybill against the supplier's one approved account of that kind). The order and invoice list their
+  petty cash spends (Payment Entry, receipt, phone).
+- **Pay via Staff, strict** (`money_out.pay_via_staff`): only the users in M-Pesa Suite Settings' Who May
+  Pay via Staff (empty: nobody); the button shows only to them.
+  - On a submitted order or unpaid invoice it makes a submitted Employee Advance (new read-only fields
+    Supplier, Purchase Order, Purchase Invoice) for a staff member and its draft B2C payout to their
+    approved Employee M-Pesa Account phone only; at most what the document still owes less its other
+    staff advances; never to oneself.
+  - The server refuses everyone else at the advance, the payout's row (every save), the send and a retry;
+    a B2B request never pays such an advance, and an advance with these fields is made no other way. The
+    Employee Advance form and the list's Pay by M-Pesa leave it to the listed users.
+  - **Settlement:** submitting the supplier's invoice posts one Journal Entry: debit the supplier against
+    the invoice, credit the employee advance account against each advance made for the invoice or its
+    orders (as HRMS's return entry does), at most what each was paid and not claimed or returned, in all
+    at most the invoice's outstanding. An error is logged and alerted and never stops the invoice.
+    **Settle Staff Advances** on the invoice (listed users, Accounts Manager) does the same by hand. What
+    an advance has left over is HRMS's Return or Claim.
+- **The daily "needs attention" alert** gets two sections (hook `mpsa_attention_sections`), each linked to
+  its own list: petty cash phones whose book balance differs from what their last SMS says (top-ups paid
+  and spends recorded after it counted), that hold money with no spend for `petty_cash_alert_days`, or
+  whose name is held; staff advances paid more than `staff_advance_settle_days` ago and not settled. A
+  section may now name its list (`(title, lines, link)`): the email links its title there.
+- Permissions (`permission_matrix.py`, docs/ROLES_AND_PERMISSIONS.md): the phone, made and approved by
+  M-Pesa Manager and Accounts Manager, read by Accounts User, M-Pesa Payer and Viewer; ten endpoints.
+
+Tests: `tests/unit/test_r45_petty_cash.py` (70) and `tests/unit/test_r45_pay_via_staff.py` (26); the hook tests
+in `test_r45_partyless.py` and `test_r45_attention.py` now check the features' entries; three posting sites added
+to `test_r4_post_at_once.py`. Bench: `money_out/test_petty_cash.py`, `money_out/test_pay_via_staff.py`.
+
 ## Know who you pay: the M-Pesa name at every step (2026-11-13, branch r4-5-bulk-payout)
 
 Daraja has no Hakikisha: nothing names the receiver before the money leaves. Every Result does, so

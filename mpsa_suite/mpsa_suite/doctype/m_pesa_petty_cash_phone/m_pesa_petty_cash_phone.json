@@ -1,0 +1,325 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "PCP-.#####",
+ "creation": "2026-11-13 18:00:00.000000",
+ "description": "A company M-Pesa phone that pays supplier tills: topped up by M-Pesa B2C from the shortcode, its spends recorded on Purchase Orders and Invoices from the phone's SMS. Approved by an M-Pesa Manager or Accounts Manager who did not enter it and does not hold it.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "phone_label",
+  "company",
+  "phone",
+  "expected_name",
+  "enabled",
+  "column_break_main",
+  "holder",
+  "holder_name",
+  "holder_user",
+  "accounts_section",
+  "petty_cash_account",
+  "default_cost_center",
+  "charges_account",
+  "column_break_limits",
+  "top_up_limit",
+  "float_ceiling",
+  "approval_section",
+  "entered_by",
+  "approved_by",
+  "approved_on",
+  "column_break_approval",
+  "mpesa_name",
+  "name_checked_on",
+  "name_mismatch",
+  "last_receiver_name",
+  "top_ups_section",
+  "top_ups",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "phone_label",
+   "fieldtype": "Data",
+   "label": "Name",
+   "in_list_view": 1,
+   "description": "How staff call this phone, e.g. Isinya petty cash. Left empty: Petty cash and the holder's name."
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "phone",
+   "fieldtype": "Data",
+   "label": "M-Pesa Number",
+   "reqd": 1,
+   "in_list_view": 1,
+   "search_index": 1,
+   "description": "The phone's Safaricom number (stored as 2547...). Locked once approved: a new number is a cancel and amend, approved again."
+  },
+  {
+   "fieldname": "expected_name",
+   "fieldtype": "Data",
+   "label": "Name on M-Pesa",
+   "description": "The name M-Pesa shows for this number (who the line is registered to). The name M-Pesa gives on the first top-up is checked against it."
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1",
+   "allow_on_submit": 1,
+   "description": "Off: no top-up and no spend is recorded from this phone."
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "holder",
+   "fieldtype": "Link",
+   "label": "Holder",
+   "options": "Employee",
+   "reqd": 1,
+   "allow_on_submit": 1,
+   "in_standard_filter": 1,
+   "description": "The cash handler who keeps the phone and pays the tills from it. They record its spends; they never top it up or approve it."
+  },
+  {
+   "fieldname": "holder_name",
+   "fieldtype": "Data",
+   "label": "Holder Name",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "holder_user",
+   "fieldtype": "Link",
+   "label": "Holder's User",
+   "options": "User",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "description": "The holder's User ID on their Employee record."
+  },
+  {
+   "fieldname": "accounts_section",
+   "fieldtype": "Section Break",
+   "label": "Accounts and Limits"
+  },
+  {
+   "fieldname": "petty_cash_account",
+   "fieldtype": "Link",
+   "label": "Petty Cash Account",
+   "options": "Account",
+   "reqd": 1,
+   "description": "A Cash account of this phone's own, e.g. Petty Cash M-Pesa 0722... - AIL: its balance is the phone's book balance (top-ups less spends)."
+  },
+  {
+   "fieldname": "default_cost_center",
+   "fieldtype": "Link",
+   "label": "Default Cost Center",
+   "options": "Cost Center",
+   "allow_on_submit": 1
+  },
+  {
+   "fieldname": "charges_account",
+   "fieldtype": "Link",
+   "label": "Charges Account",
+   "options": "Account",
+   "allow_on_submit": 1,
+   "description": "Where a spend's transaction cost (a paybill's) is booked."
+  },
+  {
+   "fieldname": "column_break_limits",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "top_up_limit",
+   "fieldtype": "Currency",
+   "label": "Top-Up Limit",
+   "reqd": 1,
+   "allow_on_submit": 1,
+   "options": "KES",
+   "description": "The most one top-up may be."
+  },
+  {
+   "fieldname": "float_ceiling",
+   "fieldtype": "Currency",
+   "label": "Float Ceiling",
+   "reqd": 1,
+   "allow_on_submit": 1,
+   "options": "KES",
+   "description": "The most the phone should hold: a top-up never takes the book balance (with the top-ups on their way) past it."
+  },
+  {
+   "fieldname": "approval_section",
+   "fieldtype": "Section Break",
+   "label": "Approval and M-Pesa Name"
+  },
+  {
+   "fieldname": "entered_by",
+   "fieldtype": "Link",
+   "label": "Entered By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "approved_by",
+   "fieldtype": "Link",
+   "label": "Approved By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "approved_on",
+   "fieldtype": "Datetime",
+   "label": "Approved On",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "column_break_approval",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "mpesa_name",
+   "fieldtype": "Data",
+   "label": "Name M-Pesa Paid",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "The name M-Pesa gave the number on its first top-up."
+  },
+  {
+   "fieldname": "name_checked_on",
+   "fieldtype": "Datetime",
+   "label": "Name Checked On",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "name_mismatch",
+   "fieldtype": "Check",
+   "label": "Name Did Not Match",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "M-Pesa paid the number under another name: top-ups are held until a manager presses Name Confirmed."
+  },
+  {
+   "fieldname": "last_receiver_name",
+   "fieldtype": "Data",
+   "label": "Last Name M-Pesa Paid",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "top_ups_section",
+   "fieldtype": "Section Break",
+   "label": "Top-ups"
+  },
+  {
+   "fieldname": "top_ups",
+   "fieldtype": "Table",
+   "label": "Top-ups",
+   "options": "M-Pesa Petty Cash Top Up",
+   "read_only": 1,
+   "allow_on_submit": 1,
+   "no_copy": 1,
+   "description": "Each top-up by M-Pesa B2C from the company's shortcode (Top Up by M-Pesa), booked as one Journal Entry when paid."
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "options": "M-Pesa Petty Cash Phone",
+   "read_only": 1,
+   "no_copy": 1,
+   "print_hide": 1
+  }
+ ],
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-11-13 18:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "M-Pesa Petty Cash Phone",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "role": "M-Pesa Manager"
+  },
+  {
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "delete": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1,
+   "role": "Accounts Manager"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "role": "Accounts User"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "role": "M-Pesa Payer"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "role": "M-Pesa Viewer"
+  }
+ ],
+ "search_fields": "phone_label,phone,holder_name",
+ "show_title_field_in_link": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "phone_label",
+ "track_changes": 1
+}

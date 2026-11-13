@@ -31,6 +31,8 @@ def after_migrate():
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
         create_claim_payee_fields()
+        # round 4.5: the petty cash phone's spends and Pay via Staff (money_out.petty_cash, pay_via_staff)
+        create_till_payment_fields()
 
 
 
@@ -699,3 +701,56 @@ def create_erpnext_property_setters():
             ).insert(ignore_permissions=True)
         except frappe.DuplicateEntryError:
             pass
+
+
+def till_payment_fields() -> dict:
+    """Round 4.5, paying supplier tills: a Payment Entry's petty cash spend (the phone and what its SMS
+    said: money_out.petty_cash), an Employee Advance's Pay via Staff links (money_out.pay_via_staff),
+    and the list of both on a Purchase Order and Purchase Invoice (public/js/purchase_mpesa_tills.js).
+    Read-only, never copied, shown only when set."""
+    spend = 'eval:doc.mpesa_petty_cash_phone'
+    staff = 'eval:doc.mpesa_supplier'
+    tills = {
+        "fieldname": "mpesa_tills_html",
+        "fieldtype": "HTML",
+        "label": "Paid from Petty Cash Phone or via Staff",
+        "insert_after": "items",
+        "depends_on": "eval:doc.docstatus==1",
+    }
+    return {
+        "Payment Entry": [
+            {"fieldname": "mpesa_petty_cash_phone", "fieldtype": "Link", "label": "Petty Cash Phone",
+             "options": "M-Pesa Petty Cash Phone", "insert_after": "reference_date", "read_only": 1, "no_copy": 1,
+             "search_index": 1, "depends_on": spend,
+             "description": "Paid from this petty cash phone: recorded from its M-Pesa SMS (Paid from Petty Cash "
+                            "Phone)."},
+            {"fieldname": "mpesa_sms_time", "fieldtype": "Datetime", "label": "SMS Date and Time",
+             "insert_after": "mpesa_petty_cash_phone", "read_only": 1, "no_copy": 1, "depends_on": spend},
+            {"fieldname": "mpesa_sms_balance", "fieldtype": "Currency", "label": "New M-Pesa Balance (SMS)",
+             "options": "KES", "insert_after": "mpesa_sms_time", "read_only": 1, "no_copy": 1, "depends_on": spend,
+             "description": "The phone's balance the SMS gave: the daily check compares the book balance with "
+                            "the last."},
+            {"fieldname": "mpesa_sms_payee", "fieldtype": "Data", "label": "Paid To (SMS)",
+             "insert_after": "mpesa_sms_balance", "read_only": 1, "no_copy": 1, "depends_on": spend},
+            {"fieldname": "mpesa_sms_text", "fieldtype": "Small Text", "label": "M-Pesa SMS",
+             "insert_after": "mpesa_sms_payee", "read_only": 1, "no_copy": 1, "depends_on": spend},
+        ],
+        "Employee Advance": [
+            {"fieldname": "mpesa_supplier", "fieldtype": "Link", "label": "Supplier (Pay via Staff)",
+             "options": "Supplier", "insert_after": "purpose", "read_only": 1, "no_copy": 1, "search_index": 1,
+             "depends_on": staff,
+             "description": "Made with Pay via Staff: the staff member pays this supplier at its till."},
+            {"fieldname": "mpesa_purchase_order", "fieldtype": "Link", "label": "Purchase Order (Pay via Staff)",
+             "options": "Purchase Order", "insert_after": "mpesa_supplier", "read_only": 1, "no_copy": 1,
+             "search_index": 1, "depends_on": "eval:doc.mpesa_purchase_order"},
+            {"fieldname": "mpesa_purchase_invoice", "fieldtype": "Link", "label": "Purchase Invoice (Pay via Staff)",
+             "options": "Purchase Invoice", "insert_after": "mpesa_purchase_order", "read_only": 1, "no_copy": 1,
+             "search_index": 1, "depends_on": "eval:doc.mpesa_purchase_invoice"},
+        ],
+        "Purchase Order": [dict(tills)],
+        "Purchase Invoice": [dict(tills)],
+    }
+
+
+def create_till_payment_fields():
+    create_fields(till_payment_fields())

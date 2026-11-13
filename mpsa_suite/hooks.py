@@ -73,8 +73,9 @@ doctype_js = {
     "Mpesa C2B Payment Register": "public/js/c2b_reversal.js",
     "Integration Request": "public/js/c2b_verification.js",
     "Supplier": "public/js/supplier.js",
-    "Purchase Invoice": "public/js/purchase_invoice.js",
-    "Purchase Order": "public/js/purchase_order.js",
+    # round 4.5: Paid from Petty Cash Phone, Pay via Staff and Settle Staff Advances (purchase_mpesa_tills.js)
+    "Purchase Invoice": ["public/js/purchase_invoice.js", "public/js/purchase_mpesa_tills.js"],
+    "Purchase Order": ["public/js/purchase_order.js", "public/js/purchase_mpesa_tills.js"],
     # HRMS only: a form that does not exist on the site never loads its script
     "Payroll Entry": "public/js/payroll_entry.js",
     "Employee": "public/js/employee.js",
@@ -269,6 +270,12 @@ doc_events = {
     "Employee Advance": {
         "before_cancel": "mpsa_suite.money_out.employee_documents.before_cancel",
         "on_cancel": "mpsa_suite.money_out.employee_documents.on_cancel",  # its failed payouts do not hold it
+        # round 4.5: an advance for a supplier is made by Pay via Staff only (money_out.pay_via_staff)
+        "validate": "mpsa_suite.money_out.pay_via_staff.validate_advance",
+    },
+    # round 4.5: the supplier's invoice settles the staff advances paid for it (money_out.pay_via_staff)
+    "Purchase Invoice": {
+        "on_submit": "mpsa_suite.money_out.pay_via_staff.on_submit_purchase_invoice",
     },
     # HRMS: a mistyped Kenyan Cell Number refused when it is typed (Pay employee (phone), HR's SMS)
     "Employee": {
@@ -309,10 +316,17 @@ scheduler_events = {
 # DocTypes whose B2C payouts pay people no ERPNext party names (a bulk payout sheet's rows, a
 # petty cash phone's top-ups): {DocType: dotted path of its handler}. The handler checks, books
 # and reconciles its own rows (money_out.partyless); each feature adds its line.
-mpsa_partyless_payouts = {}
+mpsa_partyless_payouts = {
+    # round 4.5: a petty cash phone's top-ups (money_out.petty_cash)
+    "M-Pesa Petty Cash Phone": "mpsa_suite.money_out.petty_cash.HANDLER",
+}
 # The daily "needs attention" alert's sections: dotted paths of functions returning (title, [lines])
 # (money_out.attention); each feature adds its own.
-mpsa_attention_sections = []
+mpsa_attention_sections = [
+    # round 4.5: petty cash phones (book against SMS balance, idle money) and unsettled staff advances
+    "mpsa_suite.money_out.petty_cash.attention_section",
+    "mpsa_suite.money_out.pay_via_staff.attention_section",
+]
 
 # Testing
 # -------

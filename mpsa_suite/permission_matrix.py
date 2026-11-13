@@ -99,6 +99,14 @@ DOCTYPES = {
         MM: "rRe",
         MP: "r", AM: "r", AU: "r", HM: "r", HU: "r", EA: "r", PM: "r",
     },
+    # Round 4.5: the company phone that pays supplier tills (money_out.petty_cash). An M-Pesa Manager or Accounts
+    # Manager enters and approves it (Approve: submit, never who entered it or holds it); Accounts User, the Payer
+    # who sends its top-ups and the Viewer read it. Its holder records spends from the order or invoice, without a
+    # right on it (petty_cash.record_spend).
+    "M-Pesa Petty Cash Phone": {
+        SM: READ, MM: ALL, AM: ALL,
+        AU: "rRep", MP: "rRep", MV: "rRep",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -347,6 +355,30 @@ ENDPOINTS = {
     # round 4.5: the known M-Pesa names of the destinations a form shows (salary-only names hidden by salary_access)
     "mpsa_suite.money_out.known_names.for_destinations": ("Read M-Pesa Known Name", ("perm",)),
     "mpsa_suite.money_out.claim_payees.repair_reimbursed": ("ADMIN_ROLES + read the Expense Claim", ("roles:ADMIN_ROLES", "perm")),
+    # round 4.5: the petty cash phone (money_out.petty_cash)
+    "mpsa_suite.money_out.petty_cash.approve": (
+        "M-Pesa Manager or Accounts Manager, a named login + submit the phone (not who entered it or holds it)",
+        ("roles:M-Pesa Manager", "roles:Accounts Manager", "via:require_named_user", "perm")),
+    "mpsa_suite.money_out.petty_cash.confirm_name": (
+        "M-Pesa Manager or Accounts Manager, a named login + write the phone (not its holder)",
+        ("roles:M-Pesa Manager", "roles:Accounts Manager", "via:require_named_user", "perm")),
+    "mpsa_suite.money_out.petty_cash.top_up": (
+        "PREPARE_ROLES + read the phone + create the disbursement (not its holder)", ("roles:PREPARE_ROLES", "perm")),
+    "mpsa_suite.money_out.petty_cash.phone_state": ("Read the phone", ("perm",)),
+    "mpsa_suite.money_out.petty_cash.document_state": ("Read the order / invoice", ("perm",)),
+    "mpsa_suite.money_out.petty_cash.read_sms": ("Read the order / invoice", ("perm",)),
+    "mpsa_suite.money_out.petty_cash.record_spend": (
+        "The phone's holder, or Accounts Manager / Accounts User + read the order / invoice",
+        ("via:_check_recorder", "perm")),
+    # round 4.5: Pay via Staff, strict (money_out.pay_via_staff): M-Pesa Suite Settings' Who May Pay via Staff only
+    "mpsa_suite.money_out.pay_via_staff.make_advance": (
+        "The users listed in Who May Pay via Staff, a named login + read the order / invoice",
+        ("via:require_listed", "perm")),
+    "mpsa_suite.money_out.pay_via_staff.document_state": (
+        "Read the order / invoice (the buttons for the listed users)", ("perm",)),
+    "mpsa_suite.money_out.pay_via_staff.settle_now": (
+        "The users listed in Who May Pay via Staff or Accounts Manager, a named login + read the invoice",
+        ("via:_require_settler", "perm")),
     "mpsa_suite.money_out.claim_payees.settle_line": (
         "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),
     # round 4.1: Send Payment Proof fills Frappe's email composer (nothing is sent by it)
@@ -420,6 +452,11 @@ HELPERS = {
     "make_default": ("mpsa_suite.money_out.party_accounts", ("roles:default_roles", "perm")),
     "from_payroll_entry": ("mpsa_suite.money_out.payroll", ("roles:PREPARE_ROLES", "perm")),
     "_sendable": ("mpsa_suite.money_out.send_confirm", ("roles:PAYOUT_ROLES", "roles:ADMIN_ROLES", "perm")),
+    # round 4.5: the petty cash phone's holder, or the Accounts roles; Pay via Staff's listed users
+    "_check_recorder": ("mpsa_suite.money_out.petty_cash", ("roles:Accounts Manager", "roles:Accounts User")),
+    "require_listed": ("mpsa_suite.money_out.pay_via_staff", ("via:require_named_user", "via:is_listed")),
+    "_require_settler": ("mpsa_suite.money_out.pay_via_staff",
+                         ("via:require_named_user", "via:is_listed", "roles:Accounts Manager")),
 }
 
 GUEST_EVIDENCE = ("callback", "api", "page")

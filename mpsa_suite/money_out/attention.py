@@ -14,6 +14,9 @@ Each path names a function taking no argument and returning ``(title, [lines])``
 ("Bulk payout sheets") and one line per item ("MBP-26-11-0003: 64 paid, 3 failed, KES 12,400 left").
 No lines (or None): the section has nothing to say today. ``register(section)`` adds a function
 (or a path) in-process. A section that raises is logged and left out: it never stops the others.
+A section may also return ``(title, [lines], link)``: the route of its own list (e.g.
+"/app/m-pesa-petty-cash-phone"), which the email's title links to, so each section opens its list
+rather than M-Pesa Suite Settings.
 """
 
 import html
@@ -80,24 +83,41 @@ def collect() -> list:
             continue
         if not found:
             continue
-        title, lines = found
+        title, lines, link = (tuple(found) + (None,))[:3]
         lines = [cstr(line).strip() for line in lines or [] if cstr(line).strip()]
         if lines:
-            out.append((cstr(title).strip() or _name(section), lines))
+            entry = (cstr(title).strip() or _name(section), lines)
+            out.append(entry + (cstr(link).strip(),) if cstr(link).strip() else entry)
     return out
 
 
 def subject(collected) -> str:
     """The notification's subject: each section's title and how many lines it has."""
-    return f"{SUBJECT}: " + "; ".join(f"{title} ({len(lines)})" for title, lines in collected)
+    return f"{SUBJECT}: " + "; ".join(f"{entry[0]} ({len(entry[1])})" for entry in collected)
+
+
+def _url(link: str) -> str:
+    """A section's link as the email gives it: the site's full URL of a route."""
+    get_url = getattr(getattr(frappe, "utils", None), "get_url", None)
+    if link.startswith("/") and callable(get_url):
+        try:
+            return get_url(link)
+        except Exception:
+            return link
+    return link
 
 
 def details(collected) -> str:
-    """The email: each section's title and its lines, as HTML (the lines are escaped)."""
+    """The email: each section's title (a link to its list, when it names one) and its lines, as HTML
+    (the lines are escaped)."""
     parts = []
-    for title, lines in collected:
+    for entry in collected:
+        title, lines = entry[0], entry[1]
         items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
-        parts.append(f"<p><b>{html.escape(title)}</b></p><ul>{items}</ul>")
+        heading = html.escape(title)
+        if len(entry) > 2 and entry[2]:
+            heading = f'<a href="{html.escape(_url(entry[2]), quote=True)}">{heading}</a>'
+        parts.append(f"<p><b>{heading}</b></p><ul>{items}</ul>")
     return "".join(parts)
 
 

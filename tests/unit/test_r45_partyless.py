@@ -207,11 +207,17 @@ def test_handlers_come_from_hooks_py_the_last_path_winning(env, monkeypatch):
     assert env.partyless.handlers() == {"Other Sheet": env.handler}
 
 
-def test_the_hook_is_in_hooks_py_and_empty_until_a_feature_fills_it():
+def test_the_hook_is_in_hooks_py_and_each_feature_names_its_handler():
     tree = ast.parse((APP / "hooks.py").read_text(encoding="utf-8"))
     hooks = {n.targets[0].id: n.value for n in tree.body
              if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
-    assert ast.literal_eval(hooks["mpsa_partyless_payouts"]) == {}
+    found = ast.literal_eval(hooks["mpsa_partyless_payouts"])
+    # round 4.5: the petty cash phone's top-ups (money_out.petty_cash)
+    assert found["M-Pesa Petty Cash Phone"] == "mpsa_suite.money_out.petty_cash.HANDLER"
+    for path in found.values():  # each a handler object a module of the app defines
+        module, _, name = path.rpartition(".")
+        source = (APP.parent / Path(*module.split("."))).with_suffix(".py").read_text(encoding="utf-8")
+        assert any(line.startswith(f"{name} = ") for line in source.splitlines()), path
 
 
 # ---------------------------------------------------------------- the disbursement and its rows
