@@ -8,7 +8,11 @@ submitted entry is allocated to it. Until then the money is counted here:
 - for an invoice, advances still sitting on the orders it was made from (ERPNext offers them
   under Get Advances, so they are taken off, not refused);
 - lines of an M-Pesa Payment Schedule planned for the document and not yet sent (a sent line
-  counts as its B2B request).
+  counts as its B2B request);
+- Pay via Staff advances made for the order or invoice (an invoice: and for its orders) and not
+  settled yet (money_out.pay_via_staff): the staff member pays the supplier with that money.
+  Both are planned_lines, which B2C's own guards (the disbursement's send, a retry) take off too,
+  so B2B, B2C, the schedule and the petty cash phone all see them.
 
 A Salary Slip (HRMS) has its own reading: its rounded total less what was paid (Paid B2C and B2B
 salary payouts and bank entries: salary_slip_paid), less payouts on their way and planned lines.
@@ -420,9 +424,28 @@ def order_advances(pi: str, for_update: bool = False, exclude_request: str | Non
 
 
 def planned_lines(dt: str, dn: str, exclude_line=None, exclude_schedule=None, for_update: bool = False) -> list:
-    """Payment schedule lines planned for the document and not sent yet. ``exclude_line``: the
-    line being checked; ``exclude_schedule``: a schedule being saved, whose lines are counted
-    from the form instead."""
+    """What is planned for the document by another route and not on it yet: payment schedule lines
+    not sent yet (schedule_lines), and for a Purchase Order or Invoice its Pay via Staff advances
+    not settled (staff_advances). left_to_pay and B2C's guards (the disbursement's send, a retry)
+    both take these off, so every payout path sees them. ``exclude_line``: the line being checked;
+    ``exclude_schedule``: a schedule being saved, whose lines are counted from the form instead."""
+    return [*schedule_lines(dt, dn, exclude_line, exclude_schedule, for_update),
+            *staff_advances(dt, dn, for_update)]
+
+
+def staff_advances(dt: str, dn: str, for_update: bool = False) -> list:
+    """The Pay via Staff advances made for the order or invoice (an invoice: and for its orders)
+    that are not settled against an invoice yet, each what it still stands for: the staff member
+    pays the supplier with it (money_out.pay_via_staff.open_parts). Parts of kind "advance"."""
+    if dt not in DOC_FIELDS:
+        return []
+    from .pay_via_staff import open_parts
+
+    return open_parts(dt, dn, for_update=for_update)
+
+
+def schedule_lines(dt: str, dn: str, exclude_line=None, exclude_schedule=None, for_update: bool = False) -> list:
+    """Payment schedule lines planned for the document and not sent yet (planned_lines)."""
     if not frappe.db.table_exists(SCHEDULE_LINE):
         return []  # before migrate
     rows = frappe.db.sql(

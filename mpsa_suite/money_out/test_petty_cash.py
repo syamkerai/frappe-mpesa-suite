@@ -111,7 +111,7 @@ class TestPettyCash(IntegrationTestCase):
         self._no_commit.stop()
         frappe.set_user("Administrator")
         frappe.db.rollback()
-        t.forget_roles(HOLDER, PAYER)
+        t.forget_roles(HOLDER, PAYER, BUYER)
         frappe.local.mpesa_suite_bank_accounts = None
         frappe.clear_document_cache("M-Pesa Suite Settings", "M-Pesa Suite Settings")
 
@@ -212,6 +212,8 @@ class TestPettyCash(IntegrationTestCase):
 
     # ------------------------------------------------------------ set up and approve
     def test_a_phone_is_set_up_and_approved_by_another_manager_then_its_number_is_locked(self):
+        # the Name on M-Pesa (what M-Pesa shows for the number) is needed: the first top-up is checked against it
+        self.assertRaises(frappe.ValidationError, self._draft, expected_name=None)
         doc = self._draft()
         self.assertEqual((doc.phone, doc.holder_user, doc.entered_by, doc.docstatus), (NUMBER, HOLDER, PREPARER, 0))
         with _as(PREPARER):  # entered it
@@ -229,8 +231,9 @@ class TestPettyCash(IntegrationTestCase):
         # one live phone per number
         with _as(PREPARER):
             self.assertRaisesRegex(frappe.ValidationError, "already: one phone per number", frappe.get_doc({
-                "doctype": PHONE, "company": t.COMPANY, "phone": NUMBER, "holder": self.holder,
-                "petty_cash_account": self.cash, "top_up_limit": 1000, "float_ceiling": 2000}).insert)
+                "doctype": PHONE, "company": t.COMPANY, "phone": NUMBER, "expected_name": "PETTY HOLDER",
+                "holder": self.holder, "petty_cash_account": self.cash, "top_up_limit": 1000,
+                "float_ceiling": 2000}).insert)
 
     # ------------------------------------------------------------ top up
     def test_a_top_up_is_sent_paid_booked_and_its_statement_line_reconciled(self):
@@ -279,9 +282,16 @@ class TestPettyCash(IntegrationTestCase):
             out = petty_cash.top_up(phone, 3000, mpesa_settings=SETTINGS)
         (request,) = self._send(out["name"], [("Failed", None, None)])
         self.assertEqual(frappe.db.get_value(TOP_UP, out["top_up"], "status"), "Failed")
+        self.assertEqual(petty_cash.in_flight(phone), 0)  # failed: nothing on its way
         with _as(PAYER), patch.object(req_module, "make_b2c_payment_request") as sent:
             frappe.get_doc(REQ, request).retry_failed_payment()
         sent.assert_called_once_with(request)
+        # sent again: on its way by its request's state, so the ceiling counts it and no other top-up is prepared
+        self.assertEqual(petty_cash.in_flight(phone), 3000)
+        self.assertEqual(frappe.db.get_value(TOP_UP, out["top_up"], "status"), "Sending")
+        with _as(PREPARER):
+            self.assertRaisesRegex(frappe.ValidationError, "is Sending .*wait for M-Pesa's answer", petty_cash.top_up,
+                                   phone, 1000, mpesa_settings=SETTINGS)
         receipt = self._receipt(2)
         self._result(request, "Paid", receipt)
         top_up = frappe.db.get_value(TOP_UP, out["top_up"], ["status", "receipt", "journal_entry"], as_dict=True)
@@ -299,6 +309,37 @@ class TestPettyCash(IntegrationTestCase):
             petty_cash.confirm_name(phone, 1)
         self.assertEqual(frappe.db.get_value(PHONE, phone, ["name_mismatch", "mpesa_name"]), (0, "SOMEONE ELSE"))
 
+    # ------------------------------------------------------------ the holder
+    def test_the_holder_changes_only_by_another_manager_and_its_user_follows_the_employee(self):
+        phone = self._phone()
+        doc = frappe.get_doc(PHONE, phone)
+        doc.holder_user = ACCOUNTS  # typed: never kept, it is the holder's Employee's User ID
+        with _as(APPROVER):
+            doc.save()
+        self.assertEqual(frappe.db.get_value(PHONE, phone, "holder_user"), HOLDER)
+        other = _employee("_T Petty Second Holder", BUYER)
+        # the holder never changes the holder, even as a manager
+        t.named_user(HOLDER, "Accounts Manager")
+        doc = frappe.get_doc(PHONE, phone)
+        doc.holder = other
+        with _as(HOLDER):
+            self.assertRaisesRegex(frappe.PermissionError, "You hold this phone", doc.save)
+        # another manager does, with a Comment
+        doc = frappe.get_doc(PHONE, phone)
+        doc.holder = other
+        with _as(APPROVER):
+            doc.save()
+        self.assertEqual(frappe.db.get_value(PHONE, phone, ["holder", "holder_user"]), (other, BUYER))
+        comments = frappe.get_all("Comment", filters={"reference_doctype": PHONE, "reference_name": phone,
+                                                      "comment_type": "Comment"}, pluck="content")
+        self.assertTrue(any(f"{APPROVER} changed Holder" in c for c in comments), comments)
+        # nor does the new holder change it back
+        t.named_user(BUYER, "Accounts Manager")
+        doc = frappe.get_doc(PHONE, phone)
+        doc.holder = self.holder
+        with _as(BUYER):
+            self.assertRaisesRegex(frappe.PermissionError, "You hold this phone", doc.save)
+
     # ------------------------------------------------------------ spends
     def test_spends_on_an_order_and_an_invoice_from_their_sms(self):
         phone = self._phone()
@@ -311,6 +352,7 @@ class TestPettyCash(IntegrationTestCase):
         self.assertEqual((entry.docstatus, entry.payment_type, entry.party, entry.paid_from, flt(entry.paid_amount),
                           entry.reference_no, entry.mpesa_petty_cash_phone, flt(entry.mpesa_sms_balance)),
                          (1, "Pay", self.supplier, self.cash, 1500, self._receipt(2), phone, 3500))
+        self.assertEqual(entry.mpesa_sms_has_balance, 1)  # its SMS gave the balance (Frappe stores none as 0)
         self.assertEqual([(r.reference_doctype, r.reference_name, flt(r.allocated_amount)) for r in entry.references],
                          [(PO, po, 1500)])
         self.assertEqual(flt(frappe.db.get_value(PO, po, "advance_paid")), 1500)  # the order's advance
@@ -360,6 +402,8 @@ class TestPettyCash(IntegrationTestCase):
             self.assertRaisesRegex(frappe.ValidationError, "is more than .* still owes", petty_cash.record_spend, PO,
                                    po, sms=_sms(self._receipt(2), 3500, "SHELL KILIMANI.", 0))
             sms = _sms(self._receipt(2), 500, "SHELL KILIMANI.", 1500)
+            self.assertRaisesRegex(frappe.ValidationError, r"transaction charge typed \(50.0\) is not the SMS's",
+                                   petty_cash.record_spend, PO, po, sms=sms, charge=50)  # the SMS says 0.00
             petty_cash.record_spend(PO, po, sms=sms)
             self.assertRaisesRegex(frappe.ValidationError, "is recorded once", petty_cash.record_spend, PO, po, sms=sms)
             self.assertRaisesRegex(frappe.ValidationError, "This is not an M-Pesa payment SMS", petty_cash.record_spend,

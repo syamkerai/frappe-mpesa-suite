@@ -246,6 +246,34 @@ class TestPayViaStaff(IntegrationTestCase):
             self.assertRaises((frappe.PermissionError, frappe.ValidationError), send_confirm.send_for_test,
                               frappe.get_doc(DISB, out["disbursement"]))
 
+    # ------------------------------------------------------------ every other payout sees the advance
+    def test_a_staff_advance_is_taken_off_what_the_order_owes_for_every_other_payout(self):
+        from mpsa_suite.money_out import b2b, owed
+
+        po = self._order(5000)
+        with _as(OWNER):
+            out = pay_via_staff.make_advance(PO, po, self.staff, 3000, mpesa_settings=SETTINGS)
+        found = owed.left_to_pay(PO, po)  # B2B, the schedule and a petty cash spend read this
+        self.assertEqual((flt(found.owed), flt(found.left)), (5000, 2000))
+        self.assertIn(f"Pay via Staff advance {out['employee_advance']}", owed.explain(po, found))
+        # B2C's own guards (the send, a retry) take off the same planned lines, as a locking read
+        self.assertEqual([p.name for p in owed.planned_lines(PO, po, for_update=True)], [out["employee_advance"]])
+        request = frappe._dict(name="_T-PVS-B2B", amount=2500, supplier=self.supplier, company=t.COMPANY)
+        self.assertRaisesRegex(frappe.ValidationError, "more than is left to pay", b2b._check_document, request, PO,
+                               po)
+        # a second staff advance: only what is left
+        with _as(JANKI):
+            self.assertRaisesRegex(frappe.ValidationError, r"has left for a staff advance \(KES 2,000\)",
+                                   pay_via_staff.make_advance, PO, po, self.staff, 2500, mpesa_settings=SETTINGS)
+
+    def test_no_staff_advance_for_a_supplier_on_hold(self):
+        po = self._order(2000)
+        frappe.db.set_value("Supplier", self.supplier, {"on_hold": 1, "hold_type": "All", "release_date": None})
+        with _as(OWNER):
+            self.assertFalse(pay_via_staff.document_state(PO, po)["allowed"])
+            self.assertRaisesRegex(frappe.ValidationError, "is on hold for payments", pay_via_staff.make_advance, PO,
+                                   po, self.staff, 1000, mpesa_settings=SETTINGS)
+
     # ------------------------------------------------------------ the settlement
     def test_the_invoice_from_the_order_settles_the_staff_advance_in_one_journal(self):
         po = self._order(5000)

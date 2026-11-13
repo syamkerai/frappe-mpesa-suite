@@ -71,6 +71,10 @@ def env(ed_env, monkeypatch):  # noqa: F811
     frappe = env.frappe
     env.pvs = importlib.import_module("mpsa_suite.money_out.pay_via_staff")
     env.made = []
+    # the Employee Advance's Pay via Staff columns (migrate.create_till_payment_fields), read with SQL
+    monkeypatch.setitem(b2b_fixture.COLUMNS, EA, env.pvs.ADVANCE_FIELDS + ("status", "currency", "exchange_rate",
+                                                                          "purpose"))
+    frappe.db.columns = frappe.db.columns | {(EA, "mpesa_supplier")}
     plain_new_doc = frappe.new_doc
     frappe.new_doc = lambda doctype: AdvanceDoc(env) if doctype == EA else plain_new_doc(doctype)
     db = frappe.db

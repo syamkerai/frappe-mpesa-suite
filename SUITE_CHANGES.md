@@ -127,6 +127,30 @@ Tests: `tests/unit/test_r45_petty_cash.py` (70) and `tests/unit/test_r45_pay_via
 in `test_r45_partyless.py` and `test_r45_attention.py` now check the features' entries; three posting sites added
 to `test_r4_post_at_once.py`. Bench: `money_out/test_petty_cash.py`, `money_out/test_pay_via_staff.py`.
 
+**Review fixes (branch r4-5-fix-till).** `bench migrate` adds one field (Payment Entry: SMS Gave a Balance); no
+patch.
+- **A staff advance counts for every payout.** Its order's or invoice's advances not settled (an invoice: its
+  orders' too) are `owed.planned_lines`, so `left_to_pay` (B2B, the schedule, a petty cash spend, Pay via Staff
+  once) and B2C's own guards (the send, a retry) take them off; `explain` names them.
+- **A failed top-up sent again** (Retry Failed, an amended batch) is on its way, by its request's state: the
+  ceiling counts it, and no other top-up is prepared meanwhile. The send's check runs under the phone's lock.
+- **The Name on M-Pesa** (what M-Pesa shows for the number, from a test or the SIM's registration) is needed to
+  approve a phone; one without it is not topped up, and a name M-Pesa gives it is never adopted unchecked.
+- **The holder's name and User** come from the holder's Employee record on every save; a change of holder (or
+  of its User ID) needs an M-Pesa Manager or Accounts Manager who is neither holder, with a Comment.
+- **Fresh reads under the locks:** a spend, a top-up and a staff advance commit their reads away first
+  (`owed.fresh_snapshot`) and use locking reads; a settlement locks each advance, so two invoices of one order
+  never both settle it.
+- **The SMS wins:** a typed name or charge must match the pasted SMS; a charge typed with no SMS cost is at most
+  the larger of KES 100 and 1% (Safaricom's customer tariff stays below it). Only the SMS's own name is kept
+  with the known names; "sent to NAME" with no account is a Pochi la Biashara, never the supplier's paybill.
+- **An SMS without a balance** is recorded as such and never compared with the books (Frappe stored it as 0).
+- No staff advance for a supplier on hold, nor its payout sent or retried while the hold lasts. The spend fields
+  are made on every ERPNext site, HRMS or not.
+
+Tests: `tests/unit/test_r45_review_tills.py` (27); bench cases for the advance counted everywhere, the retried
+top-up and the holder.
+
 ## Know who you pay: the M-Pesa name at every step (2026-11-13, branch r4-5-bulk-payout)
 
 Daraja has no Hakikisha: nothing names the receiver before the money leaves. Every Result does, so

@@ -6,23 +6,28 @@ company's petty cash phone: it is topped up by M-Pesa from the company's shortco
 Purchase Invoice from the M-Pesa SMS the phone received.
 
 The phone (DocType M-Pesa Petty Cash Phone, submittable):
-- company, the number (2547..., one live phone per number), the name M-Pesa shows for it (Expected
-  Name), the holder (an Employee and their User), the petty cash account (a Cash account of its own:
+- company, the number (2547..., one live phone per number), the name M-Pesa shows for it (Name on
+  M-Pesa, expected_name: needed to approve it), the holder (an Employee; its name and User are taken
+  from the Employee record on every save, never typed), the petty cash account (a Cash account of its own:
   one live phone per account, so the account's balance is the phone's book balance), a default cost
   center and a charges account, the top-up limit (the most one top-up may be) and the float ceiling
   (the most the phone should hold);
 - approved with Approve (``approve``: submit) by a named M-Pesa Manager or Accounts Manager who did
   not enter it and does not hold it. Approved, the number, the account and the expected name are
-  locked: changing them is a cancel and amend, approved again. Holder, cost center, charges account,
-  limits and Enabled may be changed by who may write it (not the holder: ``check_update``);
+  locked: changing them is a cancel and amend, approved again. Cost center, charges account, limits
+  and Enabled may be changed by who may write it, never by the holder; the holder (or the holder's
+  User on their Employee record) only by a named M-Pesa Manager or Accounts Manager who is neither the
+  old holder nor the new one, with a Comment (``check_update``);
 - the name M-Pesa gives the number is checked on its first top-up (``check_name``): against the
-  Expected Name, and later top-ups against that first name. A mismatch blocks top-ups until a
-  manager confirms it (``confirm_name``).
+  Name on M-Pesa, and later top-ups against that first name. A mismatch (or no name to check it
+  against) blocks top-ups until a manager confirms it (``confirm_name``).
 
 Top-ups (``top_up``, preparer roles): one top-up row on the phone (M-Pesa Petty Cash Top Up) and one
 draft party-less B2C Payment Disbursement paying it (money_out.partyless, this module's ``HANDLER``):
 the amount defaults to the ceiling less the book balance and the top-ups on their way, and is
-refused above the top-up limit or when the phone would pass its ceiling (checked again at the send).
+refused above the top-up limit or when the phone would pass its ceiling (checked again at the send,
+under the phone's lock). On its way: a top-up sent and not answered, a Failed one whose payout is sent
+again (Retry Failed, an amended batch: its request's state, ``_live_status``), and a Paid one not booked.
 An M-Pesa Payer sends it with Send via M-Pesa (maker-checker as in the settings). The phone's holder
 neither prepares nor sends a top-up of their own phone. A Paid top-up is booked as one Journal Entry
 (``Handler.book``): debit the petty cash account, credit the shortcode's Utility GL, the receipt as
@@ -32,12 +37,18 @@ payouts' own.
 
 Spends (``record_spend``): Paid from Petty Cash Phone on a submitted Purchase Order or an unpaid
 Purchase Invoice. The pasted SMS is read (``parse_sms``: receipt, amount, till / paybill / person,
-date and time, the phone's new balance, the transaction cost); its fields may also be typed. It books
+date and time, the phone's new balance, the transaction cost; "sent to NAME" with no account is a
+Pochi la Biashara, never a paybill); its fields may also be typed, and a typed one must agree with the
+SMS (the SMS's transaction cost wins; a charge typed without one is at most the larger of KES 100 and
+1% of the amount). An SMS without a balance is recorded as such (SMS Gave a Balance). It books
 a submitted Payment Entry: Pay, to the supplier, from the petty cash account, Reference No the
 receipt, Reference Date the SMS's date, against the order (an advance) or the invoice, a charge on
 the charges account as a deduction. Refused when the receipt is on another entry, when the amount is
-more than the document still owes (owed.left_to_pay) or than the phone's book balance, and for anyone
-but the phone's holder and the Accounts roles. The name on the SMS is shown next to the supplier's.
+more than the document still owes (owed.left_to_pay: every payout on its way, a Pay via Staff advance
+not settled too) or than the phone's book balance, and for anyone but the phone's holder and the
+Accounts roles; under the phone's, the document's and the receipt's locks with fresh reads. The name on
+the SMS is shown next to the supplier's, and only that name (never a typed one) is kept with the known
+M-Pesa names (``_observe``).
 
 Watching (``attention_section``, in the daily "needs attention" alert): for each phone, the book
 balance against the balance on its last recorded SMS (``sms_status``: top-ups paid and spends recorded
@@ -71,7 +82,8 @@ ACCOUNTS = ("Accounts Manager", "Accounts User")
 DRAFT, SENDING, PAID, FAILED, CANCELLED = "Draft", "Sending", "Paid", "Failed", "Cancelled"
 OPEN = (DRAFT, SENDING)
 # the Payment Entry fields a spend fills (migrate.create_till_payment_fields)
-SPEND_FIELDS = ("mpesa_petty_cash_phone", "mpesa_sms_time", "mpesa_sms_balance", "mpesa_sms_payee", "mpesa_sms_text")
+SPEND_FIELDS = ("mpesa_petty_cash_phone", "mpesa_sms_time", "mpesa_sms_balance", "mpesa_sms_has_balance",
+                "mpesa_sms_payee", "mpesa_sms_text")
 # doc.flags key: the phone is submitted by ``approve`` (no other submit approves it)
 APPROVE_FLAG = "mpsa_petty_cash_approve"
 # what the form shows when the settings have no petty_cash_alert_days
@@ -86,6 +98,8 @@ FIELDS = ("name", "docstatus", "company", "phone", "phone_label", "expected_name
 TOP_UP_FIELDS = ("name", "idx", "parent", "amount", "status", "requested_by", "requested_on", "payout", "request",
                  "receipt", "paid_on", "receiver_name", "journal_entry", "note")
 SAVEPOINT = "mpesa_petty_cash"
+# what the Name on M-Pesa (expected_name) is, needed to approve a phone
+NAME_HINT = "the name M-Pesa shows for this number, from a test or the SIM's registration"
 
 
 def money(value) -> str:
@@ -106,6 +120,7 @@ def _settings_value(field: str, default=None):
 #    Ksh8,500.00. Transaction cost, Ksh0.00. Amount you can transact within the day is 498,500.00."   (Buy Goods)
 #   "... Ksh2,000.00 sent to KPLC PREPAID for account 12345 on 13/11/26 at 11:02 AM New M-PESA balance is ..."
 #   "... Ksh500.00 sent to JOHN DOE 0712345678 on 13/11/26 at 12:30 PM. New M-PESA balance is ..."  (send money)
+#   "... Ksh300.00 sent to MAMA MBOGA on 13/11/26 at 1:10 PM. New M-PESA balance is ..."  (Pochi la Biashara)
 _AMOUNT = r"\d[\d,]*(?:\.\d{1,2})?"
 SMS = re.compile(
     rf"\b(?P<receipt>[A-Z0-9]{{10}})\s+Confirmed\.?\s*(?:Ksh|KES)\s?(?P<amount>{_AMOUNT})\s+"
@@ -119,7 +134,13 @@ FOR_ACCOUNT = re.compile(r"^(?P<name>.+?)\s+for\s+account\s+(?P<account>.+?)\.?$
 # a phone at the end of a send-money payee, in full or as M-Pesa masks it (0712***678)
 PHONE_AT_END = re.compile(r"^(?P<name>.*?)\s*(?P<phone>(?:\+?254|0)[17][\d*]{8}|(?:\+?254)?\s?[17]\d{8})$")
 RECEIVED = re.compile(r"\byou\s+have\s+received\b", re.I)
-TILL, PAYBILL, PERSON = "Till", "Paybill", "Phone"
+# what an SMS paid: a till (Buy Goods), a paybill (with its account), a person by send money (their phone), or a
+# Pochi la Biashara: a person's or small business's wallet, "sent to NAME" with no account and no number, so
+# its name is no paybill's and no number's
+TILL, PAYBILL, PERSON, POCHI = "Till", "Paybill", "Phone", "Pochi la Biashara"
+# a charge typed with no SMS cost to check it against is at most the larger of these: Safaricom's own customer
+# tariff tops out near KES 108 a payment (the B2C / B2B charge bands are the shortcode's, not a phone's)
+CHARGE_FLOOR, CHARGE_RATE = 100, 0.01
 
 
 def _amount(text) -> float:
@@ -142,8 +163,8 @@ def _sms_datetime(date_text: str, time_text: str) -> datetime.datetime:
 
 
 def parse_sms(text) -> frappe._dict:
-    """What one M-Pesa confirmation SMS says (pure): _dict(receipt, amount, kind (Till, Paybill or
-    Phone), payee, account (a paybill's account), phone (send money: 2547... when in full), date
+    """What one M-Pesa confirmation SMS says (pure): _dict(receipt, amount, kind (Till, Paybill,
+    Phone or Pochi la Biashara), payee, account (a paybill's account), phone (send money: 2547... when in full), date
     (YYYY-MM-DD), time (HH:MM), when (a datetime), balance (the phone's new balance, None when the
     SMS has none), charge (the transaction cost, None when it has none)). Raises ValidationError on
     any other text, saying what is wrong."""
@@ -173,13 +194,13 @@ def parse_sms(text) -> frappe._dict:
         at_end = PHONE_AT_END.match(payee)
         if to_account:
             kind, payee, account = PAYBILL, to_account.group("name").strip(), to_account.group("account").strip()
-        elif at_end and at_end.group("name").strip():
+        elif at_end:  # send money: the person's number, after their name (none for a number M-Pesa names no one)
             kind, payee = PERSON, at_end.group("name").strip()
             phone = normalize_msisdn(at_end.group("phone")) or at_end.group("phone").replace(" ", "")
         else:
-            kind = PAYBILL  # a business paid by name only
+            kind = POCHI  # "sent to NAME": a Pochi la Biashara, a person's or business's wallet, never a paybill
     balance, cost = BALANCE.search(text), COST.search(text)
-    return frappe._dict(receipt=found.group("receipt"), amount=amount, kind=kind, payee=payee, account=account,
+    return frappe._dict(receipt=found.group("receipt"), amount=amount, kind=kind, payee=payee or None, account=account,
                         phone=phone, date=when.date().isoformat(), time=when.strftime("%H:%M"), when=when,
                         balance=_amount(balance.group("value")) if balance else None,
                         charge=_amount(cost.group("value")) if cost else None)
@@ -211,9 +232,25 @@ def usable_problem(doc) -> str | None:
         return f"{doc.name} is disabled."
     if cint(doc.get("name_mismatch")):
         paid_as = cstr(doc.get("last_receiver_name")).strip()
-        return (f"{doc.name} is blocked: M-Pesa paid its number as {paid_as!r}, not "
-                f"{cstr(doc.get('mpesa_name') or doc.get('expected_name')).strip()!r}. A manager checks the number and "
-                "presses Name Confirmed.")
+        expected = cstr(doc.get("mpesa_name") or doc.get("expected_name")).strip()
+        if not expected:
+            return (f"{doc.name} is blocked: M-Pesa paid its number as {paid_as!r}, and the phone has no Name on "
+                    "M-Pesa to check it against. A manager checks the number and presses Name Confirmed.")
+        return (f"{doc.name} is blocked: M-Pesa paid its number as {paid_as!r}, not {expected!r}. A manager checks "
+                "the number and presses Name Confirmed.")
+    return None
+
+
+def top_up_problem(doc) -> str | None:
+    """Why the phone may not be topped up now (usable_problem), or None: a phone whose M-Pesa name is
+    neither given nor checked yet is never topped up, since its first top-up's name is checked
+    against the Name on M-Pesa."""
+    problem = usable_problem(doc)
+    if problem:
+        return problem
+    if not cstr(doc.get("mpesa_name")).strip() and not cstr(doc.get("expected_name")).strip():
+        return (f"{doc.name} has no Name on M-Pesa ({NAME_HINT}): cancel and amend it with that name, approved "
+                "again, before it is topped up.")
     return None
 
 
@@ -246,9 +283,21 @@ def validate_phone(doc) -> None:
         doc.phone_label = f"Petty cash {cstr(doc.get('holder_name')).strip()}".strip()
 
 
+def _holder_employee(doc):
+    return frappe.db.get_value("Employee", doc.get("holder"), ["name", "company", "status", "employee_name",
+                                                               "user_id"], as_dict=True) if doc.get("holder") else None
+
+
+def derive_holder(doc) -> None:
+    """Holder Name and Holder's User from the holder's Employee record (its User ID), on every save:
+    never what a form or the API typed."""
+    employee = _holder_employee(doc) or frappe._dict()
+    doc.holder_name = employee.get("employee_name") or None
+    doc.holder_user = cstr(employee.get("user_id")).strip() or None
+
+
 def _check_holder(doc) -> None:
-    employee = frappe.db.get_value("Employee", doc.get("holder"), ["name", "company", "status", "employee_name",
-                                                                   "user_id"], as_dict=True)
+    employee = _holder_employee(doc)
     if not employee:
         frappe.throw("Pick the holder: the Employee who keeps the phone.")
     if employee.company and employee.company != doc.get("company"):
@@ -257,8 +306,7 @@ def _check_holder(doc) -> None:
         frappe.throw(f"{employee.name} is {employee.status}: the holder is an active employee.")
     if not cstr(employee.user_id).strip():
         frappe.throw(f"Give {employee.name} a User ID: the holder records the phone's spends with their own login.")
-    doc.holder_name = employee.employee_name
-    doc.holder_user = employee.user_id
+    derive_holder(doc)
 
 
 def _check_account(doc) -> None:
@@ -294,7 +342,8 @@ def note_who_entered(doc) -> None:
 
 def check_approval(doc) -> None:
     """before_submit: submitting approves the phone, through ``approve`` only, by a named M-Pesa
-    Manager or Accounts Manager who did not create it, did not save it last and does not hold it."""
+    Manager or Accounts Manager who did not create it, did not save it last and does not hold it.
+    The Name on M-Pesa is needed: the first top-up's name is checked against it."""
     flags = getattr(doc, "flags", None) or {}
     if not flags.get(APPROVE_FLAG) and not (frappe.flags.in_install or frappe.flags.in_migrate
                                             or frappe.flags.in_patch):
@@ -309,12 +358,18 @@ def check_approval(doc) -> None:
     validate_phone(doc)
     if user == doc.get("holder_user"):
         frappe.throw("You hold this phone: another manager must approve it.", frappe.PermissionError)
+    if not cstr(doc.get("expected_name")).strip():
+        frappe.throw(f"Enter the Name on M-Pesa: {NAME_HINT}. The name M-Pesa gives on the first top-up is checked "
+                     "against it.")
+    doc.expected_name = cstr(doc.get("expected_name")).strip()
     doc.approved_by = user
     doc.approved_on = now_datetime()
 
 
-# what may change once approved (allow_on_submit) and who may not change it
-LIMIT_FIELDS = ("holder", "top_up_limit", "float_ceiling", "enabled")
+# what may change once approved (allow_on_submit) and who may not change it; the holder's User follows the
+# holder's Employee record (derive_holder), so a new User ID there is a change of holder too
+LIMIT_FIELDS = ("holder", "holder_user", "top_up_limit", "float_ceiling", "enabled")
+HOLDER_FIELDS = ("holder", "holder_user")
 # what the system writes on an approved phone (the M-Pesa name check): a save keeps the database's
 SYSTEM_FIELDS = ("mpesa_name", "name_checked_on", "name_mismatch", "last_receiver_name")
 
@@ -334,10 +389,14 @@ def keep_system_values(doc) -> None:
 
 
 def check_update(doc) -> None:
-    """before_update_after_submit: the system's values kept (keep_system_values); the holder and
-    limits may change, by who may write the phone, but not by its holder (before or after the
-    change); every check runs again, and a Comment says what changed."""
+    """before_update_after_submit: the system's values kept (keep_system_values), the holder's name
+    and User taken from the holder's Employee record (derive_holder: never typed); the limits may
+    change, by who may write the phone, but never by its holder (before or after the change); the
+    holder (or the holder's User) changes only by a named M-Pesa Manager or Accounts Manager who is
+    neither the old holder nor the new one, and the new holder is checked again. A Comment says
+    what changed."""
     keep_system_values(doc)
+    derive_holder(doc)
     before = doc.get_doc_before_save() if callable(getattr(doc, "get_doc_before_save", None)) else None
     if not before:
         return
@@ -345,9 +404,12 @@ def check_update(doc) -> None:
     if not changed:
         return
     user = frappe.session.user
-    _check_holder(doc)
     if user in {before.get("holder_user"), doc.get("holder_user")} - {None, ""}:
         frappe.throw("You hold this phone: another person changes its holder or limits.", frappe.PermissionError)
+    if set(changed) & set(HOLDER_FIELDS):
+        require(APPROVERS)
+        require_named_user()
+        _check_holder(doc)  # the new holder: an active employee of the company, with a login
     limit, ceiling = flt(doc.get("top_up_limit"), 2), flt(doc.get("float_ceiling"), 2)
     if not B2C_MIN_AMOUNT <= limit <= B2C_MAX_AMOUNT or ceiling < limit:
         frappe.throw(f"Top-Up Limit is KES {B2C_MIN_AMOUNT} to {B2C_MAX_AMOUNT:,}, and Float Ceiling at least the "
@@ -407,13 +469,14 @@ def confirm_name(name: str, adopt: int = 0) -> dict:
 
 
 # ---------------------------------------------------------------- balances
-def book_balance(account: str) -> float:
-    """The petty cash account's balance in the books: what the phone should hold."""
+def book_balance(account: str, for_update: bool = False) -> float:
+    """The petty cash account's balance in the books: what the phone should hold. ``for_update``: a
+    locking read (what is committed now), for a check made under the phone's lock."""
     if not account:
         return 0.0
     rows = frappe.db.sql(
         f"SELECT COALESCE(SUM(debit), 0) - COALESCE(SUM(credit), 0) FROM `tab{GLE}` "
-        "WHERE account = %s AND is_cancelled = 0",
+        f"WHERE account = %s AND is_cancelled = 0 {owed._locking(for_update)}",
         (account,),
     )
     return flt(rows[0][0] if rows else 0, 2)
@@ -427,7 +490,8 @@ def sms_status(doc) -> frappe._dict:
     """The phone's book balance against the balance on its last recorded SMS: _dict(book, last_sms
     (name, when, balance) or None, expected (the SMS's balance, plus the top-ups paid and less the
     spends recorded after it), difference (book less expected; None without an SMS balance),
-    last_top_up, last_spend)."""
+    last_top_up, last_spend). Only a spend whose SMS gave a balance (SMS Gave a Balance) is an
+    SMS balance: Frappe stores a Currency left empty as 0."""
     account = doc.get("petty_cash_account")
     phones = _same_account_phones(account) or [doc.get("name")]
     out = frappe._dict(book=book_balance(account), last_sms=None, expected=None, difference=None,
@@ -440,14 +504,18 @@ def sms_status(doc) -> frappe._dict:
     out.last_top_up = max(times) if times else None
     if not _spend_columns():
         return out
+    # before the migrate that adds SMS Gave a Balance, every recorded balance counts, as before
+    has_balance = "mpesa_sms_has_balance" if frappe.db.has_column(PE, "mpesa_sms_has_balance") else "1"
     spends = frappe.db.sql(
-        f"""SELECT name, paid_amount, posting_date, mpesa_sms_time, mpesa_sms_balance, creation FROM `tab{PE}`
+        f"""SELECT name, paid_amount, posting_date, mpesa_sms_time, mpesa_sms_balance, creation,
+        {has_balance} AS has_balance FROM `tab{PE}`
         WHERE docstatus = 1 AND mpesa_petty_cash_phone IN %(phones)s""",
         {"phones": tuple(phones)}, as_dict=True)
     moments = [_when(s.mpesa_sms_time) or _when(s.posting_date) for s in spends]
     moments = [m for m in moments if m]
     out.last_spend = max(moments) if moments else None
-    with_balance = [s for s in spends if s.mpesa_sms_balance is not None and _when(s.mpesa_sms_time)]
+    with_balance = [s for s in spends if cint(s.has_balance) and s.mpesa_sms_balance is not None
+                    and _when(s.mpesa_sms_time)]
     if not with_balance:
         return out
     last = max(with_balance, key=lambda s: (_when(s.mpesa_sms_time), cstr(s.creation)))
@@ -475,57 +543,96 @@ def _when(value):
 
 
 # ---------------------------------------------------------------- top-ups
-def top_ups(phone: str) -> list:
-    return sorted(frappe.get_all(TOP_UP, filters={"parent": phone, "parenttype": PHONE}, fields=list(TOP_UP_FIELDS)),
-                  key=lambda t: cint(t.idx))
+def top_ups(phone: str, for_update: bool = False) -> list:
+    """The phone's top-up rows. ``for_update``: a locking read (what is committed now)."""
+    columns = ", ".join(f"`{f}`" for f in TOP_UP_FIELDS)
+    rows = frappe.db.sql(
+        f"""SELECT {columns} FROM `tab{TOP_UP}` WHERE parent = %s AND parenttype = %s
+        {owed._locking(for_update)}""",
+        (phone, PHONE), as_dict=True)
+    return sorted(rows, key=lambda t: cint(t.idx))
 
 
-def _live_status(top_up) -> str:
-    """A Draft or Sending top-up as its payout stands now: Draft (the payout a draft), Sending (sent),
-    Cancelled (its draft deleted, or its batch cancelled before sending it)."""
+def _payouts(top_up, for_update: bool = False) -> list:
+    """Every B2C payout of the top-up: its rows on any disbursement (an amended copy's too), each with
+    its disbursement's docstatus and its request's state. Retry Failed sends the failed request
+    again: the request's status, not the row's, says where it stands."""
+    return frappe.db.sql(
+        f"""SELECT ref.parent, ref.payment_status, d.docstatus AS sent, req.name AS request,
+        req.status AS request_status, req.docstatus AS request_docstatus
+        FROM `tab{ROW}` ref JOIN `tab{DISB}` d ON d.name = ref.parent
+        LEFT JOIN `tab{REQUEST}` req ON req.name = ref.b2c_disbursement_request
+        WHERE ref.reference_doctype = %(doctype)s AND ref.reference_name = %(phone)s AND ref.reference_row = %(row)s
+        {owed._locking(for_update)}""",
+        {"doctype": PHONE, "phone": top_up.parent, "row": top_up.name}, as_dict=True)
+
+
+def _sent_again(top_up, for_update: bool = False) -> str | None:
+    """The payout of a Failed top-up that is on its way again (Retry Failed on its request, or an
+    amended copy of its batch sent), or None: sent, and its request not Failed. A Paid one counts
+    too until its Result reaches the top-up (the money left)."""
+    for payout in _payouts(top_up, for_update):
+        sent = cint(payout.sent) == 1 or cint(payout.request_docstatus) == 1
+        state = cstr(payout.request_status or payout.payment_status).strip()
+        if sent and state != "Failed":
+            return payout.parent
+    return None
+
+
+def _live_status(top_up, for_update: bool = False) -> str:
+    """A top-up as its payout stands now: Draft (the payout a draft), Sending (sent; a Failed one sent
+    again by Retry Failed or an amended batch), Cancelled (its draft deleted, or its batch cancelled
+    before sending it); Paid and Cancelled stay."""
+    if top_up.status == FAILED:
+        return SENDING if _sent_again(top_up, for_update) else FAILED
     if top_up.status not in OPEN:
         return top_up.status
     if not top_up.payout:
         return top_up.status  # its payout is being made (top_up): in the same transaction
-    docstatus = frappe.db.get_value(DISB, top_up.payout, "docstatus")
+    docstatus = frappe.db.get_value(DISB, top_up.payout, "docstatus", for_update=for_update)
     if docstatus is None:
         return CANCELLED  # its draft was deleted
     if cint(docstatus) == 0:
         return DRAFT
     if cint(docstatus) == 1:
         return SENDING
-    row = frappe.db.get_value(ROW, {"parent": top_up.payout, "reference_row": top_up.name}, "payment_status")
-    return SENDING if row in ("Initiated", "Paid") else CANCELLED
+    row = frappe.db.get_value(ROW, {"parent": top_up.payout, "reference_row": top_up.name}, "payment_status",
+                              for_update=for_update)
+    if row in ("Initiated", "Paid") or _sent_again(top_up, for_update):
+        return SENDING
+    return CANCELLED
 
 
-def refresh_top_ups(phone: str) -> list:
-    """The phone's top-ups, a Draft or Sending one's status set to where its payout stands."""
-    rows = top_ups(phone)
+def refresh_top_ups(phone: str, for_update: bool = False) -> list:
+    """The phone's top-ups, each status set to where its payouts stand (_live_status). ``for_update``:
+    locking reads, for a check made under the phone's lock."""
+    rows = top_ups(phone, for_update)
     for row in rows:
-        status = _live_status(row)
+        status = _live_status(row, for_update)
         if status != row.status:
             frappe.db.set_value(TOP_UP, row.name, "status", status, update_modified=False)
             row.status = status
     return rows
 
 
-def _on_its_way(rows, exclude: str | None = None) -> float:
-    """What top-ups add that the book balance does not show yet: sent and not answered, or Paid and
-    not booked (a booking the sweep retries)."""
+def _on_its_way(rows, exclude: str | None = None, for_update: bool = False) -> float:
+    """What top-ups add that the book balance does not show yet: sent and not answered (a Failed one
+    sent again too: refresh_top_ups), or Paid and not booked (a booking the sweep retries)."""
     total = 0.0
     for row in rows:
         if row.name == exclude:
             continue
-        unbooked = row.status == PAID and cint(frappe.db.get_value(JE, row.journal_entry, "docstatus")
+        unbooked = row.status == PAID and cint(frappe.db.get_value(JE, row.journal_entry, "docstatus",
+                                                                   for_update=for_update)
                                                 if row.journal_entry else 0) != 1
         if row.status == SENDING or unbooked:
             total += flt(row.amount)
     return flt(total, 2)
 
 
-def in_flight(phone: str, exclude: str | None = None) -> float:
+def in_flight(phone: str, exclude: str | None = None, for_update: bool = False) -> float:
     """What the phone's top-ups add on top of its book balance (``_on_its_way``)."""
-    return _on_its_way(refresh_top_ups(phone), exclude)
+    return _on_its_way(refresh_top_ups(phone, for_update), exclude, for_update)
 
 
 def amount_problem(doc, amount, book: float, flying: float) -> str | None:
@@ -604,7 +711,7 @@ def _new_disbursement(doc, settings: str, top_up_row: str, amount: int):
 
 def _add_top_up(doc, amount: int) -> str:
     """A Draft top-up row on the (submitted) phone, written directly: the phone is not saved."""
-    idx = max([cint(t.idx) for t in top_ups(doc.name)] or [0]) + 1
+    idx = max([cint(t.idx) for t in top_ups(doc.name, for_update=True)] or [0]) + 1  # under the phone's lock
     row = frappe.get_doc({"doctype": TOP_UP, "parent": doc.name, "parenttype": PHONE, "parentfield": TOP_UPS,
                           "idx": idx, "docstatus": 1, "amount": amount, "status": DRAFT,
                           "requested_by": frappe.session.user, "requested_on": now_datetime()})
@@ -622,19 +729,24 @@ def top_up(phone: str, amount=None, mpesa_settings: str | None = None) -> dict:
     frappe.has_permission(DISB, "create", throw=True)
     from .employee_documents import _shortcode
 
+    # nothing written yet: what was read to get here is committed away, so the reads under the lock see a
+    # top-up another preparer committed while this one waited (owed.booking_lock); and they are locking reads
+    owed.fresh_snapshot()
     with owed.doc_lock(PHONE, phone):
         doc = _phone(phone, for_update=True)
-        problem = usable_problem(doc)
+        problem = top_up_problem(doc)
         if problem:
             frappe.throw(problem)
         _not_holder(doc, "prepare")
-        rows = refresh_top_ups(doc.name)
+        rows = refresh_top_ups(doc.name, for_update=True)
         waiting = [t for t in rows if t.status in OPEN]
         if waiting:
-            frappe.throw(f"Top-up #{waiting[0].idx} of {doc.name} is {waiting[0].status} ({waiting[0].payout}): send "
-                         "it, or delete its draft, before another.")
-        book = book_balance(doc.petty_cash_account)
-        flying = in_flight(doc.name)
+            first = waiting[0]
+            then = ("send it, or delete its draft, before another" if first.status == DRAFT
+                    else "wait for M-Pesa's answer before another")
+            frappe.throw(f"Top-up #{first.idx} of {doc.name} is {first.status} ({first.payout}): {then}.")
+        book = book_balance(doc.petty_cash_account, for_update=True)
+        flying = _on_its_way(rows, for_update=True)
         amount = flt(amount, 2) if flt(amount) else suggested_amount(doc, book, flying)
         if amount < 1:
             frappe.throw(f"{doc.name} holds KES {money(book)} of its KES {money(doc.float_ceiling)} ceiling: nothing "
@@ -660,8 +772,9 @@ def _without_number(received) -> str:
 
 def check_name(phone: str, request) -> None:
     """A top-up was Paid: the name M-Pesa gave the number, on the first top-up against the Expected
-    Name, later against that first name. A mismatch (or another number in front of it) blocks top-ups
-    until a manager confirms it, with a Comment and an alert. Safe to repeat."""
+    Name, later against that first name. A mismatch (or another number in front of it, or no name to
+    check it against: a phone approved before the Name on M-Pesa was needed) blocks top-ups until a
+    manager confirms it, with a Comment and an alert. Safe to repeat."""
     from . import party_accounts as pa
 
     received = cstr(request.get("receiver_public_name")).strip()
@@ -673,14 +786,16 @@ def check_name(phone: str, request) -> None:
     other_number = bool(prefix) and prefix.isdigit() and normalize_msisdn(prefix) != doc.phone
     values = {"last_receiver_name": received[:140]}
     expected = cstr(doc.mpesa_name).strip() or cstr(doc.expected_name).strip()
-    mismatch = other_number or bool(expected and name and not pa.names_match(expected, name))
+    # no name to check against: never adopted unchecked
+    mismatch = other_number or not expected or bool(name and not pa.names_match(expected, name))
     if not mismatch and not cstr(doc.mpesa_name).strip():
         values.update(mpesa_name=name[:140], name_checked_on=now_datetime())  # the first top-up's name
     # a name a manager confirmed already (Name Confirmed, the last name M-Pesa gave) is not blocked again
     if mismatch and not cint(doc.name_mismatch) and cstr(doc.last_receiver_name).strip() != received[:140]:
         values["name_mismatch"] = 1
+        against = f"not {expected!r}" if expected else "and the phone has no Name on M-Pesa to check it against"
         message = (f"Petty cash phone {label(doc)} was topped up by {request.get('name')}, and M-Pesa paid it as "
-                   f"{received!r}, not {expected!r}: top-ups are held until a manager checks the number and presses "
+                   f"{received!r}, {against}: top-ups are held until a manager checks the number and presses "
                    "Name Confirmed.")
         frappe.get_doc(PHONE, phone).add_comment("Comment", message)
         pa.alert(message, frappe._dict(doctype=PHONE, name=phone))
@@ -691,14 +806,23 @@ def check_name(phone: str, request) -> None:
 class Handler(partyless.Handler):
     """A petty cash phone's top-ups: the paying row is the phone's top-up row."""
 
-    def _top_up(self, row):
-        return frappe.db.get_value(TOP_UP, partyless._value(row, "reference_row"), list(TOP_UP_FIELDS), as_dict=True)
+    def _top_up(self, row, for_update: bool = False):
+        return frappe.db.get_value(TOP_UP, partyless._value(row, "reference_row"), list(TOP_UP_FIELDS), as_dict=True,
+                                   for_update=for_update)
 
     def check_row(self, row, parent) -> None:
+        """Every save of the payout, and at the send (or a retry) under the phone's lock with locking
+        reads: the ceiling counts every other top-up on its way, a Failed one sent again too."""
         idx = partyless._value(row, "idx")
         name = partyless._value(row, "reference_name")
-        doc = _phone(name)
-        problem = usable_problem(doc)
+        sending = parent is not None and cint(parent.get("docstatus")) != 0
+        if sending and name:
+            # the lock top_up and the send's double-payout check take (held until commit): two top-ups of
+            # one phone sent at once are checked one after the other
+            with owed.doc_lock(PHONE, name):
+                pass
+        doc = _phone(name, for_update=sending)
+        problem = top_up_problem(doc)
         if problem:
             frappe.throw(f"Row #{idx}: {problem}")
         if normalize_msisdn(partyless._value(row, "partyb")) != doc.phone:
@@ -706,7 +830,7 @@ class Handler(partyless.Handler):
                          f"{doc.name} ({privacy.phone(doc.phone)}).")
         if parent is not None and parent.get("company") and parent.get("company") != doc.company:
             frappe.throw(f"Row #{idx}: {doc.name} is {doc.company}'s, not {parent.get('company')}'s.")
-        top_up_row = self._top_up(row)
+        top_up_row = self._top_up(row, for_update=sending)
         if not top_up_row or top_up_row.parent != doc.name:
             frappe.throw(f"Row #{idx} names no top-up of {doc.name}: make the top-up with Top Up by M-Pesa on the "
                          "phone.")
@@ -721,8 +845,9 @@ class Handler(partyless.Handler):
             if other is not None and cint(other) != 2:
                 frappe.throw(f"Row #{idx}: top-up #{top_up_row.idx} of {doc.name} is paid by {top_up_row.payout}.")
         _not_holder(doc, "send")
-        book = book_balance(doc.petty_cash_account)
-        problem = amount_problem(doc, top_up_row.amount, book, in_flight(doc.name, exclude=top_up_row.name))
+        book = book_balance(doc.petty_cash_account, for_update=sending)
+        flying = in_flight(doc.name, exclude=top_up_row.name, for_update=sending)
+        problem = amount_problem(doc, top_up_row.amount, book, flying)
         if problem:
             frappe.throw(f"Row #{idx}: {problem}")
 
@@ -888,19 +1013,33 @@ def _pick_phone(company: str, chosen: str | None):
     frappe.throw(f"Pick the petty cash phone that paid: {company} has {len(company_phones) or 'no'} approved phones.")
 
 
-def receipt_used(receipt: str) -> str | None:
-    """The live entry that carries ``receipt`` already: 'Payment Entry ACC-PAY-1', or None."""
-    for doctype, field in ((PE, "reference_no"), (JE, "cheque_no")):
-        name = frappe.db.get_value(doctype, {field: receipt, "docstatus": ["<", 2]}, "name")
-        if name:
-            return f"{doctype} {name}"
+def receipt_used(receipt: str, for_update: bool = False) -> str | None:
+    """The live entry that carries ``receipt`` already: 'Payment Entry ACC-PAY-1', or None.
+    ``for_update``: the Payment Entry read is a locking read on its Reference No (indexed:
+    install.LOOKUP_INDEXES), as money_in.payment_entry.block_duplicate_receipt reads it, so it sees an
+    entry committed while this one waited for the receipt's lock. A Journal Entry's Cheque No has no
+    such index (a locking read would lock the table): it is read after record_spend's fresh snapshot."""
+    if not cstr(receipt).strip():
+        return None
+    for doctype, field, locking in ((PE, "reference_no", owed._locking(for_update)), (JE, "cheque_no", "")):
+        rows = frappe.db.sql(
+            f"""SELECT name FROM `tab{doctype}` WHERE `{field}` = %s AND docstatus < 2 ORDER BY name LIMIT 1
+            {locking}""",
+            (receipt,))
+        if rows:
+            return f"{doctype} {rows[0][0]}"
     return None
 
 
 def spend_values(sms=None, receipt=None, amount=None, sms_date=None, sms_time=None, balance=None, charge=None,
                  payee=None) -> frappe._dict:
     """What a spend records: the SMS read again (``parse_sms``), each field typed by hand agreeing
-    with it; or, without an SMS, the typed fields (receipt, amount, date and time needed)."""
+    with it (the receipt, amount, date, time, new balance, the name paid and the transaction cost:
+    the SMS's own wins, a different one typed is refused); or, without an SMS, the typed fields
+    (receipt, amount, date and time needed). A charge typed with no SMS cost to check it against is
+    at most the larger of KES 100 and 1% of the amount (CHARGE_FLOOR, CHARGE_RATE): Safaricom's own
+    customer tariff stays below it, so more is a typo. ``sms_payee``: the name the SMS gave, the only
+    one kept with the known M-Pesa names (_observe); never a typed one."""
     typed = frappe._dict(receipt=cstr(receipt).strip().upper() or None, amount=flt(amount, 2) or None,
                          date=cstr(sms_date).strip() or None, time=cstr(sms_time).strip()[:5] or None,
                          balance=None if balance in (None, "") else flt(balance, 2),
@@ -908,17 +1047,24 @@ def spend_values(sms=None, receipt=None, amount=None, sms_date=None, sms_time=No
     if cstr(sms).strip():
         read = parse_sms(sms)
         for field, label_ in (("receipt", "receipt"), ("amount", "amount"), ("date", "date"), ("time", "time"),
-                              ("balance", "new balance")):
+                              ("balance", "new balance"), ("charge", "transaction charge"), ("payee", "name paid")):
             mine, its = typed.get(field), read.get(field)
             if mine is None or its is None:
                 continue
-            same = abs(flt(mine) - flt(its)) < 0.005 if field in ("amount", "balance") else (
-                cstr(getdate(mine)) == cstr(getdate(its)) if field == "date" else cstr(mine) == cstr(its))
+            if field in ("amount", "balance", "charge"):
+                same = abs(flt(mine) - flt(its)) < 0.005
+            elif field == "date":
+                same = cstr(getdate(mine)) == cstr(getdate(its))
+            elif field == "payee":
+                same = " ".join(cstr(mine).upper().split()) == " ".join(cstr(its).upper().split())
+            else:
+                same = cstr(mine) == cstr(its)
             if not same:
                 frappe.throw(f"The {label_} typed ({mine}) is not the SMS's ({its}): correct one of them.")
-        if typed.charge is not None:
-            read.charge = typed.charge
-        read.payee = typed.payee or read.payee
+        if read.charge is None and typed.charge is not None:  # an SMS pasted without its cost line
+            read.charge = _typed_charge(typed.charge, read.amount)
+        read.sms_payee = read.payee or None
+        read.payee = read.payee or typed.payee  # the SMS's name; one typed only when the SMS gave none
         read.text = re.sub(r"\s+", " ", cstr(sms)).strip()
         return read
     missing = [label_ for field, label_ in (("receipt", "receipt"), ("amount", "amount"), ("date", "date"),
@@ -934,7 +1080,21 @@ def spend_values(sms=None, receipt=None, amount=None, sms_date=None, sms_time=No
         frappe.throw(f"Type the date as a date and the time as HH:MM ({typed.date} {typed.time}).")
     return frappe._dict(receipt=typed.receipt, amount=typed.amount, kind=None, payee=typed.payee, account=None,
                         phone=None, date=when.date().isoformat(), time=when.strftime("%H:%M"), when=when,
-                        balance=typed.balance, charge=typed.charge, text=None)
+                        balance=typed.balance, charge=_typed_charge(typed.charge, typed.amount), text=None,
+                        sms_payee=None)
+
+
+def _typed_charge(charge, amount):
+    """A transaction charge typed with no SMS cost to check it against: at most the larger of KES 100
+    and 1% of the amount (spend_values)."""
+    if charge is None:
+        return None
+    most = max(CHARGE_FLOOR, flt(flt(amount) * CHARGE_RATE, 2))
+    if flt(charge) > most + 0.005:
+        frappe.throw(f"A transaction charge of KES {money(charge)} on KES {money(amount)} is more than M-Pesa charges "
+                     f"(at most KES {money(most)} is taken): paste the SMS, whose Transaction cost is booked, or check "
+                     "the charge.")
+    return charge
 
 
 def _supplier_name(supplier) -> str:
@@ -1028,7 +1188,11 @@ def build_spend_entry(doctype: str, values, doc, spend, charge: float) -> object
         pe.append("deductions", {"account": doc.charges_account,
                                  "cost_center": doc.default_cost_center or pe.cost_center, "amount": charge,
                                  "description": f"M-Pesa transaction cost, {spend.receipt}"})
-    extra = {"mpesa_petty_cash_phone": doc.name, "mpesa_sms_time": spend.when, "mpesa_sms_balance": spend.balance,
+    # no balance on the SMS is said by SMS Gave a Balance: Frappe stores a Currency left empty as 0
+    has_balance = spend.balance is not None
+    extra = {"mpesa_petty_cash_phone": doc.name, "mpesa_sms_time": spend.when,
+             "mpesa_sms_balance": flt(spend.balance, 2) if has_balance else 0,
+             "mpesa_sms_has_balance": cint(has_balance),
              "mpesa_sms_payee": cstr(spend.payee)[:140] or None, "mpesa_sms_text": spend.get("text")}
     for field, value in extra.items():
         if pe.meta.has_field(field):
@@ -1037,23 +1201,28 @@ def build_spend_entry(doctype: str, values, doc, spend, charge: float) -> object
 
 
 def _observe(spend, supplier: str, pe_name: str) -> None:
-    """The name on the SMS, kept with the known M-Pesa names (source SMS): a person's by their phone;
-    a till's or paybill's against the supplier's one approved Till or Paybill account of that kind."""
+    """The name the pasted SMS gave (``sms_payee``: never a typed one), kept with the known M-Pesa
+    names (source SMS): a person's by their phone; a till's or paybill's against the supplier's one
+    approved Till or Paybill account of that kind. A Pochi la Biashara or a spend typed without an
+    SMS keeps no name: it names no number, and a person's name is never a paybill's."""
     from . import known_names
     from . import party_accounts as pa
 
+    name = cstr(spend.get("sms_payee")).strip()
+    if not cstr(spend.get("text")).strip() or not name:
+        return
     if spend.kind == PERSON and normalize_msisdn(spend.phone):
-        known_names.observe(known_names.PHONE, spend.phone, f"{spend.phone} - {spend.payee}", when=spend.when,
+        known_names.observe(known_names.PHONE, spend.phone, f"{spend.phone} - {name}", when=spend.when,
                             payout_doctype=PE, payout=pe_name, source=known_names.SMS)
         return
     kind = {TILL: pa.TILL, PAYBILL: pa.PAYBILL}.get(spend.kind)
-    if not kind or not spend.payee:
+    if not kind:
         return
     accounts = [a for a in pa.accounts_of(pa.SUPPLIER_ACCOUNT, supplier, (kind,))
                 if kind != pa.PAYBILL or not spend.get("account")
                 or cstr(a.account_number).strip().upper() == cstr(spend.account).strip().upper()]
     if len(accounts) == 1 and cstr(accounts[0].shortcode).strip():
-        known_names.observe(kind, accounts[0].shortcode, spend.payee, when=spend.when, payout_doctype=PE,
+        known_names.observe(kind, accounts[0].shortcode, name, when=spend.when, payout_doctype=PE,
                             payout=pe_name, source=known_names.SMS)
 
 
@@ -1083,6 +1252,10 @@ def record_spend(doctype: str, name: str, phone: str | None = None, sms: str | N
         frappe.throw(f"The SMS's date and time ({spend.date} {spend.time}) are in the future: check them.")
     from ..money_in.common import named_lock
 
+    # nothing written yet: what was read to get here is committed away, so every read under the locks sees
+    # what another spend or payout committed while this one waited (owed.booking_lock); the receipt and the
+    # book balance are locking reads as well
+    owed.fresh_snapshot()
     with owed.doc_lock(PHONE, doc.name), owed.doc_lock(doctype, name), named_lock(f"mpesa-receipt:{spend.receipt}"):
         doc = _phone(doc.name, for_update=True)
         problem = usable_problem(doc)
@@ -1092,13 +1265,14 @@ def record_spend(doctype: str, name: str, phone: str | None = None, sms: str | N
         problems = owed.document_problems(doctype, values)
         if problems:
             frappe.throw(problems[0])
-        used = receipt_used(spend.receipt)
+        used = receipt_used(spend.receipt, for_update=True)
         if used:
             frappe.throw(f"M-Pesa receipt {spend.receipt} is on {used} already: a receipt is recorded once.")
+        # every payout on its way counts, a Pay via Staff advance not settled too (owed.planned_lines)
         left = owed.left_to_pay(doctype, name, for_update=True)
         if spend.amount > left.left + 0.005:
             frappe.throw(f"KES {money(spend.amount)} is more than {name} still owes. {owed.explain(name, left)}")
-        book = book_balance(doc.petty_cash_account)
+        book = book_balance(doc.petty_cash_account, for_update=True)
         if flt(spend.amount + charge, 2) > book + 0.005:
             frappe.throw(f"{doc.name}'s book balance is KES {money(book)}, less than KES "
                          f"{money(spend.amount + charge)}: record its missing top-ups first, so the phone's record is "
@@ -1204,9 +1378,9 @@ def phone_state(name: str) -> dict:
         "last_spend": cstr(status.last_spend or "") or None,
         "in_flight": flying,
         "top_ups": [dict(t) for t in rows],
-        "problem": usable_problem(doc) if cint(doc.docstatus) == 1 else None,
+        "problem": top_up_problem(doc) if cint(doc.docstatus) == 1 else None,
         "suggested_amount": suggested_amount(doc, status.book, flying) if cint(doc.docstatus) == 1 else 0,
-        "can_top_up": (cint(doc.docstatus) == 1 and not usable_problem(doc) and not is_holder(doc, user)
+        "can_top_up": (cint(doc.docstatus) == 1 and not top_up_problem(doc) and not is_holder(doc, user)
                        and not roles.isdisjoint(PREPARE_ROLES) and not any(t.status in OPEN for t in rows)
                        and bool(frappe.has_permission(DISB, "create"))),
         "can_approve": (cint(doc.docstatus) == 0 and approver

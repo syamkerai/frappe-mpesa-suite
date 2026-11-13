@@ -1,7 +1,8 @@
 // Supplier tills on a submitted Purchase Order or Purchase Invoice (round 4.5):
 // - Paid from Petty Cash Phone (money_out.petty_cash): paste the M-Pesa SMS the phone got, and a Payment
 //   Entry from the phone's petty cash account is booked to the supplier. For the phone's holder and the
-//   Accounts roles; the name on the SMS is shown next to the supplier's.
+//   Accounts roles; the name on the SMS is shown next to the supplier's. A pasted SMS's name paid and
+//   transaction cost are its own (the fields lock); typed fields must agree with it.
 // - Pay via Staff (money_out.pay_via_staff): an Employee Advance to a staff member's approved phone, for the
 //   users M-Pesa Suite Settings lists only (the server says who: document_state), and on an invoice Settle
 //   Staff Advances.
@@ -126,7 +127,9 @@ mpsa_tills.spend = (frm, state) => {
 				fieldname: "charge",
 				fieldtype: "Currency",
 				label: __("Transaction Charge"),
-				description: __("A paybill's charge, booked to the phone's charges account."),
+				description: __(
+					"Booked to the phone's charges account. A pasted SMS's Transaction cost is used; typed without one, at most the larger of KES 100 and 1% of the amount."
+				),
 			},
 			{ fieldname: "screenshot_section", fieldtype: "Section Break" },
 			{ fieldname: "screenshot", fieldtype: "Attach", label: __("Screenshot (optional)") },
@@ -157,8 +160,12 @@ mpsa_tills.spend = (frm, state) => {
 mpsa_tills.read_sms = (frm, d) => {
 	const text = (d.get_value("sms") || "").trim();
 	const info = d.fields_dict.sms_info.$wrapper;
+	// the SMS's own name paid and transaction cost are recorded: typed ones only without an SMS
+	const lock = (fieldnames, locked) =>
+		fieldnames.forEach((f) => d.set_df_property(f, "read_only", locked ? 1 : 0));
 	if (!text) {
 		info.empty();
+		lock(["payee", "charge"], false);
 		return;
 	}
 	const e = frappe.utils.escape_html;
@@ -174,6 +181,8 @@ mpsa_tills.read_sms = (frm, d) => {
 				balance: r.balance,
 				charge: r.charge,
 			});
+			lock(["payee"], !!r.payee);
+			lock(["charge"], r.charge !== null && r.charge !== undefined);
 			const colour = r.name_matches ? "--green-600" : "--orange-600";
 			let html = `<div class="small" style="color: var(${colour})">${__("SMS: {0} · Supplier: {1}", [
 				e(r.payee || ""),
@@ -191,7 +200,10 @@ mpsa_tills.read_sms = (frm, d) => {
 					});
 			}
 		})
-		.catch(() => info.html(`<div class="small text-danger">${__("The SMS could not be read: type its fields.")}</div>`));
+		.catch(() => {
+			lock(["payee", "charge"], false);
+			info.html(`<div class="small text-danger">${__("The SMS could not be read: type its fields.")}</div>`);
+		});
 };
 
 // ---------------------------------------------------------------- Pay via Staff
