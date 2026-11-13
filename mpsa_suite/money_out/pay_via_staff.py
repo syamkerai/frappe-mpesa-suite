@@ -8,12 +8,14 @@ empty means nobody. The server refuses everyone else, at the advance and at the 
   ``mpesa_purchase_invoice`` and ``mpesa_supplier`` naming what it pays, and the draft B2C Payment
   Disbursement that pays it (the Employee Advance B2C path of money_out.employee_documents) to the
   staff member's approved Employee M-Pesa Account phone, never a typed number or a Cell Number. At
-  most what the document still owes (owed.left_to_pay) less its other staff advances not settled.
-  A listed user still never pays an advance to themselves (employee_accounts.own_payment_problem,
-  and employee_documents.check_not_own_b2c at the send);
+  most what the document still owes (owed.left_to_pay, which takes its other staff advances not
+  settled off: ``open_parts``), never for a supplier on hold (owed.supplier_hold). A listed user
+  still never pays an advance to themselves (employee_accounts.own_payment_problem, and
+  employee_documents.check_not_own_b2c at the send);
 - the advance's payouts: a B2C row (every save and the send), the send itself and a retry are for
   listed users only and pay an approved phone of the employee only (``check_b2c_row``,
-  ``check_send``, ``check_retry``); a B2B request never pays such an advance (``b2b_problem``); an
+  ``check_send``, ``check_retry``), never while the supplier is on hold (``hold_problem``, as B2B
+  refuses at its send); a B2B request never pays such an advance (``b2b_problem``); an
   Employee Advance carrying these fields is made by ``make_advance`` only (``validate_advance``).
 
 Settlement (``settle_staff_advances``): when the supplier's Purchase Invoice is submitted (hooks.py,
@@ -21,11 +23,19 @@ Settlement (``settle_staff_advances``): when the supplier's Purchase Invoice is 
 employee advance account against each Employee Advance made for the invoice or its orders, as HRMS's
 own return entry does; at most what each advance was paid and not claimed or returned, in all at most
 the invoice's outstanding. Settle Staff Advances (``settle_now``) does the same by hand. What an
-advance has left after that (paid more than the invoice) is the HRMS Return or Claim's.
+advance has left after that (paid more than the invoice) is the HRMS Return or Claim's. Under the
+invoice's lock and each advance's (``settle_lock``), with locking reads: two invoices of one order
+never both settle its advance.
+
+Every other payout of the order or invoice sees its staff advances not settled: they are
+owed.planned_lines (``open_parts``), which owed.left_to_pay (B2B, the schedule, the petty cash
+phone's spends) and B2C's own guards take off what it owes.
 
 The daily "needs attention" alert (``attention_section``) lists the staff advances paid more than
 ``staff_advance_settle_days`` (default 3) ago and not settled.
 """
+
+import contextlib
 
 import frappe
 from frappe.utils import cint, cstr, flt, getdate, now_datetime, nowdate
@@ -107,20 +117,24 @@ def staff_advance(name) -> frappe._dict | None:
     return values
 
 
-def settled_amounts(names) -> dict:
+def settled_amounts(names, for_update: bool = False) -> dict:
     """{advance: what submitted Journal Entries credit against it}: the settlements, and HRMS's own
     return entries. HRMS writes them back as the advance's Return Amount (set_total_advance_paid);
-    read here too, so a settlement is never made twice whatever HRMS's version writes back."""
+    read here too, so a settlement is never made twice whatever HRMS's version writes back.
+    ``for_update``: a locking read (what is committed now, not the transaction's snapshot)."""
     names = sorted({cstr(n).strip() for n in names or [] if cstr(n).strip()})
     if not names:
         return {}
     rows = frappe.db.sql(
-        f"""SELECT jea.reference_name, COALESCE(SUM(jea.credit_in_account_currency), 0)
+        f"""SELECT jea.reference_name, jea.credit_in_account_currency
         FROM `tab{JE} Account` jea JOIN `tab{JE}` je ON je.name = jea.parent
         WHERE jea.reference_type = %s AND jea.reference_name IN %s AND je.docstatus = 1
-        GROUP BY jea.reference_name""",
+        {owed._locking(for_update)}""",
         (EA, tuple(names)))
-    return {r[0]: flt(r[1], 2) for r in rows}
+    totals = {}
+    for name, credit in rows:
+        totals[name] = flt(totals.get(name, 0) + flt(credit), 2)
+    return totals
 
 
 def _open(advance, settled=None) -> float:
@@ -140,19 +154,55 @@ ADVANCE_FIELDS = ("name", "employee", "employee_name", "company", "posting_date"
                   "claimed_amount", "return_amount", "advance_account", "docstatus", "creation", *FIELDS)
 
 
-def advances_of(doctype: str, name: str) -> list:
-    """The submitted staff advances made for the order or invoice (an invoice: and for its orders)."""
-    if not _ready():
+def _columns() -> bool:
+    """The Employee Advance has the Pay via Staff columns (migrate.create_till_payment_fields)."""
+    try:
+        return bool(frappe.db.has_column(EA, "mpesa_supplier"))
+    except Exception:  # no Employee Advance table (HRMS not installed)
+        return False
+
+
+def advances_of(doctype: str, name: str, for_update: bool = False) -> list:
+    """The submitted staff advances made for the order or invoice (an invoice: and for its orders,
+    those made for no invoice). ``for_update``: a locking read, what is committed now."""
+    if not _ready() or not _columns():
         return []
-    rows = frappe.get_all(EA, filters={DOC_FIELD[doctype]: name, "docstatus": 1}, fields=list(ADVANCE_FIELDS))
+    columns = ", ".join(f"`{f}`" for f in ADVANCE_FIELDS)
+    locking = owed._locking(for_update)
+    rows = frappe.db.sql(
+        f"SELECT {columns} FROM `tab{EA}` WHERE `{DOC_FIELD[doctype]}` = %s AND docstatus = 1 {locking}",
+        (name,), as_dict=True)
     if doctype == PI:
         orders = _orders_of(name)
         if orders:
             listed = {r.name for r in rows}
-            rows += [r for r in frappe.get_all(EA, filters={"mpesa_purchase_order": ["in", orders], "docstatus": 1},
-                                               fields=list(ADVANCE_FIELDS))
-                     if r.name not in listed and not cstr(r.mpesa_purchase_invoice).strip()]
+            rows += [r for r in frappe.db.sql(
+                f"""SELECT {columns} FROM `tab{EA}` WHERE mpesa_purchase_order IN %s AND docstatus = 1
+                AND COALESCE(mpesa_purchase_invoice, '') = '' {locking}""",
+                (tuple(orders),), as_dict=True) if r.name not in listed]
     return sorted(rows, key=lambda r: (cstr(r.posting_date), cstr(r.creation), r.name))
+
+
+def open_parts(doctype: str, name: str, for_update: bool = False) -> list:
+    """What the staff advances of the order or invoice (advances_of) still stand for on it, as
+    owed.left_to_pay parts (owed.planned_lines: B2B, B2C, the schedule and the petty cash phone
+    all take them off): each advance's amount less what was claimed, returned or settled
+    (_not_settled). An advance not paid yet counts: it will be."""
+    if doctype not in DOCUMENTS:
+        return []
+    advances = advances_of(doctype, name, for_update=for_update)
+    if not advances:
+        return []
+    settled = settled_amounts([a.name for a in advances], for_update=for_update)
+    parts = []
+    for advance in advances:
+        amount = _not_settled(advance, settled)
+        if amount <= owed.MIN:
+            continue
+        who = cstr(advance.employee_name or advance.employee).strip()
+        parts.append(frappe._dict(kind="advance", name=advance.name, amount=amount, employee=advance.employee,
+                                  label=f"Pay via Staff advance {advance.name} ({who}) not settled {money(amount)}"))
+    return parts
 
 
 def _orders_of(invoice: str) -> list:
@@ -230,13 +280,27 @@ def check_b2c_row(row, advance: str, account) -> None:
         frappe.throw(f"Row #{row.idx}: {problem}")
 
 
+def hold_problem(advance: str) -> str | None:
+    """Why a staff advance's payout is not sent now: the supplier it pays is on hold for payments
+    (owed.supplier_hold, as B2B refuses at its send), or None."""
+    values = staff_advance(advance)
+    hold = owed.supplier_hold(values.mpesa_supplier) if values else None
+    return f"{advance} pays {values.mpesa_supplier}: {hold}" if hold else None
+
+
 def check_send(doc) -> None:
     """B2C Payment Disbursement before_submit (employee_documents.check_not_own_b2c): a row paying a
-    staff advance is sent by a listed user only."""
+    staff advance is sent by a listed user only, and never while its supplier is on hold."""
+    listed = False
     for row in doc.get("references") or []:
-        if getattr(row, "reference_doctype", None) == EA and staff_advance(getattr(row, "reference_name", None)):
-            require_listed("send a Pay via Staff advance")
-            return
+        name = getattr(row, "reference_name", None)
+        if getattr(row, "reference_doctype", None) == EA and staff_advance(name):
+            if not listed:
+                require_listed("send a Pay via Staff advance")
+                listed = True
+            problem = hold_problem(name)
+            if problem:
+                frappe.throw(f"Row #{getattr(row, 'idx', None)}: {problem}")
 
 
 def check_retry(doc) -> None:
@@ -245,6 +309,9 @@ def check_retry(doc) -> None:
     if getattr(doc, "reference_doctype", None) != EA or not staff_advance(getattr(doc, "reference_name", None)):
         return
     require_listed("send a Pay via Staff advance again")
+    problem = hold_problem(doc.reference_name)
+    if problem:
+        frappe.throw(problem)
     ref = cstr(getattr(doc, "b2c_payment_disbursement_reference", None)).strip()
     account = frappe.db.get_value(ROW, ref, "payee_account") if ref else None
     employee = frappe.db.get_value(EA, doc.reference_name, "employee")
@@ -279,12 +346,11 @@ def _check_document(doctype: str) -> None:
 
 
 def _left(doctype: str, name: str, for_update: bool = False) -> tuple:
-    """(what the document still owes, less its staff advances not settled; the advances)."""
+    """(what is left for a staff advance, the owed.left_to_pay result): what the document still
+    owes, its staff advances not settled taken off with every other payout on its way (they are
+    owed.planned_lines, which every payout path counts)."""
     result = owed.left_to_pay(doctype, name, for_update=for_update)
-    advances = advances_of(doctype, name)
-    settled = settled_amounts(a.name for a in advances)
-    taken = flt(sum(_not_settled(a, settled) for a in advances), 2)
-    return max(flt(result.left - taken, 2), 0.0), advances, result
+    return result.left, result
 
 
 def _advance_account(company: str) -> str:
@@ -306,6 +372,9 @@ def make_advance(doctype: str, name: str, employee: str, amount=None, purpose: s
     from . import employee_accounts
     from . import employee_documents as ed
 
+    # nothing written yet: what was read to get here is committed away, so every read under the lock
+    # sees what another payout or advance committed while this one waited (owed.booking_lock)
+    owed.fresh_snapshot()
     with owed.doc_lock(doctype, name):
         values = owed.read_document(doctype, name)  # the locking read of the row comes last (_left: R4)
         if not values:
@@ -313,6 +382,9 @@ def make_advance(doctype: str, name: str, employee: str, amount=None, purpose: s
         problems = owed.document_problems(doctype, values)
         if problems:
             frappe.throw(problems[0])
+        hold = owed.supplier_hold(values.supplier)  # as B2B and the schedule refuse it
+        if hold:
+            frappe.throw(hold)
         staff = frappe.db.get_value("Employee", employee, ["name", "company", "status", "employee_name"], as_dict=True)
         if not staff:
             frappe.throw(f"Employee {employee} not found.")
@@ -324,7 +396,7 @@ def make_advance(doctype: str, name: str, employee: str, amount=None, purpose: s
         if own:
             frappe.throw(f"You may not pay an advance to yourself: {own}", frappe.PermissionError)
         phone, account = staff_phone(employee)
-        left, _advances, result = _left(doctype, name, for_update=True)
+        left, result = _left(doctype, name, for_update=True)  # locking reads of its advances and payouts
         amount = flt(amount, 2) if flt(amount) else int(left + 0.001)
         if amount != int(amount):
             frappe.throw(f"M-Pesa B2C pays whole shillings only: KES {money(amount)}.")
@@ -380,8 +452,8 @@ def document_state(doctype: str, name: str) -> dict:
     out["advances"] = [{"name": a.name, "employee": a.employee, "employee_name": a.employee_name,
                         "amount": flt(a.advance_amount, 2), "paid": flt(a.paid_amount, 2), "open": _open(a, settled),
                         "posting_date": cstr(a.posting_date)} for a in advances]
-    if listed and not owed.document_problems(doctype, values):
-        left, _advances, _result = _left(doctype, name)
+    if listed and not owed.document_problems(doctype, values) and not owed.supplier_hold(values.supplier):
+        left, _result = _left(doctype, name)
         out.update(allowed=left >= B2C_MIN_AMOUNT, left=int(left + 0.001))
     if doctype == PI and cint(values.docstatus) == 1:
         to_settle = flt(min(sum(max(_open(a, settled), 0) for a in advances), flt(values.outstanding_amount)), 2)
@@ -399,15 +471,20 @@ def settle_staff_advances(invoice: str) -> dict:
     """One Journal Entry settling the invoice's staff advances: debit the supplier against the
     invoice, credit each advance's account against it (HRMS counts it returned to the advance),
     each at most what it has open, in all at most the invoice's outstanding. Under the invoice's
-    lock. {journal_entry (None when nothing is settled), settled: [(advance, amount)], left}."""
-    with owed.doc_lock(PI, invoice):
-        values = frappe.db.get_value(PI, invoice, list(INVOICE_FIELDS), as_dict=True, for_update=True)
-        if not values or cint(values.docstatus) != 1 or cint(values.is_return):
+    lock and each advance's (settle_lock): an order's advance is settled by whichever of the order's
+    invoices comes first, and the other then reads what that one committed (locking reads).
+    {journal_entry (None when nothing is settled), settled: [(advance, amount)], left}."""
+    with owed.doc_lock(PI, invoice), contextlib.ExitStack() as locks:
+        found = frappe.db.get_value(PI, invoice, ["docstatus", "is_return"], as_dict=True)
+        if not found or cint(found.docstatus) != 1 or cint(found.is_return):
             return {"journal_entry": None, "settled": [], "left": 0}
+        for name in sorted({a.name for a in advances_of(PI, invoice)}):
+            locks.enter_context(settle_lock(name))
+        advances = advances_of(PI, invoice, for_update=True)
+        settled = settled_amounts([a.name for a in advances], for_update=True)
+        values = frappe.db.get_value(PI, invoice, list(INVOICE_FIELDS), as_dict=True, for_update=True)  # last (R4)
         left = flt(values.outstanding_amount, 2)
         lines = []
-        advances = advances_of(PI, invoice)
-        settled = settled_amounts(a.name for a in advances)
         for advance in advances:
             if advance.mpesa_supplier != values.supplier or advance.company != values.company:
                 continue
@@ -430,6 +507,15 @@ def settle_staff_advances(invoice: str) -> dict:
         for advance, take in lines:
             frappe.get_doc(EA, advance.name).add_comment("Comment", text)
     return {"journal_entry": je.name, "settled": [(a.name, t) for a, t in lines], "left": left}
+
+
+def settle_lock(advance: str):
+    """One staff advance's settlement lock, held until commit: the invoices of one order each settle
+    its advance, one at a time."""
+    from ..money_in.common import named_lock
+
+    return named_lock(f"pay-via-staff-settle:{advance}",
+                      busy=f"{advance} is being settled against another invoice. Try again in a minute.")
 
 
 def build_settle_entry(values, lines):

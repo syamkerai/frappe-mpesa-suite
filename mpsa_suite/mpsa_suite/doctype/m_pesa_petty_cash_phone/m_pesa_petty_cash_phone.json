@@ -65,7 +65,8 @@
    "fieldname": "expected_name",
    "fieldtype": "Data",
    "label": "Name on M-Pesa",
-   "description": "The name M-Pesa shows for this number (who the line is registered to). The name M-Pesa gives on the first top-up is checked against it."
+   "reqd": 1,
+   "description": "The name M-Pesa shows for this number, from a test or the SIM's registration. Needed to approve the phone: the name M-Pesa gives on its first top-up is checked against it."
   },
   {
    "fieldname": "enabled",

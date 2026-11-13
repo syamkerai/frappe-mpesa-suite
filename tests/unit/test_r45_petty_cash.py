@@ -119,12 +119,13 @@ def test_text_that_is_no_payment_sms_is_refused(reader, text, message):
 def test_typed_fields_must_agree_with_the_sms_and_fill_it(reader):
     pc, frappe = reader
     spend = pc.spend_values(TILL_SMS, receipt="ukd1abc2de", amount="1500", sms_date="2026-11-13", sms_time="10:15:00",
-                            charge=5, payee="Shell Kilimani station")
-    assert (spend.receipt, spend.amount, spend.charge, spend.payee, spend.text) == (
-        "UKD1ABC2DE", 1500.0, 5.0, "Shell Kilimani station", " ".join(TILL_SMS.split()))
+                            charge=0, payee="shell  kilimani")
+    assert (spend.receipt, spend.amount, spend.charge, spend.payee, spend.sms_payee, spend.text) == (
+        "UKD1ABC2DE", 1500.0, 0.0, "SHELL KILIMANI", "SHELL KILIMANI", " ".join(TILL_SMS.split()))
     for field, value, label in (("amount", 1600, "amount"), ("receipt", "UKD1ABC2DX", "receipt"),
                                 ("sms_date", "2026-11-12", "date"), ("sms_time", "10:16", "time"),
-                                ("balance", 8000, "new balance")):
+                                ("balance", 8000, "new balance"), ("charge", 5, "transaction charge"),
+                                ("payee", "Shell Kilimani station", "name paid")):
         with pytest.raises(frappe.ValidationError, match=f"The {label} typed"):
             pc.spend_values(TILL_SMS, **{field: value})
 
@@ -154,13 +155,15 @@ def env(payroll_env, monkeypatch):  # noqa: F811
                                                       "accounting_error", "party_type", "party", "result_desc"))
     monkeypatch.setitem(columns, JE, columns[JE] + ("clearance_date",))
     monkeypatch.setitem(columns, PE, columns[PE] + ("clearance_date", "mpesa_petty_cash_phone", "mpesa_sms_time",
-                                                    "mpesa_sms_balance", "mpesa_sms_payee", "mpesa_sms_text"))
-    monkeypatch.setitem(columns, TOP_UP, ("name", "idx", "parent", "parenttype", "amount", "status", "payout",
-                                          "request", "receipt", "paid_on", "journal_entry"))
+                                                    "mpesa_sms_balance", "mpesa_sms_has_balance", "mpesa_sms_payee",
+                                                    "mpesa_sms_text"))
+    monkeypatch.setitem(columns, TOP_UP, ("name", "idx", "parent", "parenttype", "amount", "status", "requested_by",
+                                          "requested_on", "payout", "request", "receipt", "paid_on", "receiver_name",
+                                          "journal_entry", "note"))
     monkeypatch.setitem(columns, GLE, ("name", "account", "debit", "credit", "is_cancelled"))
     monkeypatch.setitem(columns, BTP, ("name", "parent", "payment_document", "payment_entry", "allocated_amount"))
     monkeypatch.setitem(columns, BT, ("name", "docstatus"))
-    frappe.db.columns = frappe.db.columns | {(PE, "mpesa_petty_cash_phone")}
+    frappe.db.columns = frappe.db.columns | {(PE, "mpesa_petty_cash_phone"), (PE, "mpesa_sms_has_balance")}
     # the payout's own accounting services (ERPNext's modules): never reached for a top-up
     for name in ("mpsa_suite.accounting.payment_entry_service", "mpsa_suite.accounting.journal_service"):
         stub = types.ModuleType(name)
@@ -307,7 +310,8 @@ def top_up_row(env, name=None):
 def draft(env, **kw):
     doc = fake_frappe.FakeDoc(env.frappe, PHONE, {
         "name": "PCP-00002", "docstatus": 0, "company": "Astral", "phone": "0711 000 777", "phone_label": None,
-        "holder": "EMP-3", "petty_cash_account": "Petty Cash 2 - AIL", "default_cost_center": None,
+        "expected_name": "ACHIENG MARY", "holder": "EMP-3", "petty_cash_account": "Petty Cash 2 - AIL",
+        "default_cost_center": None,
         "charges_account": None, "top_up_limit": 5000, "float_ceiling": 15000, "owner": ACCOUNTS,
         "entered_by": ACCOUNTS, **kw})
     env.frappe.db.table("Account")["Petty Cash 2 - AIL"] = {"name": "Petty Cash 2 - AIL", "company": "Astral",
@@ -767,9 +771,13 @@ def test_what_the_order_or_invoice_shows(spends):
 
 # ---------------------------------------------------------------- the book against the last SMS, the daily section
 def spend_entry(env, name, amount, when, balance, docstatus=1):
+    """A recorded spend as Frappe stores it: a Currency left empty is 0.0 (base_document.get_valid_dict), so
+    SMS Gave a Balance is what says the SMS had none."""
     env.frappe.db.table(PE)[name] = {"name": name, "docstatus": docstatus, "paid_amount": amount, "posting_date":
                                      when.date(), "mpesa_petty_cash_phone": "PCP-00001", "mpesa_sms_time": when,
-                                     "mpesa_sms_balance": balance, "creation": when, "reference_no": name}
+                                     "mpesa_sms_balance": 0.0 if balance is None else balance,
+                                     "mpesa_sms_has_balance": 0 if balance is None else 1, "creation": when,
+                                     "reference_no": name}
 
 
 def paid_top_up(env, name, amount, when):
@@ -896,8 +904,8 @@ def test_the_payment_entry_and_purchase_fields(monkeypatch):
         migrate.create_till_payment_fields()
         (fields,) = made
         pe = {f["fieldname"]: f for f in fields["Payment Entry"]}
-        assert set(pe) == {"mpesa_petty_cash_phone", "mpesa_sms_time", "mpesa_sms_balance", "mpesa_sms_payee",
-                           "mpesa_sms_text"}
+        assert set(pe) == {"mpesa_petty_cash_phone", "mpesa_sms_time", "mpesa_sms_balance", "mpesa_sms_has_balance",
+                           "mpesa_sms_payee", "mpesa_sms_text"}
         assert pe["mpesa_petty_cash_phone"]["options"] == PHONE
         assert all(f["read_only"] and f["no_copy"] for f in pe.values())
         for doctype in ("Purchase Order", "Purchase Invoice"):

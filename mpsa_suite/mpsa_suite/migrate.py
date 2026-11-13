@@ -28,12 +28,13 @@ def after_migrate():
         create_payment_entry_mpesa_fields()
         backfill_b2b_entry_status()
         create_bulk_payout_dimensions()  # round 4.5: the bulk payout rows' dimensions
+        # round 4.5: the petty cash phone's spends and Pay via Staff (money_out.petty_cash, pay_via_staff): the
+        # Payment Entry and Purchase Order / Invoice fields whatever is installed, the Employee Advance's with HRMS
+        create_till_payment_fields()
 
     if is_app_installed("hrms"):
         create_custom_hrms_fields()
         create_claim_payee_fields()
-        # round 4.5: the petty cash phone's spends and Pay via Staff (money_out.petty_cash, pay_via_staff)
-        create_till_payment_fields()
 
 
 def create_bulk_payout_dimensions():
@@ -744,11 +745,16 @@ def till_payment_fields() -> dict:
             {"fieldname": "mpesa_sms_time", "fieldtype": "Datetime", "label": "SMS Date and Time",
              "insert_after": "mpesa_petty_cash_phone", "read_only": 1, "no_copy": 1, "depends_on": spend},
             {"fieldname": "mpesa_sms_balance", "fieldtype": "Currency", "label": "New M-Pesa Balance (SMS)",
-             "options": "KES", "insert_after": "mpesa_sms_time", "read_only": 1, "no_copy": 1, "depends_on": spend,
+             "options": "KES", "insert_after": "mpesa_sms_time", "read_only": 1, "no_copy": 1,
+             "depends_on": "eval:doc.mpesa_petty_cash_phone && doc.mpesa_sms_has_balance",
              "description": "The phone's balance the SMS gave: the daily check compares the book balance with "
                             "the last."},
+            # Frappe stores a Currency left empty as 0: whether the SMS gave a balance at all is said here
+            {"fieldname": "mpesa_sms_has_balance", "fieldtype": "Check", "label": "SMS Gave a Balance",
+             "insert_after": "mpesa_sms_balance", "read_only": 1, "no_copy": 1, "hidden": 1, "default": "0",
+             "description": "The SMS gave the phone's new balance: only such a spend is compared with the books."},
             {"fieldname": "mpesa_sms_payee", "fieldtype": "Data", "label": "Paid To (SMS)",
-             "insert_after": "mpesa_sms_balance", "read_only": 1, "no_copy": 1, "depends_on": spend},
+             "insert_after": "mpesa_sms_has_balance", "read_only": 1, "no_copy": 1, "depends_on": spend},
             {"fieldname": "mpesa_sms_text", "fieldtype": "Small Text", "label": "M-Pesa SMS",
              "insert_after": "mpesa_sms_payee", "read_only": 1, "no_copy": 1, "depends_on": spend},
         ],
@@ -770,4 +776,22 @@ def till_payment_fields() -> dict:
 
 
 def create_till_payment_fields():
-    create_fields(till_payment_fields())
+    """The till payment fields (till_payment_fields): the Payment Entry's and the Purchase Order and
+    Invoice's on every site with ERPNext, the Employee Advance's only with HRMS (a required app, but
+    a spend never waits for it). Then spends recorded before SMS Gave a Balance existed get it from
+    the balance they stored (one stored as 0 had none, or is unknowable). Idempotent."""
+    fields = till_payment_fields()
+    if not is_app_installed("hrms"):
+        fields.pop("Employee Advance", None)
+    create_fields(fields)
+    backfill_sms_has_balance()
+
+
+def backfill_sms_has_balance():
+    if not frappe.db.has_column("Payment Entry", "mpesa_sms_has_balance"):
+        return
+    frappe.db.sql(
+        """UPDATE `tabPayment Entry` SET mpesa_sms_has_balance = 1
+        WHERE COALESCE(mpesa_petty_cash_phone, '') != '' AND COALESCE(mpesa_sms_has_balance, 0) = 0
+          AND COALESCE(mpesa_sms_balance, 0) != 0"""
+    )
