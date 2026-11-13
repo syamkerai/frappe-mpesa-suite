@@ -315,6 +315,12 @@ class MpesaB2CConnector(BaseAPIConnector, B2CConnector):
             if v is not None:
                 setattr(req, k, v)
         req.save(ignore_permissions=True)
+        if req.status == "Paid":
+            from mpsa_suite.money_out import known_names
+
+            # round 4.5: the name M-Pesa paid this phone under, shown before every later payout to it
+            # (once per Result: a re-sent one returned above; never raises but a deadlock)
+            known_names.record_b2c(req)
 
         if self.integration_request:
             # The callback log takes Integration Request statuses, not the payout's: upstream's

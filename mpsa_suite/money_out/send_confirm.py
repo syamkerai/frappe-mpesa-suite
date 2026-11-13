@@ -15,9 +15,14 @@ them but the two server flows that are the deliberate step:
   the document's ``modified``, its amounts and its destination. It can be used from 5 seconds to
   10 minutes after it is issued, and once (the browser keeps Confirm disabled for those 5
   seconds too), like Pay Selected's (money_out.schedule).
-- ``confirm_send(doctype, name, token)``: checks everything again under the document's row lock,
-  takes the token, compares what it is bound to, and submits (or approves) the document inside
-  ``deliberate``.
+- ``confirm_send(doctype, name, token, acknowledged)``: checks everything again under the document's
+  row lock, takes the token, compares what it is bound to, and submits (or approves) the document
+  inside ``deliberate``.
+- Round 4.5, the M-Pesa names (money_out.known_names): the summary's ``known_names`` gives each row the
+  name M-Pesa gave its phone, till or paybill before, the typed or expected name, and the verdict
+  (match, differs, new), with the counts in a header. A payout with a row that differs or is new is
+  sent only when the sender ticked the acknowledgement it states: the dialog keeps Confirm off until
+  then, and ``confirm_send`` refuses without ``acknowledged`` (the names read again at the confirm).
 - ``deliberate(reason, doc)``: for server code that is itself the deliberate step (Pay Selected's
   confirm, the jobs that make a sent disbursement's B2C requests): documents submitted inside
   pass ``assert_deliberate``. With ``doc``, only that one.
@@ -64,7 +69,12 @@ CHANGED = {"modified": "it was saved again", "amount": "the amount", "destinatio
 # An Expense Claim's payee line (money_out.claim_payees): a merchant or casual payee paid straight from the claim
 CLAIM_PAYEE = "M-Pesa Claim Payee"
 PAYEE_FIELDS = ("name", "idx", "parent", "parenttype", "payee_type", "payee_name", "bank_paybill", "shortcode",
-                "account_number", "phone", "amount", "destination_key")
+                "account_number", "phone", "amount", "destination_key", "typed_name")
+# Round 4.5: the payouts whose rows' M-Pesa names must be acknowledged when one differs or is new
+# (a payee account's Approve shows the names but asks nothing)
+NAMED = (B2B, B2C, B2C_REQUEST)
+# A row's (destination key, typed or expected name) while the summary is built; never shown
+KNOWN = "_known"
 
 
 def _clock() -> float:
@@ -147,9 +157,11 @@ def prepare_send(doctype: str, name: str, modified: str | None = None) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def confirm_send(doctype: str, name: str, token: str) -> dict:
+def confirm_send(doctype: str, name: str, token: str, acknowledged=None) -> dict:
     """Send (or approve) ``name`` with the token ``prepare_send`` gave this user: once, no sooner
-    than 5 seconds after it was made, and only if nothing it is bound to has changed."""
+    than 5 seconds after it was made, and only if nothing it is bound to has changed. A payout with
+    a row whose M-Pesa name differs or is new needs ``acknowledged`` (round 4.5: the summary's
+    ``known_names.acknowledge``, ticked)."""
     token = cstr(token).strip()
     if not token:
         frappe.throw(_("Press {0} first.").format(_(action(doctype))))
@@ -172,6 +184,7 @@ def confirm_send(doctype: str, name: str, token: str) -> dict:
     if changed:
         frappe.throw(_("{0} changed after you pressed {1} ({2}). Reload it and press {1} again.")
                      .format(name, button, ", ".join(changed)))
+    _check_acknowledged(doc, acknowledged)
     with deliberate(action(doctype), doc):
         doc.submit()
     return {"name": doc.name, "docstatus": cint(doc.docstatus), "status": doc.get("status")}
@@ -190,7 +203,8 @@ def send_for_test(doc):
     data = get_cache().get_value(key)
     data["issued_at"] = flt(data.get("issued_at")) - CONFIRM_DELAY  # as if the summary was read
     get_cache().set_value(key, data, expires_in_sec=TOKEN_SECONDS)
-    confirm_send(doc.doctype, doc.name, summary["token"])
+    # the M-Pesa names' box ticked, as a sender does (round 4.5)
+    confirm_send(doc.doctype, doc.name, summary["token"], acknowledged=1)
     return frappe.get_doc(doc.doctype, doc.name)
 
 
@@ -289,10 +303,11 @@ def _payee_lines(names) -> dict:
     return lines
 
 
-def _payee_row(line, destination, amount, charge=None) -> dict:
+def _payee_row(line, destination, amount, charge=None, key=None) -> dict:
     """A payout of an Expense Claim's payee line: the receiver is the payee the claim names (the
     claimant is only who is reimbursed in the books), and the destination says it is no approved
-    account unless it is a supplier's."""
+    account unless it is a supplier's. ``key``: where the payout pays (known_names), named against
+    the name the claimant gave (Name Given, else the Payee Name)."""
     expected = None
     if line.approved_account:
         expected = frappe.db.get_value(SUPPLIER_ACCOUNT, line.approved_account, "expected_name")
@@ -301,8 +316,28 @@ def _payee_row(line, destination, amount, charge=None) -> dict:
         destination += " " + _("(payee of Expense Claim {0}, not an approved account)").format(line.parent)
     party = _("payee on {0}, claimant {1}").format(line.parent, line.claimant or _("not named"))
     document = _("Expense Claim {0}, payee row #{1}").format(line.parent, line.idx)
-    return _row(cstr(line.payee_name).strip() or _("Not named"), destination, amount, charge, document, party,
-                expected)
+    row = _row(cstr(line.payee_name).strip() or _("Not named"), destination, amount, charge, document, party,
+               expected)
+    return _named(row, key, expected or line.get("typed_name") or line.payee_name)
+
+
+def _named(row: dict, key, typed) -> dict:
+    """The row with where it pays and the name it is paid under, for the M-Pesa names (round 4.5);
+    ``_summary`` takes them off the row."""
+    row[KNOWN] = (key, cstr(typed).strip() or None) if key else None
+    return row
+
+
+def _phone_key(phone) -> str | None:
+    from . import known_names
+
+    return known_names.key_of(known_names.PHONE, phone)
+
+
+def _b2b_key(doc) -> str | None:
+    from . import known_names
+
+    return known_names.key_of(known_names.b2b_kind(doc.get("command_id")), doc.get("receiver_shortcode"))
 
 
 def _b2b_payee_destination(doc, line) -> str:
@@ -324,7 +359,7 @@ def _b2b_rows(doc) -> list:
     payee = cstr(doc.get("claim_payee")).strip()
     line = _payee_lines([payee]).get(payee) if payee else None
     if line:
-        return [_payee_row(line, _b2b_payee_destination(doc, line), doc.get("amount"))]
+        return [_payee_row(line, _b2b_payee_destination(doc, line), doc.get("amount"), key=_b2b_key(doc))]
     if cstr(doc.get("employee")).strip():
         party_type, party, account_doctype = "Employee", doc.employee, EMPLOYEE_ACCOUNT
         account = doc.get("employee_mpesa_account")
@@ -345,8 +380,11 @@ def _b2b_rows(doc) -> list:
         destination += " " + _("(a number not saved on a supplier)")
     document = next((f"{_(dt)} {doc.get(f)}" for f, dt in B2B_DOCUMENTS if cstr(doc.get(f)).strip()), None)
     receiver = _party_name(party_type, party) if party else _("Not saved on a supplier")
-    return [_row(receiver, destination, doc.get("amount"), None, document, party,
-                 acc.get("expected_name") if acc else None, acc.get("account_holder_name") if acc else None)]
+    expected = acc.get("expected_name") if acc else None
+    row = _row(receiver, destination, doc.get("amount"), None, document, party, expected,
+               acc.get("account_holder_name") if acc else None)
+    # the name M-Pesa should show: the approved account's, else the party's (a number on no supplier: none)
+    return [_named(row, _b2b_key(doc), expected or (receiver if party else None))]
 
 
 def _b2c_send_rows(doc) -> list:
@@ -364,26 +402,38 @@ def _b2c_rows(doc) -> list:
         document = f"{_(row.reference_doctype)} {row.reference_name}" if row.get("reference_name") else None
         amount = row.get("allocated_amount")
         phone = _("M-Pesa phone {0}").format(shown_phone(row.get("partyb")))
+        key = _phone_key(row.get("partyb"))
         line = payees.get(cstr(row.get("claim_payee")).strip())
         if line:  # a casual payee of a claim: the row's party is the claimant, who is not who is paid
-            out.append(_payee_row(line, phone, amount, _b2c_charge(amount)))
+            out.append(_payee_row(line, phone, amount, _b2c_charge(amount), key=key))
             continue
         if partyless.handler_for(row.get("reference_doctype")):
             # a row that pays a person no party names: who is paid is what its document says
             found = partyless.describe(row)
-            out.append(_row(cstr(found.get("receiver")).strip() or _("Not named"), phone, amount, _b2c_charge(amount),
-                            found.get("document") or document, found.get("party"), found.get("expected_name")))
+            receiver = cstr(found.get("receiver")).strip()
+            out.append(_named(_row(receiver or _("Not named"), phone, amount, _b2c_charge(amount),
+                                   found.get("document") or document, found.get("party"), found.get("expected_name")),
+                              key, found.get("expected_name") or receiver))
             continue
-        out.append(_row(_party_name(party_type, row.get("party")), phone, amount, _b2c_charge(amount), document,
-                        row.get("party")))
+        receiver = _party_name(party_type, row.get("party"))
+        out.append(_named(_row(receiver, phone, amount, _b2c_charge(amount), document, row.get("party")), key,
+                          _account_name(row.get("payee_account_doctype"), row.get("payee_account")) or receiver))
     return out
+
+
+def _account_name(doctype, account) -> str | None:
+    """The name M-Pesa shows for an approved payee account a row is locked to (its Expected Name)."""
+    if doctype not in ACCOUNTS or not cstr(account).strip():
+        return None
+    return cstr(frappe.db.get_value(doctype, account, "expected_name")).strip() or None
 
 
 def _b2c_request_rows(doc) -> list:
     document = f"{_(doc.reference_doctype)} {doc.reference_name}" if doc.get("reference_name") else None
-    return [_row(_party_name(doc.get("party_type"), doc.get("party")) or _("Not named"),
-                 _("M-Pesa phone {0}").format(shown_phone(doc.get("phone_number"))), doc.get("amount"),
-                 _b2c_charge(doc.get("amount")), document, doc.get("party"))]
+    receiver = _party_name(doc.get("party_type"), doc.get("party"))
+    row = _row(receiver or _("Not named"), _("M-Pesa phone {0}").format(shown_phone(doc.get("phone_number"))),
+               doc.get("amount"), _b2c_charge(doc.get("amount")), document, doc.get("party"))
+    return [_named(row, _phone_key(doc.get("phone_number")), receiver)]
 
 
 def _reversal_rows(doc) -> list:
@@ -397,6 +447,8 @@ def _reversal_rows(doc) -> list:
 def _account_rows(doc) -> list:
     from . import party_accounts as pa
 
+    from . import known_names
+
     p = pa.profile(doc)
     party = doc.get(p.party_field)
     if doc.get("account_type") == pa.PHONE:
@@ -406,8 +458,11 @@ def _account_rows(doc) -> list:
     else:
         destination = _bank_destination(doc, doc.get("shortcode"), doc.get("account_number")) or _(
             "Paybill {0}, account {1}").format(doc.get("shortcode"), doc.get("account_number"))
-    return [_row(_party_name(p.party_type, party), destination, party=party, expected_name=doc.get("expected_name"),
-                 document=_(doc.get("account_type") or ""), account_holder=doc.get("account_holder_name"))]
+    row = _row(_party_name(p.party_type, party), destination, party=party, expected_name=doc.get("expected_name"),
+               document=_(doc.get("account_type") or ""), account_holder=doc.get("account_holder_name"))
+    phone = doc.get("account_type") == pa.PHONE
+    key = known_names.key_of(doc.get("account_type"), doc.get("phone") if phone else doc.get("shortcode"))
+    return [_named(row, key, doc.get("expected_name"))]
 
 
 ROWS = {B2B: _b2b_rows, B2C: _b2c_rows, B2C_REQUEST: _b2c_request_rows, REVERSAL: _reversal_rows,
@@ -550,8 +605,35 @@ def _warnings(doc) -> list:
     return out
 
 
-def _summary(doc) -> dict:
+def _rows_and_names(doc) -> tuple:
+    """(rows, known_names): the summary's rows and their M-Pesa names (known_names.summary: None when
+    no row pays a phone, till or paybill). Only a payout's names ask for the acknowledgement."""
+    from . import known_names
+
     rows = ROWS[doc.doctype](doc)
+    targets = [row.pop(KNOWN, None) for row in rows]
+    return rows, known_names.summary(targets, acknowledge=doc.doctype in NAMED)
+
+
+def _ticked(value) -> bool:
+    return cstr(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _check_acknowledged(doc, acknowledged) -> None:
+    """Round 4.5: a payout with a row whose number M-Pesa knows under another name, or never paid, is
+    sent only when the sender ticked that they checked them (the names read again now: a Result that
+    came since counts)."""
+    if doc.doctype not in NAMED or _ticked(acknowledged):
+        return
+    names = _rows_and_names(doc)[1]
+    if names and names.get("acknowledge"):
+        frappe.throw(_("{0} pays numbers whose M-Pesa names need checking ({1}). Tick \"{2}\" and press {3} again.")
+                     .format(doc.name, names["header"], names["acknowledge"], _(action(doc.doctype))),
+                     title=_("Check the M-Pesa names"))
+
+
+def _summary(doc) -> dict:
+    rows, names = _rows_and_names(doc)
     amounts = [r["amount"] for r in rows if r["amount"] is not None]
     charges = [r["charge"] for r in rows if r["amount"] is not None]
     known = bool(charges) and all(c is not None for c in charges)
@@ -567,4 +649,6 @@ def _summary(doc) -> dict:
         "prepared_by": doc.owner, "changed_by": doc.get("modified_by"), "entered_by": doc.get("entered_by"),
         "proof": doc.get("proof"), "modified": cstr(doc.modified),
         "problems": _problems(doc), "warnings": _warnings(doc),
+        # round 4.5: each row's M-Pesa name, the counts, and what the sender acknowledges (rows by position)
+        "known_names": names,
     }

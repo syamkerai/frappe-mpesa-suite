@@ -570,7 +570,9 @@ def test_a_batch_of_party_less_rows_is_sent_its_proofs_one_person_at_a_time(env)
 
 
 def test_the_name_lookups_read_party_less_payouts(env):
-    paid_payout(env, 1, receiver_public_name="254711000333 - JANE WANJIKU MUTHONI")
+    _row, request = paid_payout(env, 1, receiver_public_name="254711000333 - JANE WANJIKU MUTHONI")
+    # round 4.5: the names are read from the M-Pesa Known Name list, which the payout's Result adds to
+    importlib.import_module("mpsa_suite.money_out.known_names").record_b2c(env.frappe.db.table(REQ)[request])
     cp = importlib.import_module("mpsa_suite.money_out.claim_payees")
     known = cp.mpesa_names(["0711 000 333"])["254711000333"]
     assert (known.name, known.payout) == ("JANE WANJIKU MUTHONI", "B2C-71")

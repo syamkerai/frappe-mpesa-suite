@@ -277,16 +277,18 @@ def _defines(dotted: str) -> bool:
 
 
 def test_desk_scripts_include_the_send_confirmation():
-    # app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js")]
+    # app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js"), _versioned("mpsa_known_names.js")]
     calls = _hooks()["app_include_js"].elts
-    assert [(c.func.id, c.args[0].value) for c in calls] == [("_versioned", "utils.js"), ("_versioned", "mpsa_send.js")]
+    assert [(c.func.id, c.args[0].value) for c in calls] == [("_versioned", "utils.js"), ("_versioned", "mpsa_send.js"),
+                                                             ("_versioned", "mpsa_known_names.js")]
     assert (APP / "public" / "js" / "mpsa_send.js").is_file()
+    assert (APP / "public" / "js" / "mpsa_known_names.js").is_file()  # round 4.5: the known M-Pesa names' badges
 
 
 def test_desk_script_urls_change_when_the_script_does(tmp_path, monkeypatch):
     # /assets is served immutable for a year: a changed script must be a new URL, an unchanged one the same
     assets = importlib.import_module("mpsa_suite.assets")
-    for name in ("utils.js", "mpsa_send.js"):
+    for name in ("utils.js", "mpsa_send.js", "mpsa_known_names.js"):
         url = assets.versioned(name)
         assert re.fullmatch(rf"/assets/mpsa_suite/js/{re.escape(name)}\?v=[0-9a-f]{{12}}", url), url
         assert assets.versioned(name) == url

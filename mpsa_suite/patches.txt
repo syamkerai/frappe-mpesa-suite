@@ -16,3 +16,4 @@ mpsa_suite.mpsa_suite.patches.relink_b2c_reference_rows
 mpsa_suite.mpsa_suite.patches.payout_lines_from_upgrade_date
 mpsa_suite.mpsa_suite.patches.claim_payee_name_verdict
 mpsa_suite.mpsa_suite.patches.retry_stk_prompts_refused_on_draft_orders
+mpsa_suite.mpsa_suite.patches.known_mpesa_names

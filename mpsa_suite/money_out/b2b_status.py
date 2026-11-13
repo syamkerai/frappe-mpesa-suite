@@ -351,6 +351,9 @@ def fill(doc, values: dict, source: str) -> list:
     doc.add_comment("Comment", f"{', '.join(LABELS[f] for f in filled)} filled from {source}.")
     if "receiver_public_name" in update:
         check_receiver_name(doc, name)
+        from . import known_names
+
+        known_names.record_b2b(doc, name)  # round 4.5: the name the Result left out (a till's), kept once
     from . import schedule
     from .statement import after_payout
 
@@ -399,6 +402,9 @@ def settle(doc, query, outcome: str, values: dict) -> None:
     claim_payees.on_payout_result(B2B_DOCTYPE, doc.name)  # and an Expense Claim's payee line
     if outcome == "Paid":
         check_receiver_name(doc, update["receiver_public_name"])
+        from . import known_names
+
+        known_names.record_b2b(doc, update["receiver_public_name"])  # round 4.5 (nothing kept when it names no one)
         frappe.enqueue(
             "mpsa_suite.money_out.b2b.book_payment_entry",
             queue="short",

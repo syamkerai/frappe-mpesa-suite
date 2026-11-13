@@ -990,40 +990,32 @@ def masked_name(received) -> str:
 
 
 def mpesa_names(numbers) -> dict:
-    """{2547...: _dict(name, payout, paid_on)}: the name M-Pesa last paid each phone under (a Paid B2C
-    payout's ReceiverPartyPublicName without its number; one naming another number is skipped, and a
-    salary's payout is never read), the payout and when (round 4.3). A phone M-Pesa never paid is
-    not in it: its line keeps the typed name. A party-less payout (money_out.partyless: a bulk
-    payout sheet's row, a petty cash top-up) names no party type, so it is read like any other."""
+    """{2547...: _dict(name, payout, paid_on)}: the name M-Pesa last paid each phone under, the payout
+    and when (round 4.3), read from the M-Pesa Known Name list (round 4.5, money_out.known_names: kept
+    from every Paid B2C payout's ReceiverPartyPublicName without its number, party-less ones too, and
+    from the payouts before by the migrate). As before: a name M-Pesa gave with another number in
+    front is never kept, and a salary's name is never read (a phone seen on salaries only is left
+    out; a record of a phone also paid otherwise holds those payouts only). A phone M-Pesa never paid
+    is not in it: its line keeps the typed name."""
     wanted = {m for m in (normalize_msisdn(n) for n in numbers or []) if m}
     if not wanted:
         return {}
-    forms = [form for m in sorted(wanted) for form in (m, "0" + m[3:], "+" + m)]
-    rows = frappe.get_all(B2C_REQUEST, filters={"phone_number": ["in", forms], "status": "Paid",
-                                                "receiver_public_name": ["is", "set"]},
-                          fields=["name", "phone_number", "receiver_public_name", "transaction_completed_datetime",
-                                  "creation", "reference_doctype", "party_type"],
-                          order_by="transaction_completed_datetime desc, creation desc")
-    # never a salary's payout (salary_access: a Salary Slip, or an employee paid for no claim or advance)
-    rows = [r for r in rows if r.get("reference_doctype") != "Salary Slip" and not (
-        r.get("party_type") == "Employee" and r.get("reference_doctype") not in ("Expense Claim", "Employee Advance"))]
-    rows.sort(key=lambda r: cstr(r.transaction_completed_datetime or r.creation), reverse=True)
+    from . import known_names
+
     found = {}
-    for r in rows:
-        msisdn = normalize_msisdn(r.phone_number)
-        prefix = number_prefix(r.receiver_public_name)
-        name = _without_number(r.receiver_public_name)
-        if msisdn not in wanted or msisdn in found or not name:
+    for key, known in known_names.lookup(f"B2C:{m}" for m in sorted(wanted)).items():
+        msisdn = key.partition(":")[2]
+        if msisdn not in wanted or known.salary_only or not cstr(known.name).strip():
             continue
-        if prefix and prefix.isdigit() and normalize_msisdn(prefix) != msisdn:
-            continue  # M-Pesa named another number: not this phone's name
-        found[msisdn] = frappe._dict(name=name, payout=r.name,
-                                     paid_on=r.transaction_completed_datetime or r.creation)
+        found[msisdn] = frappe._dict(name=known.name, payout=known.last_payout, paid_on=known.last_seen)
     return found
 
 
 def name_from(known) -> str:
-    """Where a line's M-Pesa name comes from: 'B2C-26-10-000081, paid 2026-10-29'."""
+    """Where a line's M-Pesa name comes from: 'B2C-26-10-000081, paid 2026-10-29' ('M-Pesa, seen
+    2026-10-29' for a name no payout of ours gave, e.g. an SMS's)."""
+    if not known.payout:
+        return f"M-Pesa, seen {cstr(known.paid_on)[:10]}"
     return f"{known.payout}, paid {cstr(known.paid_on)[:10]}"
 
 

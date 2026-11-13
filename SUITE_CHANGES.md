@@ -7,6 +7,54 @@ Branch `astral-suite`, based on upstream `version-16` (newest features: STK pay 
 bundled Safaricom certs, Pull Transactions fixes). Package name stays `frappe_mpsa_payments` so all
 callback URLs already registered with Safaricom keep working and `bench migrate` upgrades in place.
 
+## Know who you pay: the M-Pesa name at every step (2026-11-13, branch r4-5-bulk-payout)
+
+Daraja has no Hakikisha: nothing names the receiver before the money leaves. Every Result does, so
+every name M-Pesa ever gave a phone, till or paybill is now kept and shown wherever a payout is typed,
+approved or sent, to catch a wrong number first. **`bench migrate` is needed** (a new DocType and one
+patch); then clear the cache (a new desk script).
+
+- **New DocType M-Pesa Known Name** (`money_out.known_names`), one record per destination, named by its
+  key: `B2C:2547…`, `TILL:835811`, `PAYBILL:400200` (a paybill's name is the paybill's, whatever the
+  account number: the payee accounts' `PB:400200:ACC` reads as `PAYBILL:400200`). It holds the name
+  without the number in front, the text as M-Pesa sent it, first and last seen, times paid, the last
+  payout, the source (B2C Result, B2B Result, SMS, History), Salary Only and Bank Paybill.
+  - Written by the system only: the roles that prepare, approve or send payouts read it; nobody
+    creates or changes a record (`check_system_write`).
+  - **Salary Only**: every payout seen to the number was a salary (a Salary Slip, or an employee paid
+    for no claim or advance). Shown only to who may see salaries (`salary_access`, hooked as
+    `has_permission` and `permission_query_conditions`); others see "Paid before". Once a payout that
+    is no salary pays it, the record keeps only such payouts: nothing others see comes from a salary.
+  - **Bank Paybill**: the paybill is on M-Pesa Bank Paybill. M-Pesa shows the bank's name, never the
+    account holder's, and the badge says so.
+- **Kept going forward**, once per payout, under a savepoint (an error is logged and never stops the
+  payout; a deadlock is raised as before):
+  - the B2C Result callback, when the payout becomes Paid (`b2c_connector.handle_callback`);
+  - the B2B Result (`b2b._record_result`), and a Transaction Status answer that names a till the
+    Result left unnamed or settles the payout (`b2b_status.fill`, `settle`).
+  - A name whose number in front is another number's is never kept (`claim_payees._same_number`).
+- **Backfilled once** by the patch `known_mpesa_names` from the Paid B2C Disbursement Requests and
+  Mpesa B2B Payment Requests: the latest name, first and last seen, the count. Idempotent; a few
+  seconds for Astral's ~2,700 payouts.
+- **Read by:**
+  - `claim_payees.mpesa_names` and the claim's `mpesa_name` (round 4.3): the same answers, now from
+    the list (never a salary's name, never another number's);
+  - **Send via M-Pesa**, for B2B and B2C: each row shows M-Pesa's name, the name given or expected and
+    the verdict; the header counts them ("60 known and matching · 4 under another name · 5 new").
+    When a row differs or is new, the sender ticks "I checked the 4 different names and 5 new
+    numbers…" before Confirm works, and `confirm_send` refuses without it (the names are read again
+    at the confirm). A payee account's Approve shows the name and asks nothing;
+  - a badge on the desk (`public/js/mpsa_known_names.js`, through `known_names.for_destinations`):
+    Supplier and Employee M-Pesa Accounts, the B2B request form, payment schedule lines, claim payee
+    lines and B2C Payment Disbursement rows. Green "M-Pesa: NAME · paid N times, last 28 Oct", orange
+    "M-Pesa knows this number as NAME", blue "New number: never paid; check it with the person".
+- For the next features (bulk sheet, petty cash phone, Pay via Staff): `known_names.lookup`, `verdict`,
+  `summary`, `observe` (an SMS's name), and the desk's `mpsa_known_names.show`, `show_rows`, `fetch`.
+
+Tests: `tests/unit/test_r45_known_names.py` (47); the patch list in `test_rename_safeguards.py`, the desk
+scripts in `test_r4_foundation.py`; two confirms in `test_send_confirm.py` tick the box; the 4.3 and 4.5
+name fixtures record their payouts in the list.
+
 ## Bulk casual payouts made easy (2026-11-13, branch r4-4-bulk-casual)
 
 Found on 13 Nov 2026. At Astral, 69 casuals (KES 247,652) were typed into a site's own older payee

@@ -259,6 +259,11 @@ def _record_result(result: dict, ref: str | None) -> None:
         except Exception:
             frappe.log_error(title="M-Pesa B2B receiver name check failed",
                              message=f"{doc.name}\n{frappe.get_traceback()}")
+        from . import known_names
+
+        # round 4.5: the name M-Pesa paid this till or paybill under, shown before every later payout to it (a
+        # till's Result names no one: its status answer does, b2b_status.fill); never raises but a deadlock
+        known_names.record_b2b(doc, values.get("ReceiverPartyPublicName"))
         frappe.enqueue(
             "mpsa_suite.money_out.b2b.book_payment_entry",
             queue="short",

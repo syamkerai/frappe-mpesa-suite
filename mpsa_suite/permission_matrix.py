@@ -91,6 +91,14 @@ DOCTYPES = {
         SM: "rwcdRe", MM: "rwcdRe",
         AM: "rRe", AU: "rRe", HM: "rRe", HU: "rRe", PM: "rRe", MP: "rRe", MV: "rRe",
     },
+    # Round 4.5: the name M-Pesa gave each phone, till and paybill it paid, shown wherever a payout is typed,
+    # approved or sent. Read by who prepares (PREPARE_ROLES), approves (M-Pesa Manager, Expense Approver;
+    # Purchase Manager enters supplier accounts) or sends (PAYOUT_ROLES) payouts; written by the system only
+    # (money_out.known_names), a salary-only record shown only to who may see salaries (its hooks).
+    "M-Pesa Known Name": {
+        MM: "rRe",
+        MP: "r", AM: "r", AU: "r", HM: "r", HU: "r", EA: "r", PM: "r",
+    },
     "M-Pesa Suite Settings": {SM: "rwcpmh", MM: "rwcpmh"},
     "Mpesa API Client": {SM: "rwcdRepmh", MM: "rwcdRepmh"},
     "Mpesa B2B Payment Request": {
@@ -336,6 +344,8 @@ ENDPOINTS = {
     "mpsa_suite.money_out.claim_payees.parse_payees": ("Write the Expense Claim (create one, before its first save)", ("perm",)),
     # round 4.3: the name M-Pesa paid a payee's phone under before (M-Pesa shows it to any sender)
     "mpsa_suite.money_out.claim_payees.mpesa_name": ("Create or write Expense Claims", ("perm",)),
+    # round 4.5: the known M-Pesa names of the destinations a form shows (salary-only names hidden by salary_access)
+    "mpsa_suite.money_out.known_names.for_destinations": ("Read M-Pesa Known Name", ("perm",)),
     "mpsa_suite.money_out.claim_payees.repair_reimbursed": ("ADMIN_ROLES + read the Expense Claim", ("roles:ADMIN_ROLES", "perm")),
     "mpsa_suite.money_out.claim_payees.settle_line": (
         "ADMIN_ROLES, a named login + read the Expense Claim", ("roles:ADMIN_ROLES", "via:require_named_user", "perm")),

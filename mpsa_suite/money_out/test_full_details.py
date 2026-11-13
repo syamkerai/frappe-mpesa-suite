@@ -1,13 +1,14 @@
 """Bench tests (round 4.3): a migrated site shows numbers and names in full (M-Pesa Suite Settings >
 Show Numbers and Names in Full, ticked by the migrate's defaults), and the name M-Pesa last paid a phone
-under is read from the site's B2C payouts: the latest Paid one, in any stored form of the number."""
+under is read from the site's B2C payouts: the latest Paid one, in any stored form of the number (round
+4.5: through the M-Pesa Known Name list each Result adds to)."""
 
 import datetime
 
 import frappe
 
 from mpsa_suite.compat import IntegrationTestCase
-from mpsa_suite.money_out import claim_payees
+from mpsa_suite.money_out import claim_payees, known_names
 from mpsa_suite.utils import privacy
 
 REQ = "B2C Disbursement Request"
@@ -27,6 +28,8 @@ class TestFullDetails(IntegrationTestCase):
         doc.name = frappe.generate_hash(length=12)
         doc.docstatus = 1
         doc.db_insert()  # rolled back with the test
+        # round 4.5: the names are read from the M-Pesa Known Name list, which each Result adds to
+        known_names.record_b2c(doc)
         return doc.name
 
     def test_the_name_mpesa_paid_a_phone_under_is_read_from_the_sites_payouts(self):

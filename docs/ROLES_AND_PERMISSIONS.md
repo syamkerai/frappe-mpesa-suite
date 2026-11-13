@@ -218,6 +218,7 @@ Letters: `r` read, `w` write, `c` create, `s` submit, `x` cancel, `a` amend, `d`
 | B2C Payment Disbursement | `rRep` | `rwcsxadRepmh` | `rwsRp` |  | `rRep` | `rwcadRepmh` |  | `rwcadRepmh` | `rwcadRepmh` | `rwcadRepmh` |  |  |  |
 | Employee M-Pesa Account |  | `rwcsxadRepmh` |  |  |  |  |  | `rwcaRepmh` | `rwcaRep` |  |  |  |  |
 | M-Pesa Bank Paybill | `rwcdRe` | `rwcdRe` | `rRe` |  | `rRe` | `rRe` | `rRe` | `rRe` | `rRe` |  |  | `rRe` |  |
+| M-Pesa Known Name |  | `rRe` | `r` |  |  | `r` | `r` | `r` | `r` | `r` |  | `r` |  |
 | M-Pesa Payment Schedule | `rRep` | `rwcdRepmh` | `rRep` |  | `rRep` | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |
 | M-Pesa Suite Settings | `rwcpmh` | `rwcpmh` |  |  |  |  |  |  |  |  |  |  |  |
 | Mpesa API Client | `rwcdRepmh` | `rwcdRepmh` |  |  |  |  |  |  |  |  |  |  |  |
@@ -324,6 +325,7 @@ Every endpoint checks on the server. `direct`: the role gate applies to HTTP cal
 | `money_out.employee_documents.prepare_b2b` | PREPARE_ROLES + read the claim / advance + create the request | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_b2c` | PREPARE_ROLES + read the claim / advance + create the disbursement | roles:PREPARE_ROLES, perm |
 | `money_out.employee_documents.prepare_bulk` | PREPARE_ROLES + read each claim / advance + create the payouts | roles:PREPARE_ROLES, perm |
+| `money_out.known_names.for_destinations` | Read M-Pesa Known Name | perm |
 | `money_out.payment_print.proof_recipients` | Read the payout | perm |
 | `money_out.payroll.from_payroll_entry` | PREPARE_ROLES who may see salaries + read the Payroll Entry + create a schedule | roles:PREPARE_ROLES, via:require_salary_reader, perm |
 | `money_out.payroll.from_salary_slip` | PREPARE_ROLES who may see salaries + create a schedule + read the Salary Slip | via:require_salary_preparer, perm |

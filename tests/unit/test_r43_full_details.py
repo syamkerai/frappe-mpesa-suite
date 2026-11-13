@@ -28,6 +28,8 @@ def paid(env, name, phone, received, minutes=0, status="Paid", **values):
                                       "reference_doctype": CLAIM, "party_type": "Employee", **values,
                                       "transaction_completed_datetime": AT + datetime.timedelta(minutes=minutes),
                                       "creation": AT + datetime.timedelta(minutes=minutes)}
+    # round 4.5: the names are read from the M-Pesa Known Name list, which each Result adds to
+    importlib.import_module("mpsa_suite.money_out.known_names").record_b2c(env.frappe.db.table(REQ)[name])
 
 
 # ---------------------------------------------------------------- the setting

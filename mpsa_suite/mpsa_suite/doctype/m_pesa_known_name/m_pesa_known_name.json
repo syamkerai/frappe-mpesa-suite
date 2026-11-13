@@ -1,0 +1,191 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:destination_key",
+ "creation": "2026-11-13 12:00:00.000000",
+ "description": "The name M-Pesa gave a phone, till or paybill when it paid it: one record per destination, written by the system from every paid B2C and B2B result (and once from the payouts before). Daraja names no one before the money leaves, so this name is shown wherever a payout is typed, approved or sent. A bank's paybill shows the bank's name, never the account holder's.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "destination_key",
+  "destination_type",
+  "number",
+  "mpesa_name",
+  "received",
+  "column_break_main",
+  "times_paid",
+  "first_seen",
+  "last_seen",
+  "last_payout_doctype",
+  "last_payout",
+  "flags_section",
+  "source",
+  "column_break_flags",
+  "salary_only",
+  "bank"
+ ],
+ "fields": [
+  {
+   "fieldname": "destination_key",
+   "fieldtype": "Data",
+   "label": "Destination Key",
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "description": "B2C:2547... for a phone, TILL:835811 for a till, PAYBILL:400200 for a paybill (every account number at it)."
+  },
+  {
+   "fieldname": "destination_type",
+   "fieldtype": "Select",
+   "label": "Destination Type",
+   "options": "Phone\nTill\nPaybill",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "number",
+   "fieldtype": "Data",
+   "label": "Number",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "mpesa_name",
+   "fieldtype": "Data",
+   "label": "Name on M-Pesa",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "The name M-Pesa gave when it last paid this number, without the number in front."
+  },
+  {
+   "fieldname": "received",
+   "fieldtype": "Data",
+   "label": "As M-Pesa Sent It",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "times_paid",
+   "fieldtype": "Int",
+   "label": "Times Paid",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "first_seen",
+   "fieldtype": "Datetime",
+   "label": "First Seen",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_seen",
+   "fieldtype": "Datetime",
+   "label": "Last Seen",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "last_payout_doctype",
+   "fieldtype": "Link",
+   "label": "Last Payout Type",
+   "options": "DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_payout",
+   "fieldtype": "Dynamic Link",
+   "label": "Last Payout",
+   "options": "last_payout_doctype",
+   "read_only": 1
+  },
+  {
+   "fieldname": "flags_section",
+   "fieldtype": "Section Break",
+   "label": "Source"
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "B2C Result\nB2B Result\nSMS\nHistory",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "Where the name last came from: a B2C or B2B result, an M-Pesa SMS, or the payouts made before this list existed."
+  },
+  {
+   "fieldname": "column_break_flags",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "salary_only",
+   "fieldtype": "Check",
+   "label": "Seen on Salary Payouts Only",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "Every payout seen to this number was a salary: shown only to those who may see salaries. Once another payout pays it, only payouts that are no salary count."
+  },
+  {
+   "fieldname": "bank",
+   "fieldtype": "Check",
+   "label": "Bank Paybill",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "A bank's paybill (M-Pesa Bank Paybill): M-Pesa shows the bank's name, never who holds the account."
+  }
+ ],
+ "in_create": 1,
+ "links": [],
+ "modified": "2026-11-13 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Mpsa Suite",
+ "name": "M-Pesa Known Name",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "M-Pesa Manager"
+  },
+  {
+   "read": 1,
+   "role": "M-Pesa Payer"
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager"
+  },
+  {
+   "read": 1,
+   "role": "Accounts User"
+  },
+  {
+   "read": 1,
+   "role": "HR Manager"
+  },
+  {
+   "read": 1,
+   "role": "HR User"
+  },
+  {
+   "read": 1,
+   "role": "Expense Approver"
+  },
+  {
+   "read": 1,
+   "role": "Purchase Manager"
+  }
+ ],
+ "search_fields": "number,mpesa_name",
+ "sort_field": "last_seen",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "mpesa_name",
+ "track_changes": 0
+}

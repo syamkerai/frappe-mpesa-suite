@@ -43,7 +43,8 @@ add_to_apps_screen = [
 # (assets.py). Private import name: Frappe collects every public name in hooks.py as a hook.
 from mpsa_suite.assets import versioned as _versioned  # noqa: E402
 
-app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js")]
+# mpsa_known_names.js: the name M-Pesa gave each number before, as a badge where payouts are typed and approved
+app_include_js = [_versioned("utils.js"), _versioned("mpsa_send.js"), _versioned("mpsa_known_names.js")]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/mpsa_suite/css/mpsa_suite.css"
@@ -196,6 +197,9 @@ has_permission = {dt: "mpsa_suite.money_out.salary_access.has_permission" for dt
 # their Versions too (System Manager reads every Version): salary_access.version_*
 permission_query_conditions["Version"] = "mpsa_suite.money_out.salary_access.version_query_conditions"
 has_permission["Version"] = "mpsa_suite.money_out.salary_access.version_has_permission"
+# the known M-Pesa names (round 4.5): a name seen on salary payouts only, for who may see salaries
+permission_query_conditions["M-Pesa Known Name"] = "mpsa_suite.money_out.known_names.query_conditions"
+has_permission["M-Pesa Known Name"] = "mpsa_suite.money_out.known_names.has_permission"
 
 # DocType Class
 # ---------------

@@ -282,7 +282,8 @@ def test_confirm_works_after_five_seconds_and_submits_inside_the_deliberate_step
         env.sc.confirm_send(B2B, "MB2B-1", token)
     assert env.submitted == []  # an early press does not use the token
     env.clock[0] += 0.2
-    assert env.sc.confirm_send(B2B, "MB2B-1", token)["docstatus"] == 1
+    # round 4.5: the paybill was never paid (a new number): the sender ticks that they checked it
+    assert env.sc.confirm_send(B2B, "MB2B-1", token, acknowledged=1)["docstatus"] == 1
     assert env.submitted == [(B2B, "MB2B-1", [("Send via M-Pesa", (B2B, "MB2B-1"))])]
     assert env.frappe.flags.get(env.sc.FLAG) is None  # the step ended with the submit
 
@@ -293,7 +294,7 @@ def test_a_token_is_used_once_whatever_happens(env):
     env.clock[0] += 6
     env.refuse_submit = "M-Pesa is down"
     with pytest.raises(env.frappe.ValidationError, match="M-Pesa is down"):
-        env.sc.confirm_send(B2B, "MB2B-1", token)
+        env.sc.confirm_send(B2B, "MB2B-1", token, acknowledged=1)
     env.refuse_submit = None
     with pytest.raises(env.frappe.ValidationError, match="expired or was used already"):
         env.sc.confirm_send(B2B, "MB2B-1", token)
